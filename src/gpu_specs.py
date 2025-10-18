@@ -5,6 +5,21 @@ A List of GPU Specs to include in the prompt
 
 
 GPU_SPEC_INFO = {
+    "RTX_4070_Laptop": {
+        "GPU Architecture": "Ada",
+        "GPU Memory": "8GB GDDR6",
+        "Memory Bandwidth": "256 GB/s",
+        "CUDA Cores": "4,608",
+        "RT Cores": "36 (3rd generation)",
+        "Tensor Cores": "144 (4th generation)",
+        "FP32 TFLOPS": "15.6",
+        "TGP (Total Graphics Power)": "35-140W (configurable)",
+        "Register File Size": "64K 32-bit registers per SM",
+        "Maximum number of registers per thread": "255",
+        "Maximum number of thread blocks per SM": "24",
+        "Shared memory capacity per SM": "100 KB",
+        "Maximum shared memory per thread block": "99 KB",
+    },
     "L40S": {
         "GPU Architecture": "Ada",
         "GPU Memory": "48GB GDDR6 with ECC",
