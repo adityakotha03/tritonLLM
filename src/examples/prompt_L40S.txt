@@ -1,0 +1,192 @@
+You write custom Triton kernels to replace the pytorch operators in the given architecture to get speedups. 
+
+You have complete freedom to choose the set of operators you want to replace. You may make the decision to replace some operators with custom Triton kernels and leave others unchanged. You may replace multiple operators with custom implementations, consider operator fusion opportunities (combining multiple operators into a single kernel, for example, combining matmul+relu), or algorithmic changes (such as online softmax). You are only limited by your imagination.
+
+
+Here is some information about the underlying hardware that you should keep in mind.
+
+The GPU that will run the kernel is NVIDIA L40S, Ada architecture.
+
+    - We have 48GB GDDR6 with ECC of GPU Memory.
+- We have 864 GB/s of Memory Bandwidth.
+- We have 212 of RT Core Performance TFLOPS.
+- We have 91.6 of FP32 TFLOPS.
+- We have 183.2 (366 with sparsity) of TF32 Tensor Core TFLOPS.
+- We have 362.05 (733 with sparsity) of FP16 Tensor Core TFLOPS.
+- We have 733 (1466 with sparsity) of FP8 Tensor Core TFLOPS.
+- We have 733 (1466 with sparsity) of Peak INT8 Tensor TOPS.
+- We have 733 (1466 with sparsity) of Peak INT4 Tensor TOPS.
+- We have 64K 32-bit registers per SM of Register File Size.
+- We have 255 of Maximum number of registers per thread.
+- We have 24 of Maximum number of thread blocks per SM.
+- We have 100 KB of Shared memory capacity per SM.
+- We have 99 KB of Maximum shared memory per thread block.
+
+
+Here are some concepts about the GPU architecture that could be helpful:
+
+    - Program/Thread Block: In Triton, a program instance processes a block of data. Each program maps to a CUDA thread block and operates on BLOCK_SIZE elements.
+- program_id: tl.program_id(axis) returns the index of the current program instance along a given axis, used to determine which block of data to process.
+- BLOCK_SIZE: A compile-time constant (tl.constexpr) that defines how many elements each program processes. Must be a power of 2 for optimal performance.
+- Warp: A group of 32 threads that execute in lockstep. Triton automatically manages warp-level operations for vectorized loads/stores.
+- Shared Memory: Fast on-chip memory shared by threads in a block. Triton implicitly uses it for block-level operations without explicit management.
+- Register: The fastest memory, private to each thread. Triton automatically allocates registers for intermediate computations.
+- Memory Coalescing: Accessing contiguous memory addresses across threads in a warp to maximize memory bandwidth. Triton encourages this through block operations.
+- Memory Bandwidth: The rate at which data can be transferred between GPU memory and compute units. Critical bottleneck for memory-bound operations.
+- Tensor Cores: Specialized hardware units for fast matrix operations. Use fp16/bf16/tf32 data types to leverage them in Triton kernels.
+- Grid: The arrangement of program instances launched. Defined as a lambda function in Triton: grid = lambda meta: (num_blocks,).
+- Masking: Using boolean masks in tl.load/tl.store to handle boundary conditions and prevent out-of-bounds memory accesses.
+- Autotuning: Triton's feature to automatically search for optimal BLOCK_SIZE and other parameters using the @triton.autotune decorator.
+
+
+Here are some best practices for writing Triton kernels on GPU:
+
+    - Choose optimal BLOCK_SIZE values - typically powers of 2 (128, 256, 512, 1024) for better hardware utilization.
+- Minimize data transfers between CPU (host) and GPU (device) - keep data on GPU whenever possible.
+- Use appropriate grid sizes to maximize SM (Streaming Multiprocessor) occupancy across the GPU.
+- Ensure memory accesses are coalesced by using contiguous memory access patterns with tl.arange() and proper offsets.
+- Leverage shared memory implicitly through Triton's block-level operations to reduce global memory accesses.
+- Use masking (tl.load with mask parameter) to handle boundary conditions and avoid out-of-bounds accesses.
+- Consider operator fusion - combine multiple operations (e.g., matmul + activation) into a single kernel to reduce memory traffic.
+- Avoid branch divergence within a block - minimize conditional operations that vary across threads in the same warp.
+- Use appropriate data types (fp16, bf16, fp32) based on the GPU architecture's tensor core capabilities for better performance.
+- Leverage Triton's autotuning capabilities to find optimal kernel configurations for different input sizes.
+- Consider algorithmic optimizations like online softmax, flash attention patterns, or tiling strategies for better cache utilization.
+
+Here's an example to show you the syntax of inline embedding custom Triton kernels in torch: The example given architecture is: 
+
+``` 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Model(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, a, b):
+        return a + b
+
+
+def get_inputs():
+    # randomly generate input tensors based on the model architecture
+    a = torch.randn(1, 128).cuda()
+    b = torch.randn(1, 128).cuda()
+    return [a, b]
+
+
+def get_init_inputs():
+    # randomly generate tensors required for initialization based on the model architecture
+    return []
+
+``` 
+
+The example new arch with custom Triton kernels looks like this: 
+
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def add_kernel(
+    x_ptr,  # Pointer to first input
+    y_ptr,  # Pointer to second input
+    out_ptr,  # Pointer to output
+    n_elements,  # Total number of elements in input/output
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
+    # Perform the elementwise addition
+    out = x + y
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def triton_add(x: torch.Tensor, y: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda and y.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    y = y.contiguous()
+
+    # Prepare output tensor
+    out = torch.empty_like(x)
+
+    # Number of elements in the tensor
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    add_kernel[grid](x, y, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, a, b):
+        # Instead of "return a + b", call our Triton-based addition
+        return triton_add(a, b)
+``` 
+
+        
+You are given the following architecture:
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    """
+    Simple model that performs a ReLU activation.
+    """
+    def __init__(self):
+        super(Model, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies ReLU activation to the input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor of any shape.
+
+        Returns:
+            torch.Tensor: Output tensor with ReLU applied, same shape as input.
+        """
+        return torch.relu(x)
+
+batch_size = 16
+dim = 16384
+
+def get_inputs():
+    x = torch.randn(batch_size, dim)
+    return [x]
+
+def get_init_inputs():
+    return []  # No special initialization inputs needed
+```
+
+Optimize the architecture named Model with custom Triton kernels! Name your optimized output architecture ModelNew. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Just output the new model code, no other text, and NO testing code! 
+
