@@ -1,0 +1,9 @@
+{
+    "input": {
+        "ref_arch_src": "import torch\nimport torch.nn as nn\n\nclass Model(nn.Module):\n    def __init__(self):\n        super(Model, self).__init__()\n    \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return torch.relu(x)\n\nbatch_size = 16\ndim = 16384\n\ndef get_inputs():\n    x = torch.randn(batch_size, dim)\n    return [x]\n\ndef get_init_inputs():\n    return []",
+        "generated_code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n@triton.jit\ndef relu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):\n    pid = tl.program_id(axis=0)\n    block_start = pid * BLOCK_SIZE\n    offsets = block_start + tl.arange(0, BLOCK_SIZE)\n    mask = offsets < n_elements\n    x = tl.load(x_ptr + offsets, mask=mask)\n    output = tl.maximum(x, 0.0)\n    tl.store(output_ptr + offsets, output, mask=mask)\n\ndef triton_relu(x):\n    output = torch.empty_like(x)\n    n_elements = x.numel()\n    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)\n    relu_kernel[grid](x, output, n_elements, BLOCK_SIZE=1024)\n    return output\n\nclass ModelNew(nn.Module):\n    def __init__(self):\n        super(ModelNew, self).__init__()\n    \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return triton_relu(x)\n\nbatch_size = 16\ndim = 16384\n\ndef get_inputs():\n    x = torch.randn(batch_size, dim)\n    return [x]\n\ndef get_init_inputs():\n    return []",
+        "num_correct_trials": 5,
+        "num_perf_trials": 100,
+        "compile_with_inductor": 0
+    }
+}

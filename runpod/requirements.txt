@@ -1,0 +1,5 @@
+runpod==1.7.5
+torch==2.9.0
+triton==3.5.0
+pydantic==2.10.2
+numpy==2.1.3
