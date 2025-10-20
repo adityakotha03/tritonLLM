@@ -190,6 +190,7 @@ GPU_SPEC_INFO = {
 - [x] GPU-aware prompting with hardware specs
 - [x] Automated correctness and performance evaluation
 - [x] Reference baseline benchmarking
+- [x] Added Support for Cloud eval with Runpod serverless
 - [ ] Tree-of-thought reasoning for multi-step optimization
 - [ ] Multi-turn iterative refinement
 - [ ] Support for more LLM providers (Anthropic, DeepSeek, etc.)
