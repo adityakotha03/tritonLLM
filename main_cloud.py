@@ -34,6 +34,8 @@ try:
     print("\n" + "="*60)
     print("BENCHMARK RESULTS")
     print("="*60)
+    print(f"Hardware:    {result['metadata']['hardware']}")
+    print(f"Device:    {result['metadata']['device']}")
     print(f"Compiled:    {result['compiled']}")
     print(f"Correctness: {result['correctness']} {result['metadata'].get('correctness_trials', '')}")
     print(f"\nPerformance Comparison:")
