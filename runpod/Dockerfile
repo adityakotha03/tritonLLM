@@ -1,19 +1,6 @@
-FROM nvidia/cuda:12.9.0-devel-ubuntu24.04
+FROM python:3.12-slim
 
 WORKDIR /
-
-# Install Python 3.12 and venv
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-venv \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create and activate virtual environment
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt /
 
