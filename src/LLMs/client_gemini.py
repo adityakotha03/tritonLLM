@@ -34,7 +34,9 @@ if __name__ == "__main__":
     from src.utils.common import read_file, clean_markdown_code
     REPO_TOP_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    client = genai.Client()
+    client = genai.Client(
+        api_key=os.environ.get("GEMINI_API_KEY"),
+    )
     ref_arch_src = read_file(os.path.join(REPO_TOP_PATH, "examples", "model_ex_add.py"))
     prompt = construct_prompt_zero_shot(gpu_name="L40S", ref_arch_src=ref_arch_src)
     
