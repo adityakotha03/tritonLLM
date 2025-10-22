@@ -19,9 +19,12 @@ class KernelExecResult(BaseModel):
     metadata: dict = {}
     runtime: float = -1.0  # in ms, custom kernel runtime
     runtime_stats: dict = {}  # custom kernel runtime stats
-    ref_runtime: float = -1.0  # in ms, reference PyTorch model runtime
-    ref_runtime_stats: dict = {}  # reference model runtime stats
+    ref_runtime: float = -1.0  # in ms, reference PyTorch model runtime (without torch.compile)
+    ref_runtime_stats: dict = {}  # reference model runtime stats (without torch.compile)
+    ref_runtime_compiled: float = -1.0  # in ms, reference PyTorch model runtime (with torch.compile)
+    ref_runtime_compiled_stats: dict = {}  # reference model runtime stats (with torch.compile)
     speedup: float = -1.0  # speedup factor (ref_runtime / runtime)
+    speedup_vs_compiled: float = -1.0  # speedup factor vs compiled reference (ref_runtime_compiled / runtime)
 
 def eval_kernel_against_ref(
     original_model_src: str,
@@ -32,7 +35,6 @@ def eval_kernel_against_ref(
     verbose: bool = False,
     measure_performance: bool = False,
     build_dir: os.PathLike = None,
-    compile_with_inductor: bool = False,  # whether to compile the original model with inductor backend
     device: Union[torch.device, int] = (
         torch.cuda.current_device() if torch.cuda.is_available() else None
     ),  # have to run on GPU
@@ -194,12 +196,10 @@ def eval_kernel_against_ref(
                     for x in inputs
                 ]
                 
-                # Benchmark Reference Model
+                # Benchmark Reference Model (without torch.compile)
                 if verbose:
-                    print("[Eval] Benchmarking Reference Model")
+                    print("[Eval] Benchmarking Reference Model (without torch.compile)")
                 original_model_on_device = original_model.cuda(device=device)
-                if compile_with_inductor:
-                    original_model_on_device = torch.compile(original_model_on_device, backend="inductor")
                 torch.cuda.synchronize(device=device)
                 
                 ref_elapsed_times = time_execution_with_cuda_event(
@@ -212,7 +212,25 @@ def eval_kernel_against_ref(
                 ref_runtime_stats = get_timing_stats(ref_elapsed_times, device=device)
                 
                 if verbose:
-                    print(f"[Eval] Reference Performance Stats: {ref_runtime_stats}")
+                    print(f"[Eval] Reference Performance Stats (without compile): {ref_runtime_stats}")
+                
+                # Benchmark Reference Model (with torch.compile)
+                if verbose:
+                    print("[Eval] Benchmarking Reference Model (with torch.compile)")
+                original_model_compiled = torch.compile(original_model.cuda(device=device), backend="inductor")
+                torch.cuda.synchronize(device=device)
+                
+                ref_compiled_elapsed_times = time_execution_with_cuda_event(
+                    original_model_compiled,
+                    *inputs,
+                    num_trials=num_perf_trials,
+                    verbose=verbose,
+                    device=device,
+                )
+                ref_runtime_compiled_stats = get_timing_stats(ref_compiled_elapsed_times, device=device)
+                
+                if verbose:
+                    print(f"[Eval] Reference Performance Stats (with compile): {ref_runtime_compiled_stats}")
                 
                 # Benchmark Custom Model
                 if verbose:
@@ -232,16 +250,22 @@ def eval_kernel_against_ref(
                 if verbose:
                     print(f"[Eval] Custom Model Performance Stats: {runtime_stats}")
                 
-                # Calculate speedup
+                # Calculate speedups
                 speedup = ref_runtime_stats["mean"] / runtime_stats["mean"]
+                speedup_vs_compiled = ref_runtime_compiled_stats["mean"] / runtime_stats["mean"]
+                
                 if verbose:
-                    print(f"[Eval] Speedup: {speedup:.3f}x")
+                    print(f"[Eval] Speedup vs uncompiled reference: {speedup:.3f}x")
+                    print(f"[Eval] Speedup vs compiled reference: {speedup_vs_compiled:.3f}x")
                 
                 kernel_exec_result.runtime = runtime_stats["mean"]
                 kernel_exec_result.runtime_stats = runtime_stats
                 kernel_exec_result.ref_runtime = ref_runtime_stats["mean"]
                 kernel_exec_result.ref_runtime_stats = ref_runtime_stats
+                kernel_exec_result.ref_runtime_compiled = ref_runtime_compiled_stats["mean"]
+                kernel_exec_result.ref_runtime_compiled_stats = ref_runtime_compiled_stats
                 kernel_exec_result.speedup = speedup
+                kernel_exec_result.speedup_vs_compiled = speedup_vs_compiled
         except Exception as e:
             if verbose:
                 print(f"[Eval] Error in Measuring Performance: {e}")

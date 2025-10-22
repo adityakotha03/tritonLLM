@@ -28,8 +28,7 @@ if __name__ == "__main__":
         measure_performance=True,
         num_correct_trials=5,
         num_perf_trials=100,
-        backend="triton",
-        compile_with_inductor=False # whether to compile the original model with inductor backend
+        backend="triton"
     )
     
     print("\n" + "="*60)
@@ -39,6 +38,8 @@ if __name__ == "__main__":
     print(f"Correctness: {eval_result.correctness} {eval_result.metadata.get('correctness_trials', '')}")
     print(f"\nPerformance Comparison:")
     print(f"  Reference PyTorch: {eval_result.ref_runtime:.4f} ms (avg)")
+    print(f"  Reference PyTorch (compiled): {eval_result.ref_runtime_compiled:.4f} ms (avg)")
     print(f"  Custom Triton:     {eval_result.runtime:.4f} ms (avg)")
     print(f"  Speedup:           {eval_result.speedup:.2f}x")
+    print(f"  Speedup vs compiled reference: {eval_result.speedup_vs_compiled:.2f}x")
     print("="*60)
