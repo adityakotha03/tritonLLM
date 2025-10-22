@@ -18,7 +18,6 @@ def handler(event):
     generated_code = input_data['generated_code']
     num_correct_trials = input_data['num_correct_trials']
     num_perf_trials = input_data['num_perf_trials']
-    compile_with_inductor = True if input_data['compile_with_inductor'] == 1 else False
     
     eval_result = eval_kernel_against_ref(
         ref_arch_src,
@@ -27,8 +26,7 @@ def handler(event):
         measure_performance=True,
         num_correct_trials=num_correct_trials,
         num_perf_trials=num_perf_trials,
-        backend="triton",
-        compile_with_inductor=compile_with_inductor
+        backend="triton"
     )
     
     print(eval_result)
