@@ -1,0 +1,11 @@
+Problem,Hardware,Device,Compiled,Correctness,Ref_PyTorch_Runtime_ms,Ref_PyTorch_Compiled_Runtime_ms,Triton_Runtime_ms,Speedup,Speedup_vs_Compiled,Status,Error_Message,Timestamp
+6_Matmul_with_large_K_dimension_,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object has no attribute 'split',2025-10-23 12:56:19
+23_Softmax,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object is not subscriptable,2025-10-23 13:00:37
+40_LayerNorm,NVIDIA A100-SXM4-80GB,0,True,True,9.9700,0.9030,2.7300,3.65,0.33,SUCCESS,,2025-10-23 13:02:21
+50_conv_standard_2D__square_input__square_kernel,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object is not subscriptable,2025-10-23 13:06:58
+90_cumprod,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object has no attribute 'split',2025-10-23 13:09:14
+1_Conv2D_ReLU_BiasAdd,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object is not subscriptable,2025-10-23 13:13:58
+3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-10-23 13:15:46
+35_Conv2d_Subtract_HardSwish_MaxPool_Mish,NVIDIA A100-SXM4-80GB,0,True,True,8.5200,6.9400,109.0000,0.08,0.06,SUCCESS,,2025-10-23 13:17:47
+66_Matmul_Dropout_Softmax,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object has no attribute 'split',2025-10-23 13:20:01
+97_Matmul_BatchNorm_BiasAdd_Divide_Swish,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object is not subscriptable,2025-10-23 13:23:12

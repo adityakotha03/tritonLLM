@@ -2,8 +2,12 @@ import runpod
 from dotenv import load_dotenv
 import os
 from src.LLMs.client_openai import generate_triton_code_zero_shot
+from src.LLMs.client_gemini import generate_triton_code_zero_shot
 from src.prompts import construct_prompt_zero_shot
 from src.utils.common import read_file, clean_markdown_code
+from google import genai
+
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 load_dotenv()
 runpod.api_key = os.getenv("RUNPOD_API_KEY")
@@ -16,7 +20,8 @@ gpu_name = "A100-80GB"
 prompt = construct_prompt_zero_shot(gpu_name=gpu_name, ref_arch_src=ref_arch_src)
 
 print("Generating Triton code...")
-result = generate_triton_code_zero_shot(prompt, model="gpt-5", max_completion_tokens=8192)
+# result = generate_triton_code_zero_shot(prompt, model="gpt-5", max_completion_tokens=16384)
+result = generate_triton_code_zero_shot(client, prompt)
 generated_code = clean_markdown_code(result)
 
 output_path = 'output/generated_triton_code.py'
@@ -34,7 +39,7 @@ try:
             "num_correct_trials": 5, 
             "num_perf_trials": 100
         },
-        timeout=600,
+        timeout=120,
     )
     
     print(result)

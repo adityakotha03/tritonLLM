@@ -10,7 +10,7 @@ if __name__ == "__main__":
     prompt = construct_prompt_zero_shot(gpu_name=gpu_name, ref_arch_src=ref_arch_src)
     
     print("Generating optimized Triton code...")
-    result = generate_triton_code_zero_shot(prompt, model="gpt-5", max_completion_tokens=8192)
+    result = generate_triton_code_zero_shot(prompt, model="gpt-5", max_completion_tokens=16384)
     
     
     output_path = 'output/generated_triton_code.py'
