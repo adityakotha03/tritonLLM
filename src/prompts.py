@@ -137,6 +137,221 @@ You are given the following architecture:
 
 
 
+def construct_idea_generation_prompt(
+    gpu_name: str,
+    ref_arch_src: str,
+    current_best_kernels: list,
+    previous_ideas: list,
+    round_number: int,
+    num_ideas: int = 3
+) -> str:
+    """
+    Construct a prompt for generating optimization ideas.
+    
+    Args:
+        gpu_name: Name of the GPU
+        ref_arch_src: Source code of the reference architecture
+        current_best_kernels: List of current best kernels with their performance
+        previous_ideas: List of previously attempted ideas
+        round_number: Current round number
+        num_ideas: Number of ideas to generate
+    
+    Returns:
+        Prompt string for idea generation
+    """
+    prompt = f"""You are an expert in GPU kernel optimization. Your task is to generate {num_ideas} diverse and creative optimization ideas for improving Triton kernel performance.
+
+The target GPU is NVIDIA {gpu_name}.
+
+"""
+    
+    # Add GPU specs if available
+    if gpu_name is not None:
+        gpu_specs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_specs.py")
+        if os.path.exists(gpu_specs_path):
+            gpu_spec_info_src = read_file(gpu_specs_path)
+            local_dict = {}
+            exec(gpu_spec_info_src, {}, local_dict)
+            GPU_SPEC_INFO = local_dict.get("GPU_SPEC_INFO", {})
+            
+            if gpu_name in GPU_SPEC_INFO:
+                curr_gpu_spec_info = GPU_SPEC_INFO[gpu_name]
+                prompt += f"GPU Architecture: {curr_gpu_spec_info.get('GPU Architecture', 'Unknown')}\n"
+                for key, value in curr_gpu_spec_info.items():
+                    if key != "GPU Architecture":
+                        prompt += f"- {key}: {value}\n"
+                prompt += "\n"
+    
+    prompt += f"""This is ROUND {round_number} of optimization.
+
+Here is the reference PyTorch code we are trying to optimize:
+
+```python
+{ref_arch_src}
+```
+
+"""
+    
+    if current_best_kernels:
+        prompt += f"""Current best kernels and their performance:
+
+"""
+        for i, kernel_info in enumerate(current_best_kernels[:5], 1):
+            speedup = kernel_info.get('speedup', 'N/A')
+            runtime = kernel_info.get('runtime', 'N/A')
+            idea = kernel_info.get('idea', 'Initial implementation')
+            prompt += f"""{i}. Speedup: {speedup}x | Runtime: {runtime}ms
+   Optimization: {idea}
+
+"""
+    
+    if previous_ideas:
+        prompt += f"""Previously attempted optimization ideas (avoid repeating these):
+
+"""
+        for i, idea in enumerate(previous_ideas[-10:], 1):  # Last 10 ideas
+            prompt += f"{i}. {idea}\n"
+        prompt += "\n"
+    
+    prompt += f"""Generate {num_ideas} NEW and DIVERSE optimization ideas that have NOT been tried before. Focus on different optimization categories:
+
+1. Memory Access Optimization (coalescing, banking, prefetching)
+2. Asynchronous Operations & Latency Hiding (async copies, double buffering)
+3. Data Type & Precision Optimization (FP16, BF16, mixed precision)
+4. Compute & Instruction Optimization (FMA, special instructions)
+5. Parallelism & Occupancy Enhancement (block size, grid size, warps)
+6. Control Flow & Loop Optimization (unrolling, pipeline)
+
+For each idea, provide:
+- A clear, concise description of the optimization strategy
+- Why it might improve performance on this specific hardware
+- What specific aspect it targets (memory, compute, parallelism, etc.)
+
+Format your response as a numbered list:
+
+1. [Optimization Idea 1]
+2. [Optimization Idea 2]
+3. [Optimization Idea 3]
+
+Be specific and concrete in your ideas. Avoid vague suggestions.
+"""
+    
+    return prompt
+
+
+def construct_implementation_prompt(
+    gpu_name: str,
+    ref_arch_src: str,
+    optimization_idea: str,
+    round_number: int
+) -> str:
+    """
+    Construct a prompt for implementing a specific optimization idea.
+    
+    Args:
+        gpu_name: Name of the GPU
+        ref_arch_src: Source code of the reference architecture
+        optimization_idea: The optimization idea to implement
+        round_number: Current round number
+    
+    Returns:
+        Prompt string for code implementation
+    """
+    
+    prompt = PROBLEM_STATEMENT
+    
+    # Add example if available
+    example_arch_path = os.path.join(REPO_TOP_PATH, f"src/examples/model_ex_add.py")
+    example_new_arch_path = os.path.join(
+        REPO_TOP_PATH, f"src/examples/model_new_ex_add_triton.py"
+    )
+
+    if os.path.exists(example_arch_path) and os.path.exists(example_new_arch_path):
+        example_arch = read_file(example_arch_path)
+        example_new_arch = read_file(example_new_arch_path)
+        
+        prompt += f"""
+Here's an example to show you the syntax of inline embedding custom Triton kernels in torch: The example given architecture is: \n
+``` \n
+{example_arch}
+``` \n
+The example new arch with custom Triton kernels looks like this: \n
+```
+{example_new_arch}
+``` \n
+        """
+    
+    if gpu_name is not None:
+        gpu_specs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_specs.py")
+        
+        if os.path.exists(gpu_specs_path):
+            gpu_spec_info_src = read_file(gpu_specs_path)
+            local_dict = {}
+            exec(gpu_spec_info_src, {}, local_dict)
+            
+            GPU_SPEC_INFO = local_dict.get("GPU_SPEC_INFO")
+            GPU_DEFINITIONS = local_dict.get("GPU_DEFINITIONS")
+            GPU_BEST_PRACTICES = local_dict.get("GPU_BEST_PRACTICES")
+            
+            if gpu_name in GPU_SPEC_INFO:
+                curr_gpu_spec_info = GPU_SPEC_INFO[gpu_name]
+                gpu_architecture = curr_gpu_spec_info.get("GPU Architecture")
+                
+                prompt += f"""
+Here is some information about the underlying hardware that you should keep in mind.
+
+The GPU that will run the kernel is NVIDIA {gpu_name}, {gpu_architecture} architecture.
+
+    """
+                
+                for key, value in curr_gpu_spec_info.items():
+                    if key == "GPU Architecture":
+                        continue
+                    prompt += f"- We have {value} of {key}.\n"
+                
+                prompt += """
+
+Here are some concepts about the GPU architecture that could be helpful:
+
+    """
+                for key, value in GPU_DEFINITIONS.items():
+                    prompt += f"- {key}: {value}\n"
+                
+                prompt += """
+
+Here are some best practices for writing Triton kernels on GPU:
+
+    """
+                for best_practice in GPU_BEST_PRACTICES:
+                    prompt += f"- {best_practice}\n"
+    
+    prompt += f"""
+
+This is ROUND {round_number} of optimization.
+
+OPTIMIZATION IDEA TO IMPLEMENT:
+{optimization_idea}
+
+You are given the following reference architecture:
+
+```python
+{ref_arch_src}
+```
+
+YOUR TASK:
+Implement the optimization idea described above by creating a ModelNew class with custom Triton kernels.
+- Focus specifically on implementing the suggested optimization strategy
+- Generate REAL, FUNCTIONAL code that compiles and runs correctly
+- Name your optimized architecture ModelNew
+- Output ONLY the new model code in a code block
+- NO pseudocode, NO testing code, NO explanations outside the code block
+
+Generate the optimized code now:
+"""
+    
+    return prompt
+
+
 if __name__ == "__main__":
     gpu = "L40S"
     ref_arch_src = read_file(os.path.join(REPO_TOP_PATH, "src", "examples", "19_ReLU.py"))

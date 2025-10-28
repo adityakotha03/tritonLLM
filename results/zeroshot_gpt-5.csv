@@ -1,0 +1,11 @@
+Problem,Hardware,Device,Compiled,Correctness,Ref_PyTorch_Runtime_ms,Ref_PyTorch_Compiled_Runtime_ms,Triton_Runtime_ms,Speedup,Speedup_vs_Compiled,Status,Error_Message,Timestamp
+6_Matmul_with_large_K_dimension_,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-10-23 12:30:40
+23_Softmax,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object is not subscriptable,2025-10-23 12:36:15
+40_LayerNorm,NVIDIA A100-SXM4-80GB,0,True,True,9.9600,0.8910,0.5760,17.29,1.55,SUCCESS,,2025-10-23 12:39:37
+50_conv_standard_2D__square_input__square_kernel,NVIDIA A100-SXM4-80GB,0,True,True,3.3300,2.7100,16.4000,0.20,0.17,SUCCESS,,2025-10-23 12:43:00
+90_cumprod,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-10-23 12:45:21
+1_Conv2D_ReLU_BiasAdd,NVIDIA A100-SXM4-80GB,0,True,True,7.2300,5.8500,6.0900,1.19,0.96,SUCCESS,,2025-10-23 12:46:17
+3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-10-23 12:48:32
+35_Conv2d_Subtract_HardSwish_MaxPool_Mish,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-10-23 12:49:45
+66_Matmul_Dropout_Softmax,NVIDIA A100-SXM4-80GB,0,True,True,4.4200,4.6700,8.9400,0.49,0.52,SUCCESS,,2025-10-23 12:53:00
+97_Matmul_BatchNorm_BiasAdd_Divide_Swish,NVIDIA A100-SXM4-80GB,0,True,True,8.4000,8.0200,7.9900,1.05,1.00,SUCCESS,,2025-10-23 12:54:49

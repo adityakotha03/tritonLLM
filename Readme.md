@@ -184,6 +184,23 @@ GPU_SPEC_INFO = {
 }
 ```
 
+## Search-Based Optimization (NEW!)
+
+We now support **search-based kernel optimization** inspired by [Stanford's CRFM blog post](https://crfm.stanford.edu/2025/05/28/fast-kernels.html). This method uses natural language optimization ideas with parallel branching to explore diverse optimization strategies.
+
+### Key Features
+- **Natural Language Ideas**: Generates optimization strategies before implementing them
+- **Branching Search**: Multiple ideas per round × multiple implementations per idea
+- **Model Agnostic**: Supports both OpenAI and Gemini
+- **Complete Tracking**: Saves all generated code, ideas, and results to JSON
+
+### Quick Start
+
+```bash
+# Run search-based optimization
+python main_search.py
+```
+
 ## Roadmap
 
 - [x] Zero-shot Triton kernel generation
@@ -191,6 +208,7 @@ GPU_SPEC_INFO = {
 - [x] Automated correctness and performance evaluation
 - [x] Reference baseline benchmarking
 - [x] Added Support for Cloud eval with Runpod serverless
+- [x] **Search-based optimization with branching and natural language ideas**
 - [ ] Tree-of-thought reasoning for multi-step optimization
 - [ ] Multi-turn iterative refinement
 - [ ] Support for more LLM providers (Anthropic, DeepSeek, etc.)

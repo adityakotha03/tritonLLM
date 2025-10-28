@@ -1,9 +1,72 @@
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
+from src.LLMs.base_client import BaseLLMClient
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+class OpenAIClient(BaseLLMClient):
+    """OpenAI client implementing the BaseLLMClient interface."""
+    
+    def __init__(self, api_key: str = None, model: str = "gpt-5"):
+        """
+        Initialize OpenAI client.
+        
+        Args:
+            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
+            model: Default model to use
+        """
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.client = OpenAI(api_key=self.api_key)
+        self.model = model
+    
+    def generate_text(
+        self,
+        prompt: str,
+        max_completion_tokens: int = 8192,
+        temperature: float = 1.0,
+        system_message: str = "You are an expert in writing optimized Triton kernels for GPU computing.",
+        **kwargs
+    ) -> str:
+        """
+        Generate text using OpenAI chat completion API.
+        
+        Args:
+            prompt: Input prompt
+            max_completion_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            system_message: System message for the chat
+            **kwargs: Additional OpenAI-specific parameters
+            
+        Returns:
+            Generated text as string
+        """
+        model = kwargs.pop("model", self.model)
+        
+        response = self.client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ],
+            max_completion_tokens=max_completion_tokens,
+            temperature=temperature,
+            **kwargs
+        )
+        
+        return response.choices[0].message.content
+
+
+# Backward compatibility: keep the original function
+_default_client = None
+
+def get_default_client():
+    """Get or create the default OpenAI client."""
+    global _default_client
+    if _default_client is None:
+        _default_client = OpenAIClient()
+    return _default_client
 
 
 def generate_triton_code_zero_shot(
@@ -24,17 +87,13 @@ def generate_triton_code_zero_shot(
     Returns:
         Generated code as string
     """
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are an expert in writing optimized Triton kernels for GPU computing."},
-            {"role": "user", "content": prompt}
-        ],
+    client = get_default_client()
+    return client.generate_text(
+        prompt=prompt,
         max_completion_tokens=max_completion_tokens,
-        temperature=temperature
+        temperature=temperature,
+        model=model
     )
-    
-    return response.choices[0].message.content
 
 
 if __name__ == "__main__":
