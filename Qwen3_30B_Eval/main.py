@@ -33,7 +33,7 @@ def save_generated_code(rel_path, generated_code, base_output_dir="outputs/qwen3
 
 def main():
     # Initialize the vLLM model
-    print("Loading Qwen3-30B-A3B-Instruct-2507 model...")
+    print("Loading Qwen/Qwen3-30B-A3B-Instruct-2507 model...")
     llm = LLM("Qwen/Qwen3-30B-A3B-Instruct-2507")
     sampling_params = SamplingParams(
         temperature=1, 
@@ -78,7 +78,7 @@ def main():
     print("\n" + "="*80)
     print("GENERATION COMPLETE")
     print("="*80)
-    print(f"All generated codes saved to: outputs/qwen/")
+    print(f"All generated codes saved to: outputs/qwen_30b/")
 
 if __name__ == "__main__":
     main()
