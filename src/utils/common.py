@@ -33,3 +33,36 @@ def clean_markdown_code(code: str) -> str:
         cleaned_lines.append(line)
     
     return '\n'.join(cleaned_lines)
+
+def clean_markdown_code_qwen(code: str) -> str:
+    """
+    Extract only the content inside code blocks (```python or ```) for Qwen model.
+    This removes all markdown text, explanations, and everything outside code blocks.
+    
+    Args:
+        code: The generated text potentially containing markdown and code blocks
+        
+    Returns:
+        Only the code inside the first code block found, or the original text if no code block found
+    """
+    lines = code.split('\n')
+    inside_code_block = False
+    code_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        if stripped.startswith('```'):
+            if not inside_code_block:
+                inside_code_block = True
+            else:
+                break
+            continue
+
+        if inside_code_block:
+            code_lines.append(line)
+    
+    if code_lines:
+        return '\n'.join(code_lines)
+    else:
+        return code
