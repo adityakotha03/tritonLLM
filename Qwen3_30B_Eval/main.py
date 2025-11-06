@@ -1,6 +1,6 @@
 from vllm import LLM, SamplingParams
 from src.prompts import construct_prompt_zero_shot
-from src.utils.common import read_file, clean_markdown_code
+from src.utils.common import read_file, clean_markdown_code_qwen
 import os
 import glob
 
@@ -18,7 +18,7 @@ def get_all_kernelbench_problems():
     
     return sorted(problems)
 
-def save_generated_code(rel_path, generated_code, base_output_dir="outputs/qwen3_30b"):
+def save_generated_code(rel_path, generated_code, base_output_dir="output/zeroshot/qwen3_30b"):
     """
     Save generated code maintaining the same folder structure.
     rel_path: e.g., 'level1/23_Softmax.py'
@@ -31,14 +31,17 @@ def save_generated_code(rel_path, generated_code, base_output_dir="outputs/qwen3
     
     return output_path
 
-def main():
+def main(output_dir="output/zeroshot/qwen3_30b"):
     # Initialize the vLLM model
-    print("Loading Qwen/Qwen3-30B-A3B-Instruct-2507 model...")
-    llm = LLM("Qwen/Qwen3-30B-A3B-Instruct-2507")
+    print("Loading Qwen/Qwen3-30B-A3B-Instruct-2507 model...") # Model from https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507
+    llm = LLM(
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        max_model_len=32768
+    )
     sampling_params = SamplingParams(
         temperature=1, 
         top_p=0.9, 
-        top_k=40, 
+        top_k=40,
         max_tokens=16384
     )
     print("Model loaded successfully!\n")
@@ -54,6 +57,13 @@ def main():
         print(f"\n[{idx}/{len(problems)}] Processing: {rel_path}")
         print("-"*80)
         
+        # Check if output file already exists
+        output_path = os.path.join(output_dir, rel_path)
+        if os.path.exists(output_path):
+            print(f"SKIPPING: Output file already exists at {output_path}")
+            print("-"*80)
+            continue
+        
         try:
             print(f"Reading reference architecture from: {full_path}")
             ref_arch_src = read_file(full_path)
@@ -65,7 +75,7 @@ def main():
             print("Generating Triton code with Qwen model...")
             outputs = llm.generate([prompt], sampling_params)
             generated_text = outputs[0].outputs[0].text
-            generated_code = clean_markdown_code(generated_text)
+            generated_code = clean_markdown_code_qwen(generated_text)
             output_path = save_generated_code(rel_path, generated_code)
             print(f"Generated code saved to: {output_path}")
             print("Successfully generated code")
@@ -78,7 +88,7 @@ def main():
     print("\n" + "="*80)
     print("GENERATION COMPLETE")
     print("="*80)
-    print(f"All generated codes saved to: outputs/qwen_30b/")
+    print(f"All generated codes saved to: {output_dir}/")
 
 if __name__ == "__main__":
     main()
