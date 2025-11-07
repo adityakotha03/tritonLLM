@@ -60,15 +60,15 @@ def append_result_to_csv(csv_path, problem_name, level, result=None, error=None)
             writer.writerow([
                 problem_name,
                 level,
-                result.get('metadata', {}).get('hardware', 'N/A'),
-                result.get('metadata', {}).get('device', 'N/A'),
-                result.get('compiled', 'N/A'),
-                result.get('correctness', 'N/A'),
-                f"{result.get('ref_runtime', 0):.4f}",
-                f"{result.get('ref_runtime_compiled', 0):.4f}",
-                f"{result.get('runtime', 0):.4f}",
-                f"{result.get('speedup', 0):.2f}",
-                f"{result.get('speedup_vs_compiled', 0):.2f}",
+                result.metadata.get('hardware', 'N/A'),
+                result.metadata.get('device', 'N/A'),
+                result.compiled,
+                result.correctness,
+                f"{result.ref_runtime:.4f}",
+                f"{result.ref_runtime_compiled:.4f}",
+                f"{result.runtime:.4f}",
+                f"{result.speedup:.2f}",
+                f"{result.speedup_vs_compiled:.2f}",
                 'SUCCESS',
                 '',
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -154,16 +154,16 @@ def run_benchmark():
             print("="*60)
             print(f"Problem:     {problem_name}")
             print(f"Level:       {level}")
-            print(f"Hardware:    {result['metadata']['hardware']}")
-            print(f"Device:      {result['metadata']['device']}")
-            print(f"Compiled:    {result['compiled']}")
-            print(f"Correctness: {result['correctness']}")
+            print(f"Hardware:    {result.metadata['hardware']}")
+            print(f"Device:      {result.metadata['device']}")
+            print(f"Compiled:    {result.compiled}")
+            print(f"Correctness: {result.correctness}")
             print(f"\nPerformance Comparison:")
-            print(f"  Reference PyTorch:            {result['ref_runtime']:.4f} ms")
-            print(f"  Reference PyTorch (compiled): {result['ref_runtime_compiled']:.4f} ms")
-            print(f"  Custom Triton:                {result['runtime']:.4f} ms")
-            print(f"  Speedup:                      {result['speedup']:.2f}x")
-            print(f"  Speedup vs compiled ref:      {result['speedup_vs_compiled']:.2f}x")
+            print(f"  Reference PyTorch:            {result.ref_runtime:.4f} ms")
+            print(f"  Reference PyTorch (compiled): {result.ref_runtime_compiled:.4f} ms")
+            print(f"  Custom Triton:                {result.runtime:.4f} ms")
+            print(f"  Speedup:                      {result.speedup:.2f}x")
+            print(f"  Speedup vs compiled ref:      {result.speedup_vs_compiled:.2f}x")
             print("="*60)
             
             append_result_to_csv(csv_path, problem_name, level, result=result)
