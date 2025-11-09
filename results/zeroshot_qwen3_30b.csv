@@ -1,841 +1,255 @@
 Problem,Level,Hardware,Device,Compiled,Correctness,Ref_PyTorch_Runtime_ms,Ref_PyTorch_Compiled_Runtime_ms,Triton_Runtime_ms,Speedup,Speedup_vs_Compiled,Status,Error_Message,Timestamp
-100_HingeLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:06
-10_3D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:06
-11_4D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:08
-12_Matmul_with_diagonal_matrices_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.2700,7.7300,0.1120,64.91,69.02,SUCCESS,,2025-11-09 03:10:13
-13_Matmul_for_symmetric_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:26
-14_Matmul_for_upper_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:26
-15_Matmul_for_lower_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:26
-16_Matmul_with_transposed_A,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:26
-17_Matmul_with_transposed_B,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:27
-18_Matmul_with_transposed_both,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:27
-19_ReLU,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:36
-1_Square_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:37
-20_LeakyReLU,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:46
-21_Sigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:10:56
-22_Tanh,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:11:05
-23_Softmax,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:11:05
-24_LogSoftmax,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:11:53
-25_Swish,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:12:03
-26_GELU_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:12:03
-27_SELU_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:12:12
-28_HardSigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3400,7.3600,7.3400,1.00,1.00,SUCCESS,,2025-11-09 03:13:11
-29_Softplus,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:13:59
-2_Standard_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.2800,7.3200,1.1900,6.12,6.15,SUCCESS,,2025-11-09 03:14:04
-30_Softsign,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:14:13
-31_ELU,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:14:13
-32_HardTanh,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3400,7.3600,7.3300,1.00,1.00,SUCCESS,,2025-11-09 03:15:13
-33_BatchNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:15:19
-34_InstanceNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:15
-35_GroupNorm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:26
-36_RMSNorm_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:26
-37_FrobeniusNorm_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:26
-38_L1Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:39
-39_L2Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:51
-3_Batched_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:53
-40_LayerNorm,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:53
-41_Max_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:58
-42_Max_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:16:58
-43_Max_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.2400,9.4600,3.6100,2.01,2.62,SUCCESS,,2025-11-09 03:17:39
-44_Average_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:17:42
-45_Average_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:17:42
-46_Average_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:17:55
-47_Sum_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:08
-48_Mean_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:08
-49_Max_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:21
-4_Matrix_vector_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:34
-50_conv_standard_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:34
-51_Argmax_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:18:47
-52_Argmin_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:00
-53_Min_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:12
-54_conv_standard_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,True,3.0300,3.1000,3.1000,0.98,1.00,SUCCESS,,2025-11-09 03:19:14
-55_conv_standard_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:14
-56_conv_standard_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:15
-57_conv_transposed_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:18
-58_conv_transposed_3D__asymmetric_input__asymmetric_kernel,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:19:18
-59_conv_standard_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:19:18
-5_Matrix_scalar_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,True,4.9000,5.0200,12.6000,0.39,0.40,SUCCESS,,2025-11-09 03:20:15
-60_conv_standard_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:15
-61_conv_transposed_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:16
-62_conv_standard_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:17
-63_conv_standard_2D__square_input__square_kernel,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'weight' already exists""",2025-11-09 03:20:17
-64_conv_transposed_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:20
-65_conv_transposed_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:20
-66_conv_standard_3D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:20
-67_conv_standard_1D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:20
-68_conv_transposed_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:21
-69_conv_transposed_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:21
-6_Matmul_with_large_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:23
-70_conv_transposed_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:25
-71_conv_transposed_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:26
-72_conv_transposed_3D_asymmetric_input_asymmetric_kernel___strided_padded_grouped_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:26
-73_conv_transposed_3D_asymmetric_input_square_kernel__strided_padded__grouped,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:20:26
-74_conv_transposed_1D_dilated,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:20:26
-75_conv_transposed_2D_asymmetric_input_asymmetric_kernel_strided__grouped____padded____dilated__,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:20:26
-76_conv_standard_1D_dilated_strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:38
-77_conv_transposed_3D_square_input_square_kernel___padded____dilated____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:38
-78_conv_transposed_2D_asymmetric_input_asymmetric_kernel___padded__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:39
-79_conv_transposed_1D_asymmetric_input_square_kernel___padded____strided____dilated__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:40
-7_Matmul_with_small_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:41
-80_conv_standard_2D_square_input_asymmetric_kernel___dilated____padded__,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:20:41
-81_conv_transposed_2D_asymmetric_input_square_kernel___dilated____padded____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:41
-82_conv_depthwise_2D_square_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:42
-83_conv_depthwise_2D_square_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:43
-84_conv_depthwise_2D_asymmetric_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:43
-85_conv_depthwise_2D_asymmetric_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:43
-86_conv_depthwise_separable_2D,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 03:20:43
-87_conv_pointwise_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:49
-88_MinGPTNewGelu,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:50
-89_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:56
-8_Matmul_with_irregular_shapes_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:20:57
-90_cumprod,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:21:03
-91_cumsum_reverse,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:21:03
-92_cumsum_exclusive,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:21:03
-93_masked_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:22:17
-94_MSELoss,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:22:17
-95_CrossEntropyLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:22:18
-96_HuberLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:26
-97_ScaledDotProductAttention,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:26
-98_KLDivLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:30
-99_TripletMarginLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:35
-9_Tall_skinny_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:36
-100_ConvTranspose3d_Clamp_Min_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:36
-10_ConvTranspose2d_MaxPool_Hardtanh_Mean_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:40
-11_ConvTranspose2d_BatchNorm_Tanh_MaxPool_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:40
-12_Gemm_Multiply_LeakyReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:40
-13_ConvTranspose3d_Mean_Add_Softmax_Tanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:40
-14_Gemm_Divide_Sum_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:41
-15_ConvTranspose3d_BatchNorm_Subtract,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:41
-16_ConvTranspose2d_Mish_Add_Hardtanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:42
-17_Conv2d_InstanceNorm_Divide,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:42
-18_Matmul_Sum_Max_AvgPool_LogSumExp_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:44
-19_ConvTranspose2d_GELU_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:47
-1_Conv2D_ReLU_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:48
-20_ConvTranspose3d_Sum_ResidualAdd_Multiply_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:48
-21_Conv2d_Add_Scale_Sigmoid_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:49
-22_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:50
-23_Conv3d_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:50
-24_Conv3d_Min_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:50
-25_Conv2d_Min_Tanh_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:51
-26_ConvTranspose3d_Add_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:53
-27_Conv3d_HardSwish_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:53
-28_BMM_InstanceNorm_Sum_ResidualAdd_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:54
-29_Matmul_Mish_Mish,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:54
-2_ConvTranspose2d_BiasAdd_Clamp_Scaling_Clamp_Divide,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:54
-30_Gemm_GroupNorm_Hardtanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:57
-31_Conv2d_Min_Add_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:57
-32_Conv2d_Scaling_Min,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:23:59
-33_Gemm_Scale_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:24:00
-34_ConvTranspose3d_LayerNorm_GELU_Scaling,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:24:00
-35_Conv2d_Subtract_HardSwish_MaxPool_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:24:01
-36_ConvTranspose2d_Min_Sum_GELU_Add,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 03:24:01
+100_HingeLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:03
+10_3D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:06
+11_4D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:11
+12_Matmul_with_diagonal_matrices_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.4200,7.5800,0.1210,61.32,62.64,SUCCESS,,2025-11-09 22:16:22
+13_Matmul_for_symmetric_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:42
+14_Matmul_for_upper_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:44
+15_Matmul_for_lower_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:48
+16_Matmul_with_transposed_A,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:51
+17_Matmul_with_transposed_B,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:55
+18_Matmul_with_transposed_both,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:16:58
+19_ReLU,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:10
+1_Square_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:13
+20_LeakyReLU,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:26
+21_Sigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:40
+22_Tanh,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:52
+23_Softmax,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:17:54
+24_LogSoftmax,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:18:43
+25_Swish,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:18:59
+26_GELU_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:19:01
+27_SELU_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:19:15
+28_HardSigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3400,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-09 22:20:18
+29_Softplus,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:21:07
+2_Standard_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.6200,7.5600,1.2400,6.15,6.10,SUCCESS,,2025-11-09 22:21:19
+30_Softsign,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:21:31
+31_ELU,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:21:33
+32_HardTanh,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-09 22:22:37
+33_BatchNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:22:46
+34_InstanceNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:23:42
+35_GroupNorm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:23:59
+36_RMSNorm_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:02
+37_FrobeniusNorm_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:04
+38_L1Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:19
+39_L2Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:34
+3_Batched_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:38
+40_LayerNorm,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:41
+41_Max_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:48
+42_Max_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:24:50
+43_Max_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,True,6.9800,9.4700,3.6700,1.90,2.58,SUCCESS,,2025-11-09 22:25:36
+44_Average_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:25:43
+45_Average_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:25:45
+46_Average_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:00
+47_Sum_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:15
+48_Mean_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:17
+49_Max_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:33
+4_Matrix_vector_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:48
+50_conv_standard_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:26:52
+51_Argmax_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:06
+52_Argmin_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:21
+53_Min_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:38
+54_conv_standard_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,True,3.1100,3.0900,3.0900,1.01,1.00,SUCCESS,,2025-11-09 22:27:47
+55_conv_standard_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:49
+56_conv_standard_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:53
+57_conv_transposed_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:27:59
+58_conv_transposed_3D__asymmetric_input__asymmetric_kernel,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:28:01
+59_conv_standard_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:28:04
+5_Matrix_scalar_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,True,4.9000,4.9600,12.7000,0.39,0.39,SUCCESS,,2025-11-09 22:28:51
+60_conv_standard_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:28:53
+61_conv_transposed_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:28:57
+62_conv_standard_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:00
+63_conv_standard_2D__square_input__square_kernel,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'weight' already exists""",2025-11-09 22:29:03
+64_conv_transposed_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:11
+65_conv_transposed_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:13
+66_conv_standard_3D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:16
+67_conv_standard_1D,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:19
+68_conv_transposed_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:23
+69_conv_transposed_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:27
+6_Matmul_with_large_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:31
+70_conv_transposed_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:36
+71_conv_transposed_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:40
+72_conv_transposed_3D_asymmetric_input_asymmetric_kernel___strided_padded_grouped_,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:29:42
+73_conv_transposed_3D_asymmetric_input_square_kernel__strided_padded__grouped,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:29:45
+74_conv_transposed_1D_dilated,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:29:47
+75_conv_transposed_2D_asymmetric_input_asymmetric_kernel_strided__grouped____padded____dilated__,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:29:50
+76_conv_standard_1D_dilated_strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:08
+77_conv_transposed_3D_square_input_square_kernel___padded____dilated____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:11
+78_conv_transposed_2D_asymmetric_input_asymmetric_kernel___padded__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:15
+79_conv_transposed_1D_asymmetric_input_square_kernel___padded____strided____dilated__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:18
+7_Matmul_with_small_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:23
+80_conv_standard_2D_square_input_asymmetric_kernel___dilated____padded__,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:30:25
+81_conv_transposed_2D_asymmetric_input_square_kernel___dilated____padded____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:28
+82_conv_depthwise_2D_square_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:32
+83_conv_depthwise_2D_square_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:36
+84_conv_depthwise_2D_asymmetric_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:39
+85_conv_depthwise_2D_asymmetric_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:41
+86_conv_depthwise_separable_2D,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:30:44
+87_conv_pointwise_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:54
+88_MinGPTNewGelu,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:30:57
+89_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:31:06
+8_Matmul_with_irregular_shapes_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:31:09
+90_cumprod,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:31:19
+91_cumsum_reverse,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:31:21
+92_cumsum_exclusive,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:31:24
+93_masked_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:33:15
+94_MSELoss,level1,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:33:17
+95_CrossEntropyLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:33:21
+96_HuberLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:32
+97_ScaledDotProductAttention,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:35
+98_KLDivLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:43
+99_TripletMarginLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:51
+9_Tall_skinny_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:55
+100_ConvTranspose3d_Clamp_Min_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:34:59
+10_ConvTranspose2d_MaxPool_Hardtanh_Mean_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:05
+11_ConvTranspose2d_BatchNorm_Tanh_MaxPool_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:08
+12_Gemm_Multiply_LeakyReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:12
+13_ConvTranspose3d_Mean_Add_Softmax_Tanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:15
+14_Gemm_Divide_Sum_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:19
+15_ConvTranspose3d_BatchNorm_Subtract,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:22
+16_ConvTranspose2d_Mish_Add_Hardtanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:26
+17_Conv2d_InstanceNorm_Divide,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:28
+18_Matmul_Sum_Max_AvgPool_LogSumExp_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:34
+19_ConvTranspose2d_GELU_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:40
+1_Conv2D_ReLU_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:44
+20_ConvTranspose3d_Sum_ResidualAdd_Multiply_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:47
+21_Conv2d_Add_Scale_Sigmoid_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:50
+22_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:55
+23_Conv3d_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:35:58
+24_Conv3d_Min_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:01
+25_Conv2d_Min_Tanh_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:05
+26_ConvTranspose3d_Add_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:10
+27_Conv3d_HardSwish_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:13
+28_BMM_InstanceNorm_Sum_ResidualAdd_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:18
+29_Matmul_Mish_Mish,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:20
+2_ConvTranspose2d_BiasAdd_Clamp_Scaling_Clamp_Divide,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:23
+30_Gemm_GroupNorm_Hardtanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:28
+31_Conv2d_Min_Add_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:31
+32_Conv2d_Scaling_Min,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:36
+33_Gemm_Scale_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:41
+34_ConvTranspose3d_LayerNorm_GELU_Scaling,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:43
+35_Conv2d_Subtract_HardSwish_MaxPool_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:47
+36_ConvTranspose2d_Min_Sum_GELU_Add,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:36:50
 37_Matmul_Swish_Sum_GroupNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
 Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
 CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
 For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-38_ConvTranspose3d_AvgPool_Clamp_Softmax_Multiply,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-39_Gemm_Scale_BatchNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-40_Matmul_Scaling_ResidualAdd,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-41_Gemm_BatchNorm_GELU_ReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-42_ConvTranspose2d_GlobalAvgPool_BiasAdd_LogSumExp_Sum_Multiply,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-43_Conv3d_Max_LogSumExp_ReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-44_ConvTranspose2d_Multiply_GlobalAvgPool_GlobalAvgPool_Mean,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-45_Gemm_Sigmoid_LogSumExp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-46_Conv2d_Subtract_Tanh_Subtract_AvgPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-47_Conv3d_Mish_Tanh,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-48_Conv3d_Scaling_Tanh_Multiply_Sigmoid,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-49_ConvTranspose3d_Softmax_Sigmoid,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-4_Conv2d_Mish_Mish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-50_ConvTranspose3d_Scaling_AvgPool_BiasAdd_Scaling,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-51_Gemm_Subtract_GlobalAvgPool_LogSumExp_GELU_ResidualAdd,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-52_Conv2d_Activation_BatchNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-53_Gemm_Scaling_Hardtanh_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-54_Conv2d_Multiply_LeakyReLU_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-55_Matmul_MaxPool_Sum_Scale,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-56_Matmul_Sigmoid_Sum,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-57_Conv2d_ReLU_HardSwish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-58_ConvTranspose3d_LogSumExp_HardSwish_Subtract_Clamp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-59_Matmul_Swish_Scaling,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-5_ConvTranspose2d_Subtract_Tanh,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-60_ConvTranspose3d_Swish_GroupNorm_HardSwish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-61_ConvTranspose3d_ReLU_GroupNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-62_Matmul_GroupNorm_LeakyReLU_Sum,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-63_Gemm_ReLU_Divide,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-64_Gemm_LogSumExp_LeakyReLU_LeakyReLU_GELU_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-65_Conv2d_AvgPool_Sigmoid_Sum,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-66_Matmul_Dropout_Softmax,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-67_Conv2d_GELU_GlobalAvgPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-68_Matmul_Min_Subtract,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-69_Conv2d_HardSwish_ReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-6_Conv3d_Softmax_MaxPool_MaxPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-70_Gemm_Sigmoid_Scaling_ResidualAdd,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-71_Conv2d_Divide_LeakyReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-72_ConvTranspose3d_BatchNorm_AvgPool_AvgPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-73_Conv2d_BatchNorm_Scaling,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-74_ConvTranspose3d_LeakyReLU_Multiply_LeakyReLU_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-75_Gemm_GroupNorm_Min_BiasAdd,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-76_Gemm_Add_ReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-77_ConvTranspose3d_Scale_BatchNorm_GlobalAvgPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-78_ConvTranspose3d_Max_Max_Sum,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-79_Conv3d_Multiply_InstanceNorm_Clamp_Multiply_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-7_Conv3d_ReLU_LeakyReLU_GELU_Sigmoid_BiasAdd,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-80_Gemm_Max_Subtract_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-81_Gemm_Swish_Divide_Clamp_Tanh_Clamp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-82_Conv2d_Tanh_Scaling_BiasAdd_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-83_Conv3d_GroupNorm_Min_Clamp_Dropout,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-84_Gemm_BatchNorm_Scaling_Softmax,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-85_Conv2d_GroupNorm_Scale_MaxPool_Clamp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-86_Matmul_Divide_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-87_Conv2d_Subtract_Subtract_Mish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-88_Gemm_GroupNorm_Swish_Multiply_Swish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-89_ConvTranspose3d_MaxPool_Softmax_Subtract_Swish_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-8_Conv3d_Divide_Max_GlobalAvgPool_BiasAdd_Sum,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-90_Conv3d_LeakyReLU_Sum_Clamp_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-91_ConvTranspose2d_Softmax_BiasAdd_Scaling_Sigmoid,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-92_Conv2d_GroupNorm_Tanh_HardSwish_ResidualAdd_LogSumExp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-93_ConvTranspose2d_Add_Min_GELU_Multiply,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-94_Gemm_BiasAdd_Hardtanh_Mish_GroupNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-95_Matmul_Add_Swish_Tanh_GELU_Hardtanh,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-96_ConvTranspose3d_Multiply_Max_GlobalAvgPool_Clamp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-97_Matmul_BatchNorm_BiasAdd_Divide_Swish,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-98_Matmul_AvgPool_GELU_Scale_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-99_Matmul_GELU_Softmax,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-9_Matmul_Subtract_Multiply_ReLU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-10_ResNet101,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-11_VGG16,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-12_VGG19,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-13_DenseNet121TransitionLayer,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-14_DenseNet121DenseBlock,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-15_DenseNet121,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-16_DenseNet201,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-17_SqueezeNetFireModule,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-18_SqueezeNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-19_MobileNetV1,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-1_MLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-20_MobileNetV2,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-21_EfficientNetMBConv,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-22_EfficientNetB0,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-23_EfficientNetB1,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-24_EfficientNetB2,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-25_ShuffleNetUnit,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-26_ShuffleNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-27_RegNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-28_VisionTransformer,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-29_SwinMLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-2_ShallowWideMLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-30_SwinTransformerV2,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-31_VisionAttention,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-32_ConvolutionalVisionTransformer,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-33_VanillaRNN,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-34_VanillaRNNHidden,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-35_LSTM,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-36_LSTMHn,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-37_LSTMCn,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-38_LSTMBidirectional,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-39_GRU,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-3_DeepNarrowMLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-40_GRUHidden,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-41_GRUBidirectional,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-42_GRUBidirectionalHidden,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-43_MinGPTCausalAttention,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-44_MiniGPTBlock,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-45_UNetSoftmax,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-46_NetVladWithGhostClusters,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-47_NetVladNoGhostClusters,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-48_Mamba2ReturnY,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-09 03:24:04
-49_Mamba2ReturnFinalState,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-09 03:24:04
-4_LeNet5,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-50_ReLUSelfAttention,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-5_AlexNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-6_GoogleNetInceptionModule,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-7_GoogleNetInceptionV1,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-8_ResNetBasicBlock,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
-9_ResNet18,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
-Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",2025-11-09 03:24:04
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-09 22:36:56
+38_ConvTranspose3d_AvgPool_Clamp_Softmax_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:01
+39_Gemm_Scale_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:05
+3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:08
+40_Matmul_Scaling_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:12
+41_Gemm_BatchNorm_GELU_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:20
+42_ConvTranspose2d_GlobalAvgPool_BiasAdd_LogSumExp_Sum_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:24
+43_Conv3d_Max_LogSumExp_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:28
+44_ConvTranspose2d_Multiply_GlobalAvgPool_GlobalAvgPool_Mean,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:30
+45_Gemm_Sigmoid_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:35
+46_Conv2d_Subtract_Tanh_Subtract_AvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:39
+47_Conv3d_Mish_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:43
+48_Conv3d_Scaling_Tanh_Multiply_Sigmoid,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:46
+49_ConvTranspose3d_Softmax_Sigmoid,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:49
+4_Conv2d_Mish_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:53
+50_ConvTranspose3d_Scaling_AvgPool_BiasAdd_Scaling,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:37:56
+51_Gemm_Subtract_GlobalAvgPool_LogSumExp_GELU_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:00
+52_Conv2d_Activation_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:03
+53_Gemm_Scaling_Hardtanh_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:07
+54_Conv2d_Multiply_LeakyReLU_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:11
+55_Matmul_MaxPool_Sum_Scale,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:21
+56_Matmul_Sigmoid_Sum,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:29
+57_Conv2d_ReLU_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:32
+58_ConvTranspose3d_LogSumExp_HardSwish_Subtract_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:35
+59_Matmul_Swish_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:53
+5_ConvTranspose2d_Subtract_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:56
+60_ConvTranspose3d_Swish_GroupNorm_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:38:59
+61_ConvTranspose3d_ReLU_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:02
+62_Matmul_GroupNorm_LeakyReLU_Sum,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:05
+63_Gemm_ReLU_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:11
+64_Gemm_LogSumExp_LeakyReLU_LeakyReLU_GELU_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:18
+65_Conv2d_AvgPool_Sigmoid_Sum,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:20
+66_Matmul_Dropout_Softmax,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:24
+67_Conv2d_GELU_GlobalAvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:28
+68_Matmul_Min_Subtract,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:34
+69_Conv2d_HardSwish_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:37
+6_Conv3d_Softmax_MaxPool_MaxPool,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:39
+70_Gemm_Sigmoid_Scaling_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:44
+71_Conv2d_Divide_LeakyReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:47
+72_ConvTranspose3d_BatchNorm_AvgPool_AvgPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'weight' already exists""",2025-11-09 22:39:50
+73_Conv2d_BatchNorm_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:53
+74_ConvTranspose3d_LeakyReLU_Multiply_LeakyReLU_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:39:56
+75_Gemm_GroupNorm_Min_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:02
+76_Gemm_Add_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:19
+77_ConvTranspose3d_Scale_BatchNorm_GlobalAvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:22
+78_ConvTranspose3d_Max_Max_Sum,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:25
+79_Conv3d_Multiply_InstanceNorm_Clamp_Multiply_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:28
+7_Conv3d_ReLU_LeakyReLU_GELU_Sigmoid_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:31
+80_Gemm_Max_Subtract_GELU,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:34
+81_Gemm_Swish_Divide_Clamp_Tanh_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:39
+82_Conv2d_Tanh_Scaling_BiasAdd_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:42
+83_Conv3d_GroupNorm_Min_Clamp_Dropout,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:45
+84_Gemm_BatchNorm_Scaling_Softmax,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:48
+85_Conv2d_GroupNorm_Scale_MaxPool_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:51
+86_Matmul_Divide_GELU,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'math' is not defined,2025-11-09 22:40:54
+87_Conv2d_Subtract_Subtract_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:40:58
+88_Gemm_GroupNorm_Swish_Multiply_Swish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:02
+89_ConvTranspose3d_MaxPool_Softmax_Subtract_Swish_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:05
+8_Conv3d_Divide_Max_GlobalAvgPool_BiasAdd_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:08
+90_Conv3d_LeakyReLU_Sum_Clamp_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:12
+91_ConvTranspose2d_Softmax_BiasAdd_Scaling_Sigmoid,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:16
+92_Conv2d_GroupNorm_Tanh_HardSwish_ResidualAdd_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:19
+93_ConvTranspose2d_Add_Min_GELU_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:22
+94_Gemm_BiasAdd_Hardtanh_Mish_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:25
+95_Matmul_Add_Swish_Tanh_GELU_Hardtanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:30
+96_ConvTranspose3d_Multiply_Max_GlobalAvgPool_Clamp,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:32
+97_Matmul_BatchNorm_BiasAdd_Divide_Swish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:36
+98_Matmul_AvgPool_GELU_Scale_Max,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:39
+99_Matmul_GELU_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:41:43
+9_Matmul_Subtract_Multiply_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,True,7.9700,8.2500,306.0000,0.03,0.03,SUCCESS,,2025-11-09 22:42:27
+10_ResNet101,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:31
+11_VGG16,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:36
+12_VGG19,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object has no attribute 'metadata',2025-11-09 22:42:39
+13_DenseNet121TransitionLayer,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot assign 'torch.cuda.FloatTensor' as parameter 'weight' (torch.nn.Parameter or None expected),2025-11-09 22:42:42
+14_DenseNet121DenseBlock,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:44
+15_DenseNet121,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:48
+16_DenseNet201,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:51
+17_SqueezeNetFireModule,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:42:55
+18_SqueezeNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,temp_module.ModelNew.__init__.<locals>.<lambda> is not a Module subclass,2025-11-09 22:42:57
+19_MobileNetV1,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:00
+1_MLP,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:10
+20_MobileNetV2,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:13
+21_EfficientNetMBConv,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:16
+22_EfficientNetB0,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:19
+23_EfficientNetB1,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'bias' already exists""",2025-11-09 22:43:21
+24_EfficientNetB2,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'expanded_channels' is not defined,2025-11-09 22:43:24
+25_ShuffleNetUnit,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:27
+26_ShuffleNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'ChannelShuffle' is not defined,2025-11-09 22:43:30
+27_RegNet,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:33
+28_VisionTransformer,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:43:37
+29_SwinMLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'to_2tuple' is not defined,2025-11-09 22:43:40
+2_ShallowWideMLP,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,'NoneType' object has no attribute 'metadata',2025-11-09 22:43:54
+30_SwinTransformerV2,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'collections' is not defined,2025-11-09 22:43:57
+31_VisionAttention,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:00
+32_ConvolutionalVisionTransformer,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:03
+33_VanillaRNN,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:14
+34_VanillaRNNHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:17
+35_LSTM,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:20
+36_LSTMHn,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:23
+37_LSTMCn,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:26
+38_LSTMBidirectional,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'w_ih' already exists""",2025-11-09 22:44:29
+39_GRU,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:31
+3_DeepNarrowMLP,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:34
+40_GRUHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:37
+41_GRUBidirectional,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:40
+42_GRUBidirectionalHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:43
+43_MinGPTCausalAttention,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"""attribute 'head_dim' already exists""",2025-11-09 22:44:46
+44_MiniGPTBlock,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:49
+45_UNetSoftmax,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:44:53
+46_NetVladWithGhostClusters,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'math' is not defined,2025-11-09 22:44:55
+47_NetVladNoGhostClusters,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'math' is not defined,2025-11-09 22:44:58
+48_Mamba2ReturnY,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-09 22:45:00
+49_Mamba2ReturnFinalState,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-09 22:45:03
+4_LeNet5,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:06
+50_ReLUSelfAttention,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:10
+5_AlexNet,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:12
+6_GoogleNetInceptionModule,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:15
+7_GoogleNetInceptionV1,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:17
+8_ResNetBasicBlock,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:20
+9_ResNet18,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-09 22:45:24
