@@ -18,7 +18,7 @@ Generates markdown reasoning traces for KernelBook pairs (PyTorch + Triton), sel
 ```
 python -m dataset.trace_generator
 ```
-Set `KERNEL_TRACE_CONFIG=/path/to/config.json` to use an alternate config. The script streams KernelBook rows, formats prompts, detects CUDA vs MPS (selecting the matching backend), generates reasoning traces, and writes `dataset/kernel_traces.csv`.
+Set `KERNEL_TRACE_CONFIG=/path/to/config.json` to use an alternate config. The script streams KernelBook rows, formats prompts, detects CUDA vs MPS (selecting the matching backend), displays a tqdm progress bar, generates reasoning traces, and writes `dataset/kernel_traces.csv`.
 
 ## Expected Output
 - CSV columns: `sample_index`, `python_code`, `triton_code`, `reasoning_trace`, optional `task_id` or `source_id`

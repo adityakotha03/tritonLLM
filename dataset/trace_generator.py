@@ -13,6 +13,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
+from tqdm.auto import tqdm
 
 from dataset.config_loader import PipelineConfig, load_config
 
@@ -270,8 +271,10 @@ def run_pipeline(config_path: Path | str = "dataset/config.json") -> Path:
 
     with ThreadPoolExecutor(max_workers=backend.max_workers) as executor:
         futures = [executor.submit(_generate, batch) for batch in batches]
-        for future in as_completed(futures):
-            future.result()
+        with tqdm(total=len(futures), desc="Generating", unit="batch") as pbar:
+            for future in as_completed(futures):
+                future.result()
+                pbar.update(1)
 
     results.sort(key=lambda row: row["sample_index"])
     output_path = _ensure_output_path(config)

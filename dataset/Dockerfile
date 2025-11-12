@@ -16,7 +16,8 @@ RUN python3 -m pip install --upgrade pip && \
       vllm \
       datasets \
       pandas \
-      transformers
+      transformers \
+      tqdm
 
 WORKDIR /workspace
 
