@@ -1,0 +1,31 @@
+{
+  "model": {
+    "model_id": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+    "dtype": "bfloat16",
+    "max_model_len": 4096
+  },
+  "dataset": {
+    "name": "GPUMODE/KernelBook",
+    "config": "default",
+    "split": "train",
+    "limit": null,
+    "shuffle": false,
+    "seed": 42
+  },
+  "generation": {
+    "max_new_tokens": 768,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "stop_sequences": [
+      "\n```"
+    ]
+  },
+  "runtime": {
+    "batch_size": 1,
+    "num_threads": 4,
+    "prompt_template": "You are analyzing paired implementations of the same tensor kernel. Given the PyTorch reference, explain the design of a Triton kernel that matches it. Focus on input shapes, memory access, tiling, and synchronization. Produce a concise reasoning trace in markdown with bullet points and short paragraphs. Avoid restating code verbatim.\n\nPyTorch reference:\n```python\n{python_code}\n```\n\nExisting Triton implementation:\n```python\n{triton_code}\n```\n\nWrite the reasoning trace:",
+    "output_csv": "dataset_hf/kernel_traces.csv",
+    "overwrite": false
+  }
+}
+

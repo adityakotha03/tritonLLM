@@ -15,7 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 from tqdm.auto import tqdm
 
-from dataset.config_loader import PipelineConfig, load_config
+from .config_loader import PipelineConfig, load_config
 
 logger = logging.getLogger(__name__)
 
