@@ -94,17 +94,28 @@ class HFModelGenerator:
             logger.warning("torch.compile unavailable")
             return
         
+        try:
+            import torch._dynamo as dynamo
+            dynamo.config.dynamic_shapes = True
+            dynamo.config.automatic_dynamic_shapes = True
+        except (ImportError, AttributeError):
+            pass
+        
         is_mps = self.device.type == "mps"
         if is_mps:
-            logger.info("MPS detected: using regional compilation with dynamic shapes")
+            logger.info("MPS detected: using regional compilation with dynamic batch and sequence dimensions")
             try:
-                self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
+                self.model = torch.compile(
+                    self.model,
+                    mode="reduce-overhead",
+                    dynamic=True,
+                )
             except Exception as exc:
                 logger.warning(f"MPS compilation failed: {exc}, using eager execution")
             return
         
         try:
-            logger.info("Compiling model with torch.compile fullgraph=True")
+            logger.info("Compiling model with torch.compile fullgraph=True, dynamic batch and sequence dimensions")
             self.model = torch.compile(self.model, fullgraph=True, dynamic=True)
         except Exception as exc:
             logger.warning(f"Fullgraph compilation failed: {exc}, using regional compilation")

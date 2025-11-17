@@ -45,6 +45,7 @@ class RuntimeConfig:
     )
     output_csv: str = "dataset/kernel_traces.csv"
     overwrite: bool = False
+    save_interval: int = 100
 
 
 @dataclass
@@ -117,6 +118,7 @@ def _load_runtime(runtime_block: Dict[str, Any]) -> RuntimeConfig:
         prompt_template=str(prompt_template),
         output_csv=str(runtime_block.get("output_csv", "dataset/kernel_traces.csv")),
         overwrite=bool(runtime_block.get("overwrite", False)),
+        save_interval=int(runtime_block.get("save_interval", 100)),
     )
 
 

@@ -25,11 +25,12 @@
     ]
   },
   "runtime": {
-    "batch_size": 8,
-    "num_threads": 4,
+    "batch_size": 16,
+    "num_threads": 1,
     "prompt_template": "You are analyzing paired implementations of the same tensor kernel. Given the PyTorch reference, explain the design of a Triton kernel that matches it. Focus on input shapes, memory access, tiling, and synchronization. Produce a concise reasoning trace in markdown with bullet points and short paragraphs. Avoid restating code verbatim.\n\nPyTorch reference:\n```python\n{python_code}\n```\n\nExisting Triton implementation:\n```python\n{triton_code}\n```\n\nWrite the reasoning trace:",
     "output_csv": "dataset/kernel_traces.csv",
-    "overwrite": false
+    "overwrite": false,
+    "save_interval": 200
   }
 }
 
