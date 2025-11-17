@@ -8,6 +8,7 @@ from typing import Dict, List
 import pandas as pd
 import torch
 from datasets import load_dataset
+from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from tqdm.auto import tqdm
 
@@ -24,6 +25,13 @@ class ModelGenerator:
     def __init__(self, config: PipelineConfig):
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available")
+        
+        self.config = config
+        self.max_model_len = config.model.max_model_len
+        self.max_new_tokens = config.generation.max_new_tokens
+        
+        logger.info(f"Loading tokenizer for length checking: {config.model.model_id}")
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model.model_id, trust_remote_code=True)
         
         logger.info(f"Loading vLLM model: {config.model.model_id}")
         self.llm = LLM(
@@ -46,8 +54,17 @@ class ModelGenerator:
             stop=gen.stop_sequences or None,
         )
     
+    def _truncate_prompt(self, prompt: str) -> str:
+        tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+        max_prompt_len = self.max_model_len - self.max_new_tokens - 10
+        if len(tokens) > max_prompt_len:
+            tokens = tokens[:max_prompt_len]
+            prompt = self.tokenizer.decode(tokens, skip_special_tokens=True)
+        return prompt
+    
     def generate(self, prompts: List[str]) -> List[str]:
-        outputs = self.llm.generate(prompts, sampling_params=self.sampling_params)
+        truncated_prompts = [self._truncate_prompt(p) for p in prompts]
+        outputs = self.llm.generate(truncated_prompts, sampling_params=self.sampling_params)
         return [output.outputs[0].text.strip() if output.outputs else "" for output in outputs]
 
 
