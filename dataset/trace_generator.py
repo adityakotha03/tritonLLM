@@ -11,7 +11,10 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm.auto import tqdm
 
-from .config_loader import PipelineConfig, load_config
+try:
+    from .config_loader import PipelineConfig, load_config
+except ImportError:
+    from config_loader import PipelineConfig, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -188,5 +191,12 @@ def run_pipeline(config_path: Path | str = "dataset/config.json") -> Path:
 
 
 if __name__ == "__main__":
-    config_path = os.environ.get("KERNEL_TRACE_CONFIG", "dataset/config.json")
+    from pathlib import Path
+    
+    if "KERNEL_TRACE_CONFIG" in os.environ:
+        config_path = os.environ["KERNEL_TRACE_CONFIG"]
+    else:
+        script_dir = Path(__file__).parent
+        config_path = script_dir / "config.json"
+    
     run_pipeline(config_path)
