@@ -1,0 +1,395 @@
+{
+  "metadata": {
+    "timestamp": "20251116_150532",
+    "problem_name": "6_Matmul_with_large_K_dimension_",
+    "gpu_name": "A100-80GB",
+    "model_name": "gpt-5",
+    "model_provider": "openai"
+  },
+  "config": {
+    "num_rounds": 3,
+    "width_per_round": [
+      3,
+      3
+    ],
+    "depth_per_round": [
+      1,
+      1
+    ],
+    "top_k_bank": 5,
+    "model_name": "gpt-5",
+    "model_provider": "openai",
+    "temperature": 1.0,
+    "max_completion_tokens": 16384,
+    "gpu_name": "A100-80GB",
+    "problem_name": "6_Matmul_with_large_K_dimension_",
+    "num_correct_trials": 5,
+    "num_perf_trials": 100,
+    "evaluation_timeout": 600
+  },
+  "statistics": {
+    "total_kernels": 7,
+    "compiled_kernels": 7,
+    "correct_kernels": 3,
+    "best_speedup": 2.7971014492753623,
+    "unique_hashes": 7,
+    "rounds_tracked": 3
+  },
+  "round_summaries": [
+    {
+      "round": 0,
+      "total": 1,
+      "compiled": 1,
+      "correct": 1,
+      "best_speedup": 1.4516129032258063
+    },
+    {
+      "round": 1,
+      "total": 3,
+      "compiled": 3,
+      "correct": 2,
+      "best_speedup": 2.7971014492753623
+    },
+    {
+      "round": 2,
+      "total": 3,
+      "compiled": 3,
+      "correct": 0,
+      "best_speedup": 0.0
+    }
+  ],
+  "best_kernel": {
+    "code": "import math\nimport torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef matmul_splitk_kernel(\n    a_ptr, b_ptr, c_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    K_CHUNK,\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr\n):\n    pid_n = tl.program_id(0)\n    pid_m = tl.program_id(1)\n    pid_s = tl.program_id(2)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Iterate over this split's K-chunk with fixed iteration count\n    for kk in range(0, K_CHUNK, BLOCK_K):\n        k0 = pid_s * K_CHUNK + kk\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n\n        a_mask = (offs_m[:, None] < M) & (offs_k[None, :] < K)\n        b_mask = (offs_k[:, None] < K) & (offs_n[None, :] < N)\n\n        a = tl.load(a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak, mask=a_mask, other=0.0)\n        b = tl.load(b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn, mask=b_mask, other=0.0)\n\n        acc += tl.dot(a, b)\n\n    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn\n    tl.atomic_add(c_ptrs, acc, mask=c_mask)\n\n\ndef _cdiv(a, b):\n    return (a + b - 1) // b\n\n\ndef triton_matmul_splitk(A: torch.Tensor, B: torch.Tensor, split_k: int = 32,\n                         BLOCK_M: int = 128, BLOCK_N: int = 128, BLOCK_K: int = 64) -> torch.Tensor:\n    assert A.is_cuda and B.is_cuda, \"Inputs must be CUDA tensors\"\n    assert A.dtype == torch.float32 and B.dtype == torch.float32, \"Only float32 is supported\"\n    assert A.shape[1] == B.shape[0], \"Incompatible shapes for matmul\"\n\n    M, K = A.shape\n    Kb, N = B.shape\n    assert K == Kb\n\n    A = A.contiguous()\n    B = B.contiguous()\n\n    C = torch.zeros((M, N), device=A.device, dtype=torch.float32)\n\n    stride_am, stride_ak = A.stride()\n    stride_bk, stride_bn = B.stride()\n    stride_cm, stride_cn = C.stride()\n\n    K_CHUNK = _cdiv(K, split_k)\n\n    grid = (triton.cdiv(N, BLOCK_N), triton.cdiv(M, BLOCK_M), split_k)\n\n    matmul_splitk_kernel[grid](\n        A, B, C,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n        K_CHUNK,\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=8, num_stages=3,\n    )\n    return C\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model using Triton split-K GEMM with atomic reduction.\n    \"\"\"\n    def __init__(self, split_k: int = 32, block_m: int = 128, block_n: int = 128, block_k: int = 64):\n        super().__init__()\n        self.split_k = split_k\n        self.block_m = block_m\n        self.block_n = block_n\n        self.block_k = block_k\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        orig_device = A.device\n        # Move to CUDA and ensure float32 for atomicAdd support and best precision\n        A_cuda = A.to(device='cuda', dtype=torch.float32, copy=False).contiguous()\n        B_cuda = B.to(device='cuda', dtype=torch.float32, copy=False).contiguous()\n\n        C_cuda = triton_matmul_splitk(\n            A_cuda, B_cuda,\n            split_k=self.split_k,\n            BLOCK_M=self.block_m,\n            BLOCK_N=self.block_n,\n            BLOCK_K=self.block_k\n        )\n        # Return on original device\n        if orig_device.type == 'cuda':\n            return C_cuda\n        return C_cuda.to(orig_device)",
+    "kernel_id": "kernel_r1_idea_r1_cb8a3b41_0_dab1d5",
+    "idea_id": "idea_r1_cb8a3b41",
+    "round_number": 1,
+    "eval_result": {
+      "compiled": true,
+      "correctness": true,
+      "runtime": 1.38,
+      "runtime_stats": {
+        "max": 1.4,
+        "mean": 1.38,
+        "min": 1.38,
+        "num_trials": 100,
+        "std": 0.00282
+      },
+      "ref_runtime": 3.86,
+      "ref_runtime_compiled": 3.96,
+      "speedup": 2.7971014492753623,
+      "speedup_vs_compiled": 2.8695652173913047,
+      "metadata": {
+        "correctness_trials": "(5 / 5)",
+        "device": "0",
+        "hardware": "NVIDIA A100-SXM4-80GB"
+      }
+    },
+    "code_hash": "c77602739f3877e9f642868599257f21b631fc60fdd8c39fa97fc0e1c2a1b2dd",
+    "metadata": {
+      "implementation_index": 0,
+      "idea_text": "Split-K parallel reduction to saturate SMs and improve latency hiding - Strategy: Split the giant K into split_k chunks (e.g., 16\u201364), launch CTAs over (M_tile, N_tile, K_chunk), each CTA computes a partial C tile over its K range, then reduce across K-chunks. Use either: - One-pass atomicAdd on C in FP32 at the end of each CTA, or - Two-pass: write partials to a scratch buffer [M, N, split_k] then launch a lightweight reduction kernel. For this problem size (256x256), scratch with split_k=32 is ~8.4 MB (manageable). - Example tiling: BLOCK_M=128, BLOCK_N=128 \u2192 base grid is 2x2=4 CTAs; with split_k=32 \u2192 128 CTAs, enough to keep 80\u2013108 SMs busy. Tune split_k to maintain high occupancy without excessive contention. - Why on A100: Without split-K, only 4 CTAs exist; that underutilizes an A100. Split-K creates sufficient parallel work to hide memory latency and better utilize the 64K registers/SM and 163 KB SMEM. Ampere\u2019s FP32 atomics are fast enough for this scale, and L2 can service concurrent CTAs efficiently. - Targets: Parallelism & occupancy, latency hiding (via more CTAs), better SM utilization.",
+      "temperature": 1.0
+    }
+  },
+  "all_ideas": [
+    {
+      "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel",
+      "round_number": 0,
+      "idea_id": "idea_r0_baseline",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "is_baseline": true
+      }
+    },
+    {
+      "idea_text": "- Strategy: Convert A and B to bfloat16 (preferred for robustness) or fp16, keep accumulation in fp32, and tile so tl.dot lowers to mma.sync on Tensor Cores. Use TC-friendly shapes, e.g., BLOCK_M=128, BLOCK_N=128, BLOCK_K=64 (multiples of 16/32), num_warps=8, num_stages=4. Ensure K is a multiple of 16 (it is), and pre-cast inputs on the host to halve memory traffic. - Why on A100: Ampere provides up to 312 TFLOPS for BF16/FP16 Tensor Cores vs 19.5 TFLOPS FP32, and you also cut A/B bandwidth in half. With K very large, both compute and memory benefits are substantial. Accumulating in FP32 preserves accuracy. - Targets: Data type & compute (Tensor Cores), memory bandwidth (halved A/B loads).",
+      "round_number": 1,
+      "idea_id": "idea_r1_d73e4e35",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_4292d8"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Split-K parallel reduction to saturate SMs and improve latency hiding - Strategy: Split the giant K into split_k chunks (e.g., 16\u201364), launch CTAs over (M_tile, N_tile, K_chunk), each CTA computes a partial C tile over its K range, then reduce across K-chunks. Use either: - One-pass atomicAdd on C in FP32 at the end of each CTA, or - Two-pass: write partials to a scratch buffer [M, N, split_k] then launch a lightweight reduction kernel. For this problem size (256x256), scratch with split_k=32 is ~8.4 MB (manageable). - Example tiling: BLOCK_M=128, BLOCK_N=128 \u2192 base grid is 2x2=4 CTAs; with split_k=32 \u2192 128 CTAs, enough to keep 80\u2013108 SMs busy. Tune split_k to maintain high occupancy without excessive contention. - Why on A100: Without split-K, only 4 CTAs exist; that underutilizes an A100. Split-K creates sufficient parallel work to hide memory latency and better utilize the 64K registers/SM and 163 KB SMEM. Ampere\u2019s FP32 atomics are fast enough for this scale, and L2 can service concurrent CTAs efficiently. - Targets: Parallelism & occupancy, latency hiding (via more CTAs), better SM utilization.",
+      "round_number": 1,
+      "idea_id": "idea_r1_cb8a3b41",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_4292d8"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Multi-stage cp.async pipeline with L1-bypass and SMEM-swizzled tiles - Strategy: Pipeline the K-loop using cp.async (global\u2192shared) with 2\u20134 stages so loads of the next K-slice overlap compute on the current slice. Use cache_modifier=\"cg\" (L2-only) for streaming A/B to avoid L1 thrash from the 1+ GB read. Choose BLOCK_K to fit multi-stage SMEM: - FP32 path: BLOCK_K=32, BLOCK_M=128, BLOCK_N=128 \u2192 per stage \u224832 KB (A) + 32 KB (B) = 64 KB; 3 stages \u2192 ~192 KB (too big). So prefer 2 stages (~128 KB) or reduce tile sizes slightly (e.g., 128x96 or 96x128) to keep 3 stages under 163 KB. - BF16 path: BLOCK_K=64, 128x128 tiles \u2192 per stage \u224816 KB (A) + 16 KB (B) = 32 KB; 3\u20134 stages \u2192 96\u2013128 KB (fits well). - Add a shared-memory swizzle/XOR stride on one operand to avoid 32-bank conflicts during ldmatrix/mma loads; ensure 128B alignment for cp.async. - Set num_stages=3\u20134, num_warps=8; annotate pointers with tl.multiple_of/tl.assume_aligned(16) to enable 128B vectorized transactions. - Why on A100: cp.async and multi-stage buffering substantially hide DRAM latency, especially with huge K. L1 bypass prevents cache thrash, keeping L1 useful for C/epilogue. Bank-conflict-free SMEM maximizes intra-SM bandwidth feeding Tensor Cores or FMAs. - Targets: Asynchronous operations & latency hiding, memory access (coalescing, cache policy), control-flow pipelining.",
+      "round_number": 1,
+      "idea_id": "idea_r1_b63eb97c",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_4292d8"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "- Strategy: Keep A and B as FP32 on input, but route tl.dot to Tensor Cores via TF32. In Triton, enable TF32 lowering (e.g., out_dtype=tl.float32 with allow_tf32=True) so mma.sync.aligned.m16n8k8.tf32 is used under the hood. Use TC-friendly tiles like BLOCK_M=128, BLOCK_N=128, BLOCK_K=64 or 128, num_warps=8, num_stages=3\u20134. Ensure K tiles are multiples of 8 and pointers are 128B aligned. - Why it helps on A100: TF32 on Ampere delivers up to 156 TFLOPS on Tensor Cores while keeping FP32 accumulation, giving a large compute throughput boost without recasting tensors to BF16/FP16 or changing data layout. With massive K, shaving math cycles frees more headroom for overlapping memory, often improving end-to-end time even when the kernel is bandwidth-tilted. - Targets: Data type & compute (Tensor Cores) with minimal integration overhead.",
+      "round_number": 2,
+      "idea_id": "idea_r2_f25f5c54",
+      "parent_kernel_ids": [
+        "kernel_r1_idea_r1_cb8a3b41_0_dab1d5",
+        "kernel_r0_baseline_4292d8",
+        "kernel_r1_idea_r1_d73e4e35_0_19950b"
+      ],
+      "metadata": {
+        "num_best_kernels": 3,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "L2-aware macro-K paneling of B with CTA ordering for cache reuse - Strategy: Introduce a two-level K-loop: macro-K chunks sized to fit a B panel in L2, and micro-K tiles inside the macro processed via normal tiling. Choose K_macro so B[K_macro, N_tile] \u2248 8\u201316 MB (e.g., K_macro=16k\u201332k with N_tile=128), well within A100\u2019s ~40 MB L2. For each macro-K: - Prewarm L2 by prefetching the next B macro-panel (tl.prefetch or dummy loads). - Process all M-tiles for that N-tile before advancing (CTA grid remapping so CTAs that touch the same (N_tile, K_macro) execute close in time). - Use cache_modifier for B loads as \"ca\" (keep) to favor L2 residency; use \"cg\" for A (streaming through L2 only) to avoid L1 thrash. - Inside the macro-K, still use your best micro-kernel (with or without cp.async to SMEM). - Why it helps on A100: With only 4 logical output tiles (2x2) and huge K, the best place to extract reuse is across K for fixed N tiles. Keeping B macro-panels resident in the 40 MB L2 lets all CTAs working that N tile hit L2 instead of DRAM, cutting effective B bandwidth demand. The L2 prefetch and CTA ordering exploit the shared L2 across SMs, raising achievable bandwidth toward the 1.9 TB/s ceiling. - Targets: Memory access optimization (L2 reuse, prefetching, cache policy) and control over grid traversal for better cache locality.",
+      "round_number": 2,
+      "idea_id": "idea_r2_1b7d3b6b",
+      "parent_kernel_ids": [
+        "kernel_r1_idea_r1_cb8a3b41_0_dab1d5",
+        "kernel_r0_baseline_4292d8",
+        "kernel_r1_idea_r1_d73e4e35_0_19950b"
+      ],
+      "metadata": {
+        "num_best_kernels": 3,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "SMEM-free streaming microkernel with register outer-products and software pipelining - Strategy: Build a shared-memory-free kernel that streams A/B directly from global memory into registers and performs outer-product accumulation on a small per-thread register tile. Use wide, aligned vector loads (e.g., float4/ldg.128 via tl.assume_aligned(ptr, 128) and tl.multiple_of) and eliminate masks by padding K to a multiple of BLOCK_K. Apply software pipelining at the register level: pre-load A/B fragments for k+1 while computing k (ping-pong register buffers) and unroll the K loop by 2\u20134 to reduce loop/control overhead. Pick compact tiles to keep register usage in check, e.g., BLOCK_M=64, BLOCK_N=64, BLOCK_K=128\u2013256, num_warps=8, without any __syncthreads barriers. Use st.global.cs (streaming) for the final C writeback to avoid polluting L2. - Why it helps on A100: For this problem there is virtually no K-slice reuse; SMEM tiling can add barriers, bank-conflict hazards, and cp.async management overhead without proportionate benefit. A barrier-free, register-tiled, vectorized streaming kernel maximizes memory throughput, reduces instruction count (fewer address recalculations, no predicated masks), and improves scheduler efficiency. This often narrows the gap to the raw DRAM bandwidth limit on Ampere. - Targets: Memory access optimization (vectorized, aligned LD/ST), compute/instruction optimization (unrolling, fewer barriers), and control-flow simplification (mask elimination via padding).",
+      "round_number": 2,
+      "idea_id": "idea_r2_3340eb32",
+      "parent_kernel_ids": [
+        "kernel_r1_idea_r1_cb8a3b41_0_dab1d5",
+        "kernel_r0_baseline_4292d8",
+        "kernel_r1_idea_r1_d73e4e35_0_19950b"
+      ],
+      "metadata": {
+        "num_best_kernels": 3,
+        "num_previous_ideas": 4
+      }
+    }
+  ],
+  "all_kernels": [
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({\"BLOCK_M\": 16, \"BLOCK_N\": 16, \"BLOCK_K\": 64}, num_warps=4, num_stages=3),\n        triton.Config({\"BLOCK_M\": 16, \"BLOCK_N\": 32, \"BLOCK_K\": 64}, num_warps=4, num_stages=3),\n        triton.Config({\"BLOCK_M\": 32, \"BLOCK_N\": 16, \"BLOCK_K\": 64}, num_warps=4, num_stages=3),\n        triton.Config({\"BLOCK_M\": 32, \"BLOCK_N\": 32, \"BLOCK_K\": 64}, num_warps=8, num_stages=4),\n        triton.Config({\"BLOCK_M\": 16, \"BLOCK_N\": 16, \"BLOCK_K\": 128}, num_warps=4, num_stages=4),\n        triton.Config({\"BLOCK_M\": 16, \"BLOCK_N\": 32, \"BLOCK_K\": 128}, num_warps=4, num_stages=4),\n        triton.Config({\"BLOCK_M\": 32, \"BLOCK_N\": 16, \"BLOCK_K\": 128}, num_warps=4, num_stages=4),\n        triton.Config({\"BLOCK_M\": 32, \"BLOCK_N\": 32, \"BLOCK_K\": 128}, num_warps=8, num_stages=4),\n        triton.Config({\"BLOCK_M\": 16, \"BLOCK_N\": 16, \"BLOCK_K\": 256}, num_warps=8, num_stages=4),\n        triton.Config({\"BLOCK_M\": 32, \"BLOCK_N\": 32, \"BLOCK_K\": 256}, num_warps=8, num_stages=4),\n    ],\n    key=[\"M\", \"N\", \"K\"],\n)\n@triton.jit\ndef matmul_fp16_accum_fp32_kernel(\n    A_ptr, B_ptr, C_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n\n    a_ptrs = A_ptr + (offs_m[:, None] * stride_am) + (offs_k[None, :] * stride_ak)\n    b_ptrs = B_ptr + (offs_k[:, None] * stride_bk) + (offs_n[None, :] * stride_bn)\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Reduction loop\n    for k in range(0, K, BLOCK_K):\n        k_mask = (k + offs_k) < K\n\n        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0).to(tl.float16)\n        b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0).to(tl.float16)\n\n        acc += tl.dot(a, b)\n\n        a_ptrs += BLOCK_K * stride_ak\n        b_ptrs += BLOCK_K * stride_bk\n\n    c_ptrs = C_ptr + (offs_m[:, None] * stride_cm) + (offs_n[None, :] * stride_cn)\n    tl.store(c_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))\n\n\ndef triton_matmul_large_k(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    # Validate shapes\n    assert A.dim() == 2 and B.dim() == 2, \"A and B must be 2D matrices\"\n    M, K_a = A.shape\n    K_b, N = B.shape\n    assert K_a == K_b, \"Inner dimensions must match\"\n    K = K_a\n\n    # If CUDA not available or tensors are on CPU, fall back to torch.matmul\n    if not torch.cuda.is_available():\n        return torch.matmul(A, B)\n\n    # Decide output dtype similar to PyTorch's result_type\n    out_dtype = torch.result_type(A, B)\n\n    # Move to CUDA and cast to fp16 for Tensor Core usage\n    A16 = A.to(device=\"cuda\", dtype=torch.float16, copy=True).contiguous()\n    B16 = B.to(device=\"cuda\", dtype=torch.float16, copy=True).contiguous()\n\n    # Prepare output accumulator in fp32\n    C_acc = torch.empty((M, N), device=A16.device, dtype=torch.float32)\n\n    # Strides in elements\n    stride_am, stride_ak = A16.stride()\n    stride_bk, stride_bn = B16.stride()\n    stride_cm, stride_cn = C_acc.stride()\n\n    # Launch grid\n    grid = lambda meta: (\n        triton.cdiv(M, meta[\"BLOCK_M\"]),\n        triton.cdiv(N, meta[\"BLOCK_N\"]),\n    )\n\n    matmul_fp16_accum_fp32_kernel[grid](\n        A16, B16, C_acc,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n    )\n\n    # Cast to expected dtype\n    if out_dtype != torch.float32:\n        return C_acc.to(out_dtype)\n    return C_acc\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model using a custom Triton kernel for matrix multiplication,\n    specializing for extremely large K with Tensor Cores (fp16 inputs, fp32 accumulation).\n    \"\"\"\n    def __init__(self):\n        super(ModelNew, self).__init__()\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        if A.is_cuda or B.is_cuda:\n            return triton_matmul_large_k(A, B)\n        # If inputs are on CPU and CUDA is unavailable or not desired, fallback\n        if not torch.cuda.is_available():\n            return torch.matmul(A, B)\n        # Move to CUDA for acceleration\n        return triton_matmul_large_k(A, B)\n\n\n# Original shape helpers preserved\nM = 256\nN = 256\nK = 131072 * 4\n\ndef get_inputs():\n    A = torch.rand(M, K)\n    B = torch.rand(K, N)\n    return [A, B]\n\ndef get_init_inputs():\n    return []",
+      "kernel_id": "kernel_r0_baseline_4292d8",
+      "idea_id": "idea_r0_baseline",
+      "round_number": 0,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 2.79,
+        "runtime_stats": {
+          "max": 2.8,
+          "mean": 2.79,
+          "min": 2.78,
+          "num_trials": 100,
+          "std": 0.00489
+        },
+        "ref_runtime": 4.05,
+        "ref_runtime_compiled": 4.09,
+        "speedup": 1.4516129032258063,
+        "speedup_vs_compiled": 1.4659498207885304,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "c33fb78ec2fa1746237a5cfdddf18fb11a23ef358b12de7a5dcef7ef9923dc5a",
+      "metadata": {
+        "is_baseline": true,
+        "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel"
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef matmul_bf16_kernel(\n    A_ptr, B_ptr, C_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]  # (BM, 1)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]  # (1, BN)\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    for k in range(0, K, BLOCK_K):\n        offs_k = k + tl.arange(0, BLOCK_K)\n\n        a_ptrs = A_ptr + offs_m * stride_am + offs_k[None, :] * stride_ak  # (BM, BK)\n        b_ptrs = B_ptr + offs_k[:, None] * stride_bk + offs_n * stride_bn  # (BK, BN)\n\n        a_mask = (offs_m < M) & (offs_k[None, :] < K)\n        b_mask = (offs_k[:, None] < K) & (offs_n < N)\n\n        a = tl.load(a_ptrs, mask=a_mask, other=0).to(tl.bfloat16)\n        b = tl.load(b_ptrs, mask=b_mask, other=0).to(tl.bfloat16)\n\n        acc += tl.dot(a, b)\n\n    c_ptrs = C_ptr + offs_m * stride_cm + offs_n * stride_cn\n    c_mask = (offs_m < M) & (offs_n < N)\n    tl.store(c_ptrs, acc, mask=c_mask)\n\n\ndef triton_matmul_bf16(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    assert A.is_cuda and B.is_cuda, \"Tensors must be on CUDA for Triton kernel.\"\n    assert A.ndim == 2 and B.ndim == 2, \"A and B must be 2D matrices.\"\n    M, K = A.shape\n    Kb, N = B.shape\n    assert K == Kb, \"Incompatible matrix shapes.\"\n\n    # Convert to BF16 to leverage Tensor Cores and halve bandwidth\n    A_bf16 = A.to(dtype=torch.bfloat16).contiguous()\n    B_bf16 = B.to(dtype=torch.bfloat16).contiguous()\n\n    C = torch.empty((M, N), device=A.device, dtype=torch.float32)\n\n    # Strides in elements (row-major)\n    stride_am, stride_ak = A_bf16.stride()\n    stride_bk, stride_bn = B_bf16.stride()\n    stride_cm, stride_cn = C.stride()\n\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 64\n    num_warps = 8\n    num_stages = 4\n\n    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))\n    matmul_bf16_kernel[grid](\n        A_bf16, B_bf16, C,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=num_warps, num_stages=num_stages,\n    )\n    return C\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model that performs matrix multiplication using a custom Triton kernel.\n    Inputs are cast to bfloat16, accumulation is in float32 to leverage A100 Tensor Cores.\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        # If tensors are on CUDA, run optimized Triton kernel; else fallback to PyTorch matmul.\n        if A.is_cuda and B.is_cuda:\n            return triton_matmul_bf16(A, B)\n        else:\n            # Optional: if either is on CPU, fall back to PyTorch for correctness.\n            return torch.matmul(A, B)",
+      "kernel_id": "kernel_r1_idea_r1_d73e4e35_0_19950b",
+      "idea_id": "idea_r1_d73e4e35",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 9.84,
+        "runtime_stats": {
+          "max": 9.91,
+          "mean": 9.84,
+          "min": 9.84,
+          "num_trials": 100,
+          "std": 0.00788
+        },
+        "ref_runtime": 3.99,
+        "ref_runtime_compiled": 3.7,
+        "speedup": 0.4054878048780488,
+        "speedup_vs_compiled": 0.37601626016260165,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "6b62e721db20714c389ce3b9e73f975c89c4a858c568c0deb4f2ad2020e342a7",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "- Strategy: Convert A and B to bfloat16 (preferred for robustness) or fp16, keep accumulation in fp32, and tile so tl.dot lowers to mma.sync on Tensor Cores. Use TC-friendly shapes, e.g., BLOCK_M=128, BLOCK_N=128, BLOCK_K=64 (multiples of 16/32), num_warps=8, num_stages=4. Ensure K is a multiple of 16 (it is), and pre-cast inputs on the host to halve memory traffic. - Why on A100: Ampere provides up to 312 TFLOPS for BF16/FP16 Tensor Cores vs 19.5 TFLOPS FP32, and you also cut A/B bandwidth in half. With K very large, both compute and memory benefits are substantial. Accumulating in FP32 preserves accuracy. - Targets: Data type & compute (Tensor Cores), memory bandwidth (halved A/B loads).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import math\nimport torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef matmul_splitk_kernel(\n    a_ptr, b_ptr, c_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    K_CHUNK,\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr\n):\n    pid_n = tl.program_id(0)\n    pid_m = tl.program_id(1)\n    pid_s = tl.program_id(2)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Iterate over this split's K-chunk with fixed iteration count\n    for kk in range(0, K_CHUNK, BLOCK_K):\n        k0 = pid_s * K_CHUNK + kk\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n\n        a_mask = (offs_m[:, None] < M) & (offs_k[None, :] < K)\n        b_mask = (offs_k[:, None] < K) & (offs_n[None, :] < N)\n\n        a = tl.load(a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak, mask=a_mask, other=0.0)\n        b = tl.load(b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn, mask=b_mask, other=0.0)\n\n        acc += tl.dot(a, b)\n\n    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn\n    tl.atomic_add(c_ptrs, acc, mask=c_mask)\n\n\ndef _cdiv(a, b):\n    return (a + b - 1) // b\n\n\ndef triton_matmul_splitk(A: torch.Tensor, B: torch.Tensor, split_k: int = 32,\n                         BLOCK_M: int = 128, BLOCK_N: int = 128, BLOCK_K: int = 64) -> torch.Tensor:\n    assert A.is_cuda and B.is_cuda, \"Inputs must be CUDA tensors\"\n    assert A.dtype == torch.float32 and B.dtype == torch.float32, \"Only float32 is supported\"\n    assert A.shape[1] == B.shape[0], \"Incompatible shapes for matmul\"\n\n    M, K = A.shape\n    Kb, N = B.shape\n    assert K == Kb\n\n    A = A.contiguous()\n    B = B.contiguous()\n\n    C = torch.zeros((M, N), device=A.device, dtype=torch.float32)\n\n    stride_am, stride_ak = A.stride()\n    stride_bk, stride_bn = B.stride()\n    stride_cm, stride_cn = C.stride()\n\n    K_CHUNK = _cdiv(K, split_k)\n\n    grid = (triton.cdiv(N, BLOCK_N), triton.cdiv(M, BLOCK_M), split_k)\n\n    matmul_splitk_kernel[grid](\n        A, B, C,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n        K_CHUNK,\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=8, num_stages=3,\n    )\n    return C\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model using Triton split-K GEMM with atomic reduction.\n    \"\"\"\n    def __init__(self, split_k: int = 32, block_m: int = 128, block_n: int = 128, block_k: int = 64):\n        super().__init__()\n        self.split_k = split_k\n        self.block_m = block_m\n        self.block_n = block_n\n        self.block_k = block_k\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        orig_device = A.device\n        # Move to CUDA and ensure float32 for atomicAdd support and best precision\n        A_cuda = A.to(device='cuda', dtype=torch.float32, copy=False).contiguous()\n        B_cuda = B.to(device='cuda', dtype=torch.float32, copy=False).contiguous()\n\n        C_cuda = triton_matmul_splitk(\n            A_cuda, B_cuda,\n            split_k=self.split_k,\n            BLOCK_M=self.block_m,\n            BLOCK_N=self.block_n,\n            BLOCK_K=self.block_k\n        )\n        # Return on original device\n        if orig_device.type == 'cuda':\n            return C_cuda\n        return C_cuda.to(orig_device)",
+      "kernel_id": "kernel_r1_idea_r1_cb8a3b41_0_dab1d5",
+      "idea_id": "idea_r1_cb8a3b41",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 1.38,
+        "runtime_stats": {
+          "max": 1.4,
+          "mean": 1.38,
+          "min": 1.38,
+          "num_trials": 100,
+          "std": 0.00282
+        },
+        "ref_runtime": 3.86,
+        "ref_runtime_compiled": 3.96,
+        "speedup": 2.7971014492753623,
+        "speedup_vs_compiled": 2.8695652173913047,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "c77602739f3877e9f642868599257f21b631fc60fdd8c39fa97fc0e1c2a1b2dd",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Split-K parallel reduction to saturate SMs and improve latency hiding - Strategy: Split the giant K into split_k chunks (e.g., 16\u201364), launch CTAs over (M_tile, N_tile, K_chunk), each CTA computes a partial C tile over its K range, then reduce across K-chunks. Use either: - One-pass atomicAdd on C in FP32 at the end of each CTA, or - Two-pass: write partials to a scratch buffer [M, N, split_k] then launch a lightweight reduction kernel. For this problem size (256x256), scratch with split_k=32 is ~8.4 MB (manageable). - Example tiling: BLOCK_M=128, BLOCK_N=128 \u2192 base grid is 2x2=4 CTAs; with split_k=32 \u2192 128 CTAs, enough to keep 80\u2013108 SMs busy. Tune split_k to maintain high occupancy without excessive contention. - Why on A100: Without split-K, only 4 CTAs exist; that underutilizes an A100. Split-K creates sufficient parallel work to hide memory latency and better utilize the 64K registers/SM and 163 KB SMEM. Ampere\u2019s FP32 atomics are fast enough for this scale, and L2 can service concurrent CTAs efficiently. - Targets: Parallelism & occupancy, latency hiding (via more CTAs), better SM utilization.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        # BF16/FP16 tensor-core friendly configs\n        triton.Config(\n            {'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 64, 'GROUP_M': 8},\n            num_stages=4, num_warps=8\n        ),\n        triton.Config(\n            {'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8},\n            num_stages=4, num_warps=4\n        ),\n        triton.Config(\n            {'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 64, 'GROUP_M': 8},\n            num_stages=4, num_warps=4\n        ),\n        # FP32-friendly configs (smaller BLOCK_K to fit 2\u20133 stages within SMEM limits)\n        triton.Config(\n            {'BLOCK_M': 128, 'BLOCK_N': 96, 'BLOCK_K': 32, 'GROUP_M': 8},\n            num_stages=3, num_warps=8\n        ),\n        triton.Config(\n            {'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 32, 'GROUP_M': 8},\n            num_stages=2, num_warps=4\n        ),\n    ],\n    key=['M', 'N', 'K', 'USE_TC'],\n)\n@triton.jit\ndef matmul_async_kernel(\n    A, B, C,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    USE_TC: tl.constexpr,  # 1 if A/B are bf16/fp16 (tensor cores), 0 if fp32\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,\n    GROUP_M: tl.constexpr,\n):\n    # Program id\n    pid = tl.program_id(0)\n    # Number of blocks along the M and N dimensions\n    num_pid_m = tl.cdiv(M, BLOCK_M)\n    num_pid_n = tl.cdiv(N, BLOCK_N)\n\n    # Grouped ordering along M to improve L2 reuse on B tiles\n    group_size = GROUP_M\n    num_full_groups = num_pid_m // group_size\n    group_id = pid // (num_pid_n * group_size)\n    group_id = tl.minimum(group_id, num_full_groups)\n    first_m = group_id * group_size\n    pid_in_group = pid % (num_pid_n * group_size)\n    pid_m = first_m + (pid_in_group % group_size)\n    pid_n = pid_in_group // group_size\n\n    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    rk = tl.arange(0, BLOCK_K)\n\n    # Pointers for the first K-tile\n    a_ptrs = A + rm[:, None] * stride_am + rk[None, :] * stride_ak\n    b_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn\n\n    # Accumulator in FP32\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Alignment & vectorization hints\n    tl.multiple_of(rm, BLOCK_M)\n    tl.multiple_of(rn, BLOCK_N)\n    tl.multiple_of(rk, BLOCK_K)\n\n    # Main K loop with software pipelining (num_stages>1 -> cp.async on Ampere)\n    k0 = 0\n    while k0 < K:\n        # Masks for boundary conditions\n        a_mask = (rm[:, None] < M) & (k0 + rk[None, :] < K)\n        b_mask = (k0 + rk[:, None] < K) & (rn[None, :] < N)\n\n        # L2-only loads to avoid L1 thrash on streaming A/B\n        # Triton will pipeline these across stages when num_stages>1\n        a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=\"cg\")\n        b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=\"cg\")\n\n        # Compute\n        # For tensor-core types (bf16/fp16), tl.dot will lower to mma.sync.\n        # For fp32, it will lower to FMA loop.\n        acc += tl.dot(a, b)\n\n        # Advance to next K-slice\n        k0 += BLOCK_K\n        a_ptrs += BLOCK_K * stride_ak\n        b_ptrs += BLOCK_K * stride_bk\n\n    # Write back\n    c_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn\n    c_mask = (rm[:, None] < M) & (rn[None, :] < N)\n    tl.store(c_ptrs, acc, mask=c_mask)\n\n\ndef triton_matmul_async(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    assert A.dim() == 2 and B.dim() == 2, \"A and B must be 2D\"\n    assert A.shape[1] == B.shape[0], \"Incompatible matmul shapes\"\n    M, K = A.shape\n    K2, N = B.shape\n    assert K == K2\n\n    # Ensure CUDA and contiguity\n    device = torch.device('cuda')\n    A = A.to(device, non_blocking=True).contiguous()\n    B = B.to(device, non_blocking=True).contiguous()\n\n    # Choose compute dtype: prefer bf16 on A100 to use tensor cores\n    orig_dtype = torch.result_type(A, B)\n    use_tc = False\n    if A.dtype in (torch.bfloat16, torch.float16) and B.dtype == A.dtype:\n        compute_dtype = A.dtype\n        use_tc = True\n    else:\n        # Cast to bf16 for compute to leverage tensor cores; accumulate in fp32\n        compute_dtype = torch.bfloat16\n        A = A.to(compute_dtype)\n        B = B.to(compute_dtype)\n        use_tc = True\n\n    # Output will be FP32 accumulation; cast to original dtype to match torch.matmul behavior\n    C = torch.empty((M, N), device=device, dtype=torch.float32)\n\n    # Strides in elements\n    stride_am, stride_ak = A.stride()\n    stride_bk, stride_bn = B.stride()\n    stride_cm, stride_cn = C.stride()\n\n    # Grid: total number of programs\n    def grid(meta):\n        return (\n            triton.cdiv(M, meta['BLOCK_M']) * triton.cdiv(N, meta['BLOCK_N']),\n        )\n\n    matmul_async_kernel[grid](\n        A, B, C,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n        int(use_tc),\n    )\n\n    # Cast to input's expected output dtype (match torch.matmul with original inputs)\n    if orig_dtype != torch.float32:\n        return C.to(orig_dtype)\n    return C\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized matmul using a Triton kernel with multi-stage cp.async pipelining,\n    L1-bypass streaming loads, and tensor-core acceleration when possible.\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        return triton_matmul_async(A, B)",
+      "kernel_id": "kernel_r1_idea_r1_b63eb97c_0_8e4fa0",
+      "idea_id": "idea_r1_b63eb97c",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 52:12:\n    tl.multiple_of(rk, BLOCK_K)\n\n    # Main K loop with software pipelining (num_stages>1 -> cp.async on Ampere)\n    k0 = 0\n    while k0 < K:\n        # Masks for boundary conditions\n     ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "d768cea9fb1d4bf2088ca807d30e9af028ee860e2d65abb22467949bd13d7ba6",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Multi-stage cp.async pipeline with L1-bypass and SMEM-swizzled tiles - Strategy: Pipeline the K-loop using cp.async (global\u2192shared) with 2\u20134 stages so loads of the next K-slice overlap compute on the current slice. Use cache_modifier=\"cg\" (L2-only) for streaming A/B to avoid L1 thrash from the 1+ GB read. Choose BLOCK_K to fit multi-stage SMEM: - FP32 path: BLOCK_K=32, BLOCK_M=128, BLOCK_N=128 \u2192 per stage \u224832 KB (A) + 32 KB (B) = 64 KB; 3 stages \u2192 ~192 KB (too big). So prefer 2 stages (~128 KB) or reduce tile sizes slightly (e.g., 128x96 or 96x128) to keep 3 stages under 163 KB. - BF16 path: BLOCK_K=64, 128x128 tiles \u2192 per stage \u224816 KB (A) + 16 KB (B) = 32 KB; 3\u20134 stages \u2192 96\u2013128 KB (fits well). - Add a shared-memory swizzle/XOR stride on one operand to avoid 32-bank conflicts during ldmatrix/mma loads; ensure 128B alignment for cp.async. - Set num_stages=3\u20134, num_warps=8; annotate pointers with tl.multiple_of/tl.assume_aligned(16) to enable 128B vectorized transactions. - Why on A100: cp.async and multi-stage buffering substantially hide DRAM latency, especially with huge K. L1 bypass prevents cache thrash, keeping L1 useful for C/epilogue. Bank-conflict-free SMEM maximizes intra-SM bandwidth feeding Tensor Cores or FMAs. - Targets: Asynchronous operations & latency hiding, memory access (coalescing, cache policy), control-flow pipelining.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef matmul_tf32_kernel(\n    A_ptr, B_ptr, C_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    BLOCK_K: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n\n    a_ptrs = A_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)\n    b_ptrs = B_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    k_iter = 0\n    # Ensures good codegen for Tensor Cores (K multiple of 8)\n    tl.multiple_of(BLOCK_K, 8)\n    tl.multiple_of(offs_k, 8)\n\n    while k_iter < K:\n        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & (offs_k[None, :] + k_iter < K), other=0.0)\n        b = tl.load(b_ptrs, mask=(offs_k[:, None] + k_iter < K) & (offs_n[None, :] < N), other=0.0)\n        # Route tl.dot to Tensor Cores via TF32, accumulate in FP32\n        acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=True)\n        k_iter += BLOCK_K\n        a_ptrs += BLOCK_K * stride_ak\n        b_ptrs += BLOCK_K * stride_bk\n\n    c_ptrs = C_ptr + (offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)\n    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    tl.store(c_ptrs, acc, mask=c_mask)\n\n\ndef triton_matmul_tf32(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    assert A.dim() == 2 and B.dim() == 2, \"A and B must be 2D tensors\"\n    assert A.dtype == torch.float32 and B.dtype == torch.float32, \"A and B must be float32\"\n    assert A.is_cuda and B.is_cuda, \"A and B must be CUDA tensors\"\n\n    M, K = A.shape\n    K_b, N = B.shape\n    assert K == K_b, \"Incompatible dimensions\"\n\n    A = A.contiguous()\n    B = B.contiguous()\n\n    C = torch.empty((M, N), device=A.device, dtype=torch.float32)\n\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 64  # multiple of 8 to enable TF32 MMA\n\n    grid = lambda meta: (\n        triton.cdiv(M, meta[\"BLOCK_M\"]),\n        triton.cdiv(N, meta[\"BLOCK_N\"]),\n    )\n\n    matmul_tf32_kernel[grid](\n        A, B, C,\n        M, N, K,\n        A.stride(0), A.stride(1),\n        B.stride(0), B.stride(1),\n        C.stride(0), C.stride(1),\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=8, num_stages=4,\n    )\n    return C\n\n\nclass ModelNew(nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        # Ensure FP32 inputs; move to CUDA for Triton kernel\n        orig_device = A.device\n        A_cu = A.to(device='cuda', dtype=torch.float32, non_blocking=True)\n        B_cu = B.to(device='cuda', dtype=torch.float32, non_blocking=True)\n        C_cu = triton_matmul_tf32(A_cu, B_cu)\n        # Return on the original device of A for API compatibility\n        if orig_device.type == 'cuda':\n            return C_cu\n        else:\n            return C_cu.to(orig_device)",
+      "kernel_id": "kernel_r2_idea_r2_f25f5c54_0_656c06",
+      "idea_id": "idea_r2_f25f5c54",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 25:4:\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n\n    a_ptrs = A_ptr + (offs_m[:, None] * stride...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "04134c709a89456daac4e170005d5c210d26df9f7ebd46315a60fb7c455fc76f",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "- Strategy: Keep A and B as FP32 on input, but route tl.dot to Tensor Cores via TF32. In Triton, enable TF32 lowering (e.g., out_dtype=tl.float32 with allow_tf32=True) so mma.sync.aligned.m16n8k8.tf32 is used under the hood. Use TC-friendly tiles like BLOCK_M=128, BLOCK_N=128, BLOCK_K=64 or 128, num_warps=8, num_stages=3\u20134. Ensure K tiles are multiples of 8 and pointers are 128B aligned. - Why it helps on A100: TF32 on Ampere delivers up to 156 TFLOPS on Tensor Cores while keeping FP32 accumulation, giving a large compute throughput boost without recasting tensors to BF16/FP16 or changing data layout. With massive K, shaving math cycles frees more headroom for overlapping memory, often improving end-to-end time even when the kernel is bandwidth-tilted. - Targets: Data type & compute (Tensor Cores) with minimal integration overhead.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\ndef _round_down_multiple(x, mult):\n    return (x // mult) * mult\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"BLOCK_K\": 32, \"GROUP_M\": 8}, num_stages=4, num_warps=4),\n        triton.Config({\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"BLOCK_K\": 32, \"GROUP_M\": 8}, num_stages=4, num_warps=8),\n        triton.Config({\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"BLOCK_K\": 64, \"GROUP_M\": 8}, num_stages=4, num_warps=4),\n        triton.Config({\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"BLOCK_K\": 64, \"GROUP_M\": 4}, num_stages=5, num_warps=8),\n        triton.Config({\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"BLOCK_K\": 64, \"GROUP_M\": 8}, num_stages=4, num_warps=4),\n    ],\n    key=[\"M\", \"N\", \"K\"],\n)\n@triton.jit\ndef matmul_l2panel_kernel(\n    A_ptr, B_ptr, C_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    KMACRO: tl.constexpr,\n    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,\n    GROUP_M: tl.constexpr,\n):\n    pid = tl.program_id(axis=0)\n    num_pid_m = tl.cdiv(M, BLOCK_M)\n    num_pid_n = tl.cdiv(N, BLOCK_N)\n    # CTA ordering: iterate across M for a fixed N tile to promote L2 reuse of B\n    group_m = GROUP_M\n    group_size = group_m * num_pid_n\n    group_id = pid // group_m\n    first_pid_m = (group_id * group_m) % num_pid_m\n    pid_m = first_pid_m + (pid % group_m)\n    pid_n = (pid // group_m) % num_pid_n\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n\n    # Accumulator\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Helper for pointer creation\n    A_row_ptrs = A_ptr + (offs_m[:, None] * stride_am)  # shape [BM, 1]\n    B_col_ptrs = B_ptr + (offs_n[None, :] * stride_bn)  # shape [1, BN]\n\n    # Macro-K paneling loop\n    kmacro = 0\n    while kmacro < K:\n        k_macro_size = tl.minimum(KMACRO, K - kmacro)\n\n        # L2 prewarm for the next B macro-panel (dummy loads)\n        next_kmacro = kmacro + k_macro_size\n        if next_kmacro < K:\n            pf_k = next_kmacro + offs_k  # prefetch first micro tile of next macro\n            pf_mask = (pf_k[:, None] < K) & (offs_n[None, :] < N)\n            b_pf_ptrs = B_ptr + (pf_k[:, None] * stride_bk) + (offs_n[None, :] * stride_bn)\n            # load with 'ca' to encourage residency, discard result\n            _ = tl.load(b_pf_ptrs, mask=pf_mask, other=0.0, cache_modifier=\"ca\")\n\n        # Micro-K loop inside the macro panel\n        k_inner = 0\n        while k_inner < k_macro_size:\n            k_curr = kmacro + k_inner + offs_k\n            a_ptrs = A_row_ptrs + (k_curr[None, :] * stride_ak)  # [BM, BK]\n            b_ptrs = B_col_ptrs + (k_curr[:, None] * stride_bk)  # [BK, BN]\n\n            a_mask = (offs_m[:, None] < M) & (k_curr[None, :] < K)\n            b_mask = (k_curr[:, None] < K) & (offs_n[None, :] < N)\n\n            # A as streaming (bypass L1), B cached in all levels to favor L2 residency\n            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=\"cg\")\n            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=\"ca\")\n            acc += tl.dot(a, b)\n\n            k_inner += BLOCK_K\n\n        kmacro += k_macro_size\n\n    # Write back\n    c_ptrs = C_ptr + (offs_m[:, None] * stride_cm) + (offs_n[None, :] * stride_cn)\n    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    tl.store(c_ptrs, acc, mask=c_mask)\n\n\ndef triton_matmul_l2panel(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n    assert A.dim() == 2 and B.dim() == 2, \"A and B must be rank-2\"\n    assert A.shape[1] == B.shape[0], \"Incompatible shapes\"\n    M, K = A.shape\n    Kb, N = B.shape\n    assert K == Kb\n\n    # Ensure CUDA / contiguous\n    if not A.is_cuda:\n        A = A.cuda(non_blocking=True)\n    if not B.is_cuda:\n        B = B.cuda(non_blocking=True)\n    A = A.contiguous()\n    B = B.contiguous()\n\n    dtype = A.dtype\n    assert dtype == B.dtype, \"A and B must have same dtype\"\n    # We support float32 primarily; extend as needed\n    if dtype not in (torch.float32,):\n        A = A.float()\n        B = B.float()\n        dtype = torch.float32\n\n    C = torch.empty((M, N), device=A.device, dtype=dtype)\n\n    # Strides (row-major)\n    stride_am = A.stride(0)\n    stride_ak = A.stride(1)\n    stride_bk = B.stride(0)\n    stride_bn = B.stride(1)\n    stride_cm = C.stride(0)\n    stride_cn = C.stride(1)\n\n    # Choose meta-parameters from autotuner default; we need BN to size KMACRO\n    # We'll pick a conservative BN guess for sizing KMACRO; actual BN used may differ per autotune config.\n    # To keep consistent, use a nominal BN=128; KMACRO is clamped by K and rounded to BLOCK_K inside kernel loop logic.\n    nominal_BLOCK_N = 128\n\n    # Target B panel size for L2: 8\u201316 MB; choose 16MB\n    target_bytes = 16 * 1024 * 1024\n    elem_size = A.element_size()\n    # KMACRO computed for nominal BLOCK_N; kernel will clamp by K anyway\n    kmacro_elems = max(1, target_bytes // (elem_size * max(1, nominal_BLOCK_N)))\n    # Round down to a multiple of 32 for safety; final BLOCK_K rounding inherently occurs in loop\n    kmacro_elems = _round_down_multiple(min(K, kmacro_elems), 32)\n    # Clamp to reasonable bounds [8k, 64k] when possible\n    if kmacro_elems >= 8192:\n        kmacro_elems = min(kmacro_elems, 65536)\n    if kmacro_elems == 0:\n        kmacro_elems = min(K, 8192) if K >= 8192 else K\n\n    # Grid mapping: linearized with grouped M to keep same N tile close -> improved L2 reuse of B\n    def grid(meta):\n        BLOCK_M = meta[\"BLOCK_M\"]\n        BLOCK_N = meta[\"BLOCK_N\"]\n        return (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)\n\n    matmul_l2panel_kernel[grid](\n        A, B, C,\n        M, N, K,\n        stride_am, stride_ak,\n        stride_bk, stride_bn,\n        stride_cm, stride_cn,\n        KMACRO=kmacro_elems,\n    )\n    return C\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    L2-aware macro-K paneled GEMM using Triton with CTA ordering for cache reuse.\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        return triton_matmul_l2panel(A, B)",
+      "kernel_id": "kernel_r2_idea_r2_1b7d3b6b_0_52c3db",
+      "idea_id": "idea_r2_1b7d3b6b",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 45:16:\n    kmacro = 0\n    while kmacro < K:\n        k_macro_size = tl.minimum(KMACRO, K - kmacro)\n\n        # L2 prewarm for the next B macro-panel (dummy loads)\n        next_kmacro = kmacro + k_...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "8fd5c531797da5fb1980ec3d1a64f93c9ac7e10bbeb2f607e514aea88efd7fb4",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "L2-aware macro-K paneling of B with CTA ordering for cache reuse - Strategy: Introduce a two-level K-loop: macro-K chunks sized to fit a B panel in L2, and micro-K tiles inside the macro processed via normal tiling. Choose K_macro so B[K_macro, N_tile] \u2248 8\u201316 MB (e.g., K_macro=16k\u201332k with N_tile=128), well within A100\u2019s ~40 MB L2. For each macro-K: - Prewarm L2 by prefetching the next B macro-panel (tl.prefetch or dummy loads). - Process all M-tiles for that N-tile before advancing (CTA grid remapping so CTAs that touch the same (N_tile, K_macro) execute close in time). - Use cache_modifier for B loads as \"ca\" (keep) to favor L2 residency; use \"cg\" for A (streaming through L2 only) to avoid L1 thrash. - Inside the macro-K, still use your best micro-kernel (with or without cp.async to SMEM). - Why it helps on A100: With only 4 logical output tiles (2x2) and huge K, the best place to extract reuse is across K for fixed N tiles. Keeping B macro-panels resident in the 40 MB L2 lets all CTAs working that N tile hit L2 instead of DRAM, cutting effective B bandwidth demand. The L2 prefetch and CTA ordering exploit the shared L2 across SMs, raising achievable bandwidth toward the 1.9 TB/s ceiling. - Targets: Memory access optimization (L2 reuse, prefetching, cache policy) and control over grid traversal for better cache locality.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import math\nimport torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef _matmul_stream_kernel(\n    A_ptr, B_ptr, C_ptr,\n    M, N, K,\n    stride_am, stride_ak,\n    stride_bk, stride_bn,\n    stride_cm, stride_cn,\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    MICRO_K: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    # Masks for boundary (kept only for safety; typically M,N are multiples of BLOCKs)\n    mask_m = offs_m < M\n    mask_n = offs_n < N\n\n    # Accumulator in FP32\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Prepare base pointers for rows\n    # A: [M, K], row-major -> stride_am = K, stride_ak = 1\n    # B: [K, N], row-major -> stride_bk = N, stride_bn = 1\n    # C: [M, N], row-major -> stride_cm = N, stride_cn = 1\n\n    # Software pipelined streaming over K with register ping-pong buffers\n    k0 = 0\n    k_idx = tl.arange(0, MICRO_K)\n    # Preload first micro-chunk\n    a_ptrs = A_ptr + (offs_m[:, None] * stride_am + (k0 + k_idx[None, :]) * stride_ak)\n    b_ptrs = B_ptr + ((k0 + k_idx)[:, None] * stride_bk + (offs_n[None, :] * stride_bn))\n    # Alignment hints for vectorization\n    tl.multiple_of(a_ptrs, 16)\n    tl.multiple_of(b_ptrs, 16)\n    a_cur = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0, cache_modifier=\"CG\")\n    b_cur = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0, cache_modifier=\"CG\")\n\n    for k in range(0, K, MICRO_K):\n        k_next = k + MICRO_K\n        # Prefetch next micro-chunk\n        if k_next < K:\n            a_ptrs_n = A_ptr + (offs_m[:, None] * stride_am + (k_next + k_idx[None, :]) * stride_ak)\n            b_ptrs_n = B_ptr + ((k_next + k_idx)[:, None] * stride_bk + (offs_n[None, :] * stride_bn))\n            tl.multiple_of(a_ptrs_n, 16)\n            tl.multiple_of(b_ptrs_n, 16)\n            a_next = tl.load(a_ptrs_n, mask=mask_m[:, None], other=0.0, cache_modifier=\"CG\")\n            b_next = tl.load(b_ptrs_n, mask=mask_n[None, :], other=0.0, cache_modifier=\"CG\")\n\n        # Compute on current micro-chunk via outer-product accumulation\n        # Unroll by 4 to reduce loop/control overhead\n        for kk in range(0, MICRO_K, 4):\n            a0 = a_cur[:, kk + 0]\n            b0 = b_cur[kk + 0, :]\n            acc += a0[:, None] * b0[None, :]\n\n            a1 = a_cur[:, kk + 1]\n            b1 = b_cur[kk + 1, :]\n            acc += a1[:, None] * b1[None, :]\n\n            a2 = a_cur[:, kk + 2]\n            b2 = b_cur[kk + 2, :]\n            acc += a2[:, None] * b2[None, :]\n\n            a3 = a_cur[:, kk + 3]\n            b3 = b_cur[kk + 3, :]\n            acc += a3[:, None] * b3[None, :]\n\n        # Advance: swap buffers\n        if k_next < K:\n            a_cur = a_next\n            b_cur = b_next\n\n    # Writeback with streaming store to avoid polluting L2\n    c_ptrs = C_ptr + (offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)\n    tl.store(c_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :], cache_modifier=\"CS\")\n\n\ndef _ceil_div(a, b):\n    return (a + b - 1) // b\n\n\ndef triton_matmul_streaming(A: torch.Tensor, B: torch.Tensor, block_m=64, block_n=64, micro_k=16):\n    assert A.dim() == 2 and B.dim() == 2, \"A and B must be 2D\"\n    assert A.shape[1] == B.shape[0], \"Incompatible matmul shapes\"\n\n    M, K = A.shape\n    Kb, N = B.shape\n    assert K == Kb\n\n    # Move to CUDA if necessary\n    orig_device = A.device\n    if not A.is_cuda or not B.is_cuda:\n        A = A.cuda(non_blocking=True)\n        B = B.cuda(non_blocking=True)\n\n    # Ensure dtypes match, compute accumulations in fp32\n    if A.dtype != B.dtype:\n        B = B.to(dtype=A.dtype)\n\n    # Pad K to a multiple of micro_k to eliminate masks in K\n    K_pad = math.ceil(K / micro_k) * micro_k\n    if K_pad != K:\n        A_pad = torch.empty((M, K_pad), device=A.device, dtype=A.dtype)\n        B_pad = torch.empty((K_pad, N), device=B.device, dtype=B.dtype)\n        A_pad[:, :K].copy_(A)\n        A_pad[:, K:].zero_()\n        B_pad[:K, :].copy_(B)\n        B_pad[K:, :].zero_()\n        A = A_pad\n        B = B_pad\n    else:\n        # Make sure contiguous to get aligned vector loads\n        A = A.contiguous()\n        B = B.contiguous()\n\n    # Output tensor (accumulate in fp32, cast to input dtype at the end)\n    C_acc = torch.empty((M, N), device=A.device, dtype=torch.float32)\n\n    grid = (_ceil_div(M, block_m), _ceil_div(N, block_n))\n\n    _matmul_stream_kernel[grid](\n        A, B, C_acc,\n        M, N, K_pad,\n        A.stride(0), A.stride(1),\n        B.stride(0), B.stride(1),\n        C_acc.stride(0), C_acc.stride(1),\n        BLOCK_M=block_m, BLOCK_N=block_n, MICRO_K=micro_k,\n        num_warps=8, num_stages=1,\n    )\n\n    # Cast back to input dtype\n    out = C_acc.to(dtype=A.dtype)\n    # If original inputs were on CPU, bring result back\n    if orig_device.type == \"cpu\":\n        out = out.cpu()\n    return out\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized SMEM-free streaming GEMM with register outer-products and software pipelining.\n    \"\"\"\n    def __init__(self, block_m: int = 64, block_n: int = 64, micro_k: int = 16):\n        super().__init__()\n        self.block_m = block_m\n        self.block_n = block_n\n        self.micro_k = micro_k\n\n    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:\n        # Fallback to torch.matmul if no CUDA available\n        if not torch.cuda.is_available():\n            return torch.matmul(A, B)\n        return triton_matmul_streaming(A, B, self.block_m, self.block_n, self.micro_k)\n\n\n# Reference shapes for convenience (not required by the model)\nM = 256\nN = 256\nK = 131072 * 4\n\n\ndef get_inputs():\n    A = torch.rand(M, K)\n    B = torch.rand(K, N)\n    return [A, B]\n\n\ndef get_init_inputs():\n    return []",
+      "kernel_id": "kernel_r2_idea_r2_3340eb32_0_4f28a0",
+      "idea_id": "idea_r2_3340eb32",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 36:4:\n    # A: [M, K], row-major -> stride_am = K, stride_ak = 1\n    # B: [K, N], row-major -> stride_bk = N, stride_bn = 1\n    # C: [M, N], row-major -> stride_cm = N, stride_cn = 1\n\n    # Soft...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "dbd24abaca0888885219bdc1ab87348aa5b2037058be8ec86d601e892a71e51f",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "SMEM-free streaming microkernel with register outer-products and software pipelining - Strategy: Build a shared-memory-free kernel that streams A/B directly from global memory into registers and performs outer-product accumulation on a small per-thread register tile. Use wide, aligned vector loads (e.g., float4/ldg.128 via tl.assume_aligned(ptr, 128) and tl.multiple_of) and eliminate masks by padding K to a multiple of BLOCK_K. Apply software pipelining at the register level: pre-load A/B fragments for k+1 while computing k (ping-pong register buffers) and unroll the K loop by 2\u20134 to reduce loop/control overhead. Pick compact tiles to keep register usage in check, e.g., BLOCK_M=64, BLOCK_N=64, BLOCK_K=128\u2013256, num_warps=8, without any __syncthreads barriers. Use st.global.cs (streaming) for the final C writeback to avoid polluting L2. - Why it helps on A100: For this problem there is virtually no K-slice reuse; SMEM tiling can add barriers, bank-conflict hazards, and cp.async management overhead without proportionate benefit. A barrier-free, register-tiled, vectorized streaming kernel maximizes memory throughput, reduces instruction count (fewer address recalculations, no predicated masks), and improves scheduler efficiency. This often narrows the gap to the raw DRAM bandwidth limit on Ampere. - Targets: Memory access optimization (vectorized, aligned LD/ST), compute/instruction optimization (unrolling, fewer barriers), and control-flow simplification (mask elimination via padding).",
+        "temperature": 1.0
+      }
+    }
+  ]
+}

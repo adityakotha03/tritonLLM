@@ -1,0 +1,23 @@
+================================================================================
+KERNEL OPTIMIZATION SEARCH RESULTS
+================================================================================
+Problem: 35_Conv2d_Subtract_HardSwish_MaxPool_Mish
+GPU: A100-80GB
+Model: gpt-5 (openai)
+Rounds: 3
+
+OVERALL STATISTICS
+--------------------------------------------------------------------------------
+Total Kernels Generated: 7
+Compiled: 6
+Correct: 0
+Best Speedup: 0.00x
+
+PER-ROUND SUMMARY
+--------------------------------------------------------------------------------
+Round 0: 1 kernels | 0 correct | Best: 0.00x
+Round 1: 3 kernels | 0 correct | Best: 0.00x
+Round 2: 3 kernels | 0 correct | Best: 0.00x
+
+No valid kernel found
+================================================================================

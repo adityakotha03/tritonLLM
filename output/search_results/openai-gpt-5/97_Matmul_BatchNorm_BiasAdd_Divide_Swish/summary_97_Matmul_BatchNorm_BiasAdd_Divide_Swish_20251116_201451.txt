@@ -1,0 +1,29 @@
+================================================================================
+KERNEL OPTIMIZATION SEARCH RESULTS
+================================================================================
+Problem: 97_Matmul_BatchNorm_BiasAdd_Divide_Swish
+GPU: A100-80GB
+Model: gpt-5 (openai)
+Rounds: 3
+
+OVERALL STATISTICS
+--------------------------------------------------------------------------------
+Total Kernels Generated: 7
+Compiled: 6
+Correct: 2
+Best Speedup: 1.05x
+
+PER-ROUND SUMMARY
+--------------------------------------------------------------------------------
+Round 0: 1 kernels | 1 correct | Best: 1.02x
+Round 1: 3 kernels | 1 correct | Best: 1.05x
+Round 2: 3 kernels | 0 correct | Best: 0.00x
+
+BEST KERNEL
+--------------------------------------------------------------------------------
+Kernel ID: kernel_r1_idea_r1_b1540215_0_6dda9c
+Round: 1
+Speedup: 1.05x
+Runtime: 8.1400 ms
+Idea: Use Tensor Cores with mixed precision + fold BN/bias/divide into an affine epilogue, then Swish - What: Run the GEMM in BF16 (or TF32) on Tensor Cores with FP32 accumulation using Triton’s tl.dot (allow_tf32=True or bf16 path). Precompute per-output-channel affine coefficients to fold BatchNorm, extra bias, and divide into a single scale/shift in the epilogue: - a = gamma / sqrt(running_var + eps) / divide_value - b = beta + extra_bias - running_mean * a - Epilogue: y = a * (XW^T + bias_linear) + b, then Swish y = y * sigmoid(y) - Keep Swish in FP32 for accuracy; cast back as needed. - Why it helps on A100: A100’s Tensor Cores deliver up to 312 TFLOPS (BF16/FP16) or 156 TFLOPS (TF32). Moving the GEMM to Tensor Cores with FP32 accumulation yields large speedups vs FP32 CUDA cores, while folding BN/bias/div reduces extra memory reads/writes and arithmetic in separate kernels. Keeping the nonlinear in FP32 preserves numerical stability. - Targets: Compute throughput (Tensor Cores), memory traffic (fusion), instruction count (epilogue folding).
+================================================================================

@@ -1,0 +1,120 @@
+{
+  "metadata": {
+    "timestamp": "20251116_181052",
+    "problem_name": "1_Conv2D_ReLU_BiasAdd",
+    "round_number": 2
+  },
+  "round_summary": {
+    "round": 2,
+    "total": 2,
+    "compiled": 1,
+    "correct": 0,
+    "best_speedup": 0.0
+  },
+  "ideas": [
+    {
+      "idea_text": "tensor-core pipeline with fused epilogue - What: Implement 3x3 conv via Winograd F(4x4) tiles instead of direct/implicit-GEMM. Pre-transform weights offline to the Winograd domain (6x6) in a TC-friendly blocked layout (e.g., C_out\u00d7C_in in multiples of 16). In-kernel: (a) load a 6x6 tile of activations per 4x4 output tile, (b) do separable Winograd input transforms in SMEM/registers, (c) perform 36 small \u201cchannels-reduction\u201d GEMMs over K=C_in (one per Winograd component) on tensor cores (BF16/FP16, FP32 accumulate), (d) inverse-transform to 4x4 output, then fuse bias+ReLU while values are still in registers, and vector-store. - Why on A100: Winograd reduces 3x3 MACs by ~2.25x, so more of the 312 TFLOPS tensor-core peak is usable on real work. The small transforms are bandwidth-light and fit in registers/SMEM; 164 KB SMEM lets you stage multiple 6x6 tiles. Pre-transformed weights fit well in L2 and can be reused across many tiles; fused epilogue avoids extra HBM traffic. - Targets: Compute throughput (fewer MACs, tensor cores), memory traffic (reuse pre-transformed filters, fused epilogue), instruction overhead (blocked transforms).",
+      "round_number": 2,
+      "idea_id": "idea_r2_5cce52b4",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Input-stationary sliding-window with register rotation and 3-line SMEM buffer - What: Use a direct-convolution kernel that is input-stationary in X. Each CTA processes a spatial tile (e.g., H_tile\u00d7W_tile) for a block of output channels. Maintain a 3-row rolling buffer of activations in SMEM (with halo) and, per thread, a 3\u00d73 register window. Sweep horizontally: at each step, rotate the 3\u00d73 registers left, fetch only the new rightmost column (3 elements) from SMEM via 128-bit vectorized loads, optionally exchange across lanes with warp shuffles to minimize redundant loads. Compute multiple neighboring outputs per thread (e.g., 2\u00d72 micro-tile) to maximize overlap of input patches. Keep that thread\u2019s 3\u00d73 filter weights for its assigned output channels in registers across many X steps; advance Y by sliding the SMEM line buffer. - Why on A100: Greatly reduces activation traffic by reusing 2/3 of the window between adjacent X positions; 64K registers/SM and 164 KB SMEM comfortably hold windows, micro-tiles, and a 3-line buffer. Coalesced 128-bit loads for the \u201cnew\u201d column maximize bandwidth utilization; minimal control flow and steady, compute-dense inner loops keep the SM issue slots busy even without heavy shared-memory staging of entire K-tiles. - Targets: Memory access (coalescing, reuse), instruction efficiency (steady FMA stream, minimal address recompute), register/SMEM locality.",
+      "round_number": 2,
+      "idea_id": "idea_r2_47af19cb",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Mask-free interior specialization + 2D block swizzle + cache modifiers - What: - Interior specialization: Pad H, W, and channel dimensions to multiples of tile sizes at allocation or via views. Launch an \u201cinterior\u201d kernel that assumes no bounds checks (no masks), using tl.assume_aligned and tl.multiple_of to enable 128-bit vector loads/stores and remove predication. Use a tiny \u201cborder\u201d kernel only for the padded edges. - 2D block swizzle: Map program_ids with a Morton/Z-order or blocked-wavefront swizzle over (NHW tiles \u00d7 C_out tiles) so neighboring CTAs work on adjacent spatial tiles of the same C_out range, maximizing L2 reuse of both activations and weights and reducing L2 set conflicts. - Cache control: Use cache_modifier=\".ca\" for activations (temporal reuse within CTA), cache_modifier=\".cg\" + evict_last for weights (prefer L2 residency across CTAs), and cache_modifier=\".cs\" for output stores (streaming). Ensure base pointers are 128B-aligned to hit full transaction width. - Why on A100: Removing masks and predication cuts instructions and register pressure, boosting occupancy and ILP. Swizzled tiling improves L2 hit rates and reduces thrash across the large on-chip L2, while cache modifiers align accesses with intended reuse distances. Wider, aligned transactions better exploit the ~1935 GB/s HBM bandwidth. - Targets: Control flow & loop (no masks, fewer branches), memory (L2 locality, coalescing, cache policy), parallelism/occupancy (lower regs per thread).",
+      "round_number": 2,
+      "idea_id": "idea_r2_b5ef7a7d",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    }
+  ],
+  "kernels": [
+    {
+      "code": "",
+      "kernel_id": "kernel_r2_idea_r2_5cce52b4_0_500472",
+      "idea_id": "idea_r2_5cce52b4",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "tensor-core pipeline with fused epilogue - What: Implement 3x3 conv via Winograd F(4x4) tiles instead of direct/implicit-GEMM. Pre-transform weights offline to the Winograd domain (6x6) in a TC-friendly blocked layout (e.g., C_out\u00d7C_in in multiples of 16). In-kernel: (a) load a 6x6 tile of activations per 4x4 output tile, (b) do separable Winograd input transforms in SMEM/registers, (c) perform 36 small \u201cchannels-reduction\u201d GEMMs over K=C_in (one per Winograd component) on tensor cores (BF16/FP16, FP32 accumulate), (d) inverse-transform to 4x4 output, then fuse bias+ReLU while values are still in registers, and vector-store. - Why on A100: Winograd reduces 3x3 MACs by ~2.25x, so more of the 312 TFLOPS tensor-core peak is usable on real work. The small transforms are bandwidth-light and fit in registers/SMEM; 164 KB SMEM lets you stage multiple 6x6 tiles. Pre-transformed weights fit well in L2 and can be reused across many tiles; fused epilogue avoids extra HBM traffic. - Targets: Compute throughput (fewer MACs, tensor cores), memory traffic (reuse pre-transformed filters, fused epilogue), instruction overhead (blocked transforms).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "",
+      "kernel_id": "kernel_r2_idea_r2_47af19cb_0_6f23a6",
+      "idea_id": "idea_r2_47af19cb",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Input-stationary sliding-window with register rotation and 3-line SMEM buffer - What: Use a direct-convolution kernel that is input-stationary in X. Each CTA processes a spatial tile (e.g., H_tile\u00d7W_tile) for a block of output channels. Maintain a 3-row rolling buffer of activations in SMEM (with halo) and, per thread, a 3\u00d73 register window. Sweep horizontally: at each step, rotate the 3\u00d73 registers left, fetch only the new rightmost column (3 elements) from SMEM via 128-bit vectorized loads, optionally exchange across lanes with warp shuffles to minimize redundant loads. Compute multiple neighboring outputs per thread (e.g., 2\u00d72 micro-tile) to maximize overlap of input patches. Keep that thread\u2019s 3\u00d73 filter weights for its assigned output channels in registers across many X steps; advance Y by sliding the SMEM line buffer. - Why on A100: Greatly reduces activation traffic by reusing 2/3 of the window between adjacent X positions; 64K registers/SM and 164 KB SMEM comfortably hold windows, micro-tiles, and a 3-line buffer. Coalesced 128-bit loads for the \u201cnew\u201d column maximize bandwidth utilization; minimal control flow and steady, compute-dense inner loops keep the SM issue slots busy even without heavy shared-memory staging of entire K-tiles. - Targets: Memory access (coalescing, reuse), instruction efficiency (steady FMA stream, minimal address recompute), register/SMEM locality.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef conv2d_fused_interior_kernel(\n    x_ptr, w_ptr, bconv_ptr, bpost_ptr, y_ptr,\n    N, C, H, W,\n    K, R, S,\n    Ho, Wo,\n    x_sN, x_sC, x_sH, x_sW,\n    w_sK, w_sC, w_sR, w_sS,\n    y_sN, y_sC, y_sH, y_sW,\n    num_m_tiles, num_n_tiles,\n    GROUP_M: tl.constexpr,\n    BLOCK_M: tl.constexpr,  # tile over M = N*Ho*Wo\n    BLOCK_N: tl.constexpr,  # tile over K = out_channels\n    BLOCK_K: tl.constexpr,  # reduction over C*R*S\n):\n    pid = tl.program_id(0)\n    # 2D serpentine swizzle across (M-tiles, N-tiles)\n    pid_m = pid // num_n_tiles\n    pid_n = pid % num_n_tiles\n    # grouped serpentine swizzle to improve L2 locality\n    grp = pid_m // GROUP_M\n    in_grp_row = pid_m % GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    # Pointers assumed aligned for wide vector transactions\n    tl.assume_aligned(x_ptr, 128)\n    tl.assume_aligned(w_ptr, 128)\n    tl.assume_aligned(y_ptr, 128)\n    tl.assume_aligned(bconv_ptr, 128)\n    tl.assume_aligned(bpost_ptr, 128)\n\n    # map offs_m -> (n, oh, ow)\n    HWo = Ho * Wo\n    n_ix = offs_m // HWo\n    t_ix = offs_m % HWo\n    oh_ix = t_ix // Wo\n    ow_ix = t_ix % Wo\n\n    # base offsets (per m) for input and output\n    base_x_m = n_ix * x_sN + oh_ix * x_sH + ow_ix * x_sW\n    base_y_m = n_ix * y_sN + oh_ix * y_sH + ow_ix * y_sW\n\n    # precompute per-n base for weights and output\n    base_w_n = offs_n * w_sK\n    base_y_n = offs_n * y_sC\n\n    # accumulator\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # reduction across Kred = C*R*S\n    Kred = C * R * S\n    # Kred is assumed multiple of BLOCK_K in interior path\n    for k0 in range(0, Kred, BLOCK_K):\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n        # map offs_k -> (c, r, s)\n        crs = R * S\n        ci = offs_k // crs\n        rem = offs_k % crs\n        rr = rem // S\n        ss = rem % S\n\n        base_x_k = ci * x_sC + rr * x_sH + ss * x_sW\n        base_w_k = ci * w_sC + rr * w_sR + ss * w_sS\n\n        # [BM, BK] and [BK, BN]\n        x_offsets = base_x_m[:, None] + base_x_k[None, :]\n        w_offsets = base_w_k[:, None] + base_w_n[None, :]\n\n        a = tl.load(x_ptr + x_offsets, cache_modifier=\".ca\")\n        b = tl.load(w_ptr + w_offsets, cache_modifier=\".cg\")\n        acc += tl.dot(a, b)\n\n    # add conv bias (per out-channel)\n    bconv = tl.load(bconv_ptr + offs_n)\n    acc = acc + bconv[None, :]\n\n    # ReLU\n    acc = tl.maximum(acc, 0.0)\n\n    # add post bias (per out-channel, broadcast)\n    bpost = tl.load(bpost_ptr + offs_n)\n    acc = acc + bpost[None, :]\n\n    # store output\n    y_offsets = base_y_m[:, None] + base_y_n[None, :]\n    tl.store(y_ptr + y_offsets, acc, cache_modifier=\".cs\")\n\n\n@triton.jit\ndef conv2d_fused_border_kernel(\n    x_ptr, w_ptr, bconv_ptr, bpost_ptr, y_ptr,\n    N, C, H, W,\n    K, R, S,\n    Ho, Wo,\n    x_sN, x_sC, x_sH, x_sW,\n    w_sK, w_sC, w_sR, w_sS,\n    y_sN, y_sC, y_sH, y_sW,\n    num_m_tiles_total, num_n_tiles_total,\n    num_m_tiles_full, num_n_tiles_full,\n    GROUP_M: tl.constexpr,\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    BLOCK_K: tl.constexpr,\n):\n    pid = tl.program_id(0)\n    pid_m = pid // num_n_tiles_total\n    pid_n = pid % num_n_tiles_total\n\n    # skip tiles fully covered by interior region\n    in_interior = (pid_m < num_m_tiles_full) & (pid_n < num_n_tiles_full)\n    if in_interior:\n        return\n\n    # 2D serpentine swizzle for border as well (keeps locality for remaining tiles)\n    grp = pid_m // GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles_total - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    m_mask = offs_m < (N * Ho * Wo)\n    n_mask = offs_n < K\n\n    tl.assume_aligned(x_ptr, 128)\n    tl.assume_aligned(w_ptr, 128)\n    tl.assume_aligned(y_ptr, 128)\n    tl.assume_aligned(bconv_ptr, 128)\n    tl.assume_aligned(bpost_ptr, 128)\n\n    HWo = Ho * Wo\n    n_ix = offs_m // HWo\n    t_ix = offs_m % HWo\n    oh_ix = t_ix // Wo\n    ow_ix = t_ix % Wo\n\n    base_x_m = n_ix * x_sN + oh_ix * x_sH + ow_ix * x_sW\n    base_y_m = n_ix * y_sN + oh_ix * y_sH + ow_ix * y_sW\n\n    base_w_n = offs_n * w_sK\n    base_y_n = offs_n * y_sC\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    Kred = C * R * S\n    for k0 in range(0, Kred, BLOCK_K):\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n        k_mask = offs_k < Kred\n\n        crs = R * S\n        ci = offs_k // crs\n        rem = offs_k % crs\n        rr = rem // S\n        ss = rem % S\n\n        base_x_k = ci * x_sC + rr * x_sH + ss * x_sW\n        base_w_k = ci * w_sC + rr * w_sR + ss * w_sS\n\n        x_offsets = base_x_m[:, None] + base_x_k[None, :]\n        w_offsets = base_w_k[:, None] + base_w_n[None, :]\n\n        a = tl.load(x_ptr + x_offsets, mask=m_mask[:, None] & k_mask[None, :], other=0.0, cache_modifier=\".ca\")\n        b = tl.load(w_ptr + w_offsets, mask=k_mask[:, None] & n_mask[None, :], other=0.0, cache_modifier=\".cg\")\n        acc += tl.dot(a, b)\n\n    bconv = tl.load(bconv_ptr + offs_n, mask=n_mask, other=0.0)\n    acc = acc + bconv[None, :]\n\n    acc = tl.maximum(acc, 0.0)\n\n    bpost = tl.load(bpost_ptr + offs_n, mask=n_mask, other=0.0)\n    acc = acc + bpost[None, :]\n\n    y_offsets = base_y_m[:, None] + base_y_n[None, :]\n    tl.store(y_ptr + y_offsets, acc, mask=m_mask[:, None] & n_mask[None, :], cache_modifier=\".cs\")\n\n\ndef _conv2d_fused_triton(x: torch.Tensor, w: torch.Tensor, bconv: torch.Tensor, bpost: torch.Tensor):\n    \"\"\"\n    Fused Conv2d (stride=1, padding=0, dilation=1, groups=1) + ReLU + add(bias_post).\n    Layout: NCHW for x and y; KCRS for weights.\n    \"\"\"\n    assert x.is_cuda and w.is_cuda and bconv.is_cuda and bpost.is_cuda, \"All tensors must be CUDA\"\n    assert x.dtype == w.dtype == bconv.dtype == bpost.dtype == torch.float32, \"Use float32 for this kernel\"\n    assert x.is_contiguous(memory_format=torch.contiguous_format)\n    assert w.is_contiguous(memory_format=torch.contiguous_format)\n    N, C, H, W = x.shape\n    K, Cw, R, S = w.shape\n    assert C == Cw, \"Inconsistent in_channels\"\n    # compute output dims for valid conv (no padding, stride=1)\n    Ho = H - R + 1\n    Wo = W - S + 1\n    assert Ho > 0 and Wo > 0, \"Invalid kernel size for input\"\n\n    # prepare output\n    y = torch.empty((N, K, Ho, Wo), device=x.device, dtype=x.dtype)\n\n    # flatten post-bias from (K, 1, 1) -> (K,)\n    bpost_vec = bpost.view(K)\n\n    # strides in elements\n    x_sN, x_sC, x_sH, x_sW = x.stride()\n    w_sK, w_sC, w_sR, w_sS = w.stride()\n    y_sN, y_sC, y_sH, y_sW = y.stride()\n\n    # problem sizes\n    M = N * Ho * Wo\n    Nn = K\n    Kred = C * R * S\n\n    # tiles\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 64  # divides 64*3*3=576 for typical configs; interior kernel assumes divisible\n\n    num_m_tiles_full = M // BLOCK_M\n    num_n_tiles_full = Nn // BLOCK_N\n    num_m_tiles_total = (M + BLOCK_M - 1) // BLOCK_M\n    num_n_tiles_total = (Nn + BLOCK_N - 1) // BLOCK_N\n\n    GROUP_M = 4  # swizzle group size along M tiles\n\n    # Launch interior kernel if any full tiles exist\n    if num_m_tiles_full > 0 and num_n_tiles_full > 0 and (Kred % BLOCK_K == 0):\n        grid_interior = (num_m_tiles_full * num_n_tiles_full,)\n        conv2d_fused_interior_kernel[grid_interior](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_full, num_n_tiles_full,\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n\n    # Launch border kernel for leftovers (and for K-reduction tail if not divisible)\n    if (num_m_tiles_total * num_n_tiles_total) > (num_m_tiles_full * num_n_tiles_full):\n        grid_border = (num_m_tiles_total * num_n_tiles_total,)\n        conv2d_fused_border_kernel[grid_border](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_total, num_n_tiles_total,\n            num_m_tiles_full, num_n_tiles_full,\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n    elif (Kred % BLOCK_K) != 0:\n        # No leftover M/N tiles but K tail exists -> run border over full grid (masked only in K)\n        grid_border = (num_m_tiles_total * num_n_tiles_total,)\n        conv2d_fused_border_kernel[grid_border](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_total, num_n_tiles_total,\n            num_m_tiles_total, num_n_tiles_total,  # mark all as interior to avoid double compute; but border kernel returns immediately -> so re-run safely\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model with fused Triton kernel:\n      y = relu(conv2d(x, W, bias_conv)) + bias_post\n    Uses:\n      - Interior specialization (mask-free for full tiles)\n      - 2D serpentine block swizzle\n      - Cache modifiers: .ca for activations, .cg for weights, .cs for stores\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super().__init__()\n        # Keep nn.Conv2d only as a parameter container (we won't call it in forward)\n        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, bias=True)\n        # Extra bias added post-ReLU\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n\n    def forward(self, x: torch.Tensor):\n        # Ensure inputs are contiguous and on CUDA\n        assert x.is_cuda, \"Input must be CUDA tensor\"\n        x = x.contiguous()\n        w = self.conv.weight.contiguous()\n        bconv = self.conv.bias.contiguous()\n        bpost = self.bias.contiguous()\n        # Fused Triton kernel\n        y = _conv2d_fused_triton(x, w, bconv, bpost)\n        return y",
+      "kernel_id": "kernel_r2_idea_r2_b5ef7a7d_0_9acf37",
+      "idea_id": "idea_r2_b5ef7a7d",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 32:4:\n    in_grp_row = pid_m % GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "6ee0f6a8ca5294e2a3ccf76c91e55b0351fbf256e9ec66c5771f85e2a948c721",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Mask-free interior specialization + 2D block swizzle + cache modifiers - What: - Interior specialization: Pad H, W, and channel dimensions to multiples of tile sizes at allocation or via views. Launch an \u201cinterior\u201d kernel that assumes no bounds checks (no masks), using tl.assume_aligned and tl.multiple_of to enable 128-bit vector loads/stores and remove predication. Use a tiny \u201cborder\u201d kernel only for the padded edges. - 2D block swizzle: Map program_ids with a Morton/Z-order or blocked-wavefront swizzle over (NHW tiles \u00d7 C_out tiles) so neighboring CTAs work on adjacent spatial tiles of the same C_out range, maximizing L2 reuse of both activations and weights and reducing L2 set conflicts. - Cache control: Use cache_modifier=\".ca\" for activations (temporal reuse within CTA), cache_modifier=\".cg\" + evict_last for weights (prefer L2 residency across CTAs), and cache_modifier=\".cs\" for output stores (streaming). Ensure base pointers are 128B-aligned to hit full transaction width. - Why on A100: Removing masks and predication cuts instructions and register pressure, boosting occupancy and ILP. Swizzled tiling improves L2 hit rates and reduces thrash across the large on-chip L2, while cache modifiers align accesses with intended reuse distances. Wider, aligned transactions better exploit the ~1935 GB/s HBM bandwidth. - Targets: Control flow & loop (no masks, fewer branches), memory (L2 locality, coalescing, cache policy), parallelism/occupancy (lower regs per thread).",
+        "temperature": 1.0
+      }
+    }
+  ]
+}

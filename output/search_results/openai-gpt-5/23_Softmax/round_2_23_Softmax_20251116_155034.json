@@ -1,0 +1,123 @@
+{
+  "metadata": {
+    "timestamp": "20251116_155034",
+    "problem_name": "23_Softmax",
+    "round_number": 2
+  },
+  "round_summary": {
+    "round": 2,
+    "total": 3,
+    "compiled": 2,
+    "correct": 0,
+    "best_speedup": 0.0
+  },
+  "ideas": [
+    {
+      "idea_text": "Warp-specialized producer/consumer pipeline within each CTA - Description: Split the CTA\u2019s warps into fixed roles to reduce per-warp register footprint and maximize overlap. Example: 1 \u201cproducer\u201d warp issues cp.async.cg.shared.global to fill a 3-stage shared-memory ring buffer of tiles; 6\u201310 \u201ccompute\u201d warps read from SMEM, perform max/exp/sum on register micro-tiles; 1 \u201cwriter\u201d warp performs normalization and tl.store with streaming policy. Use a small, fixed SMEM tile (e.g., 4096 FP32 = 16 KB) and a 3-stage ring (\u224848 KB/CTA). Producer posts early cp.async for tile t+1, compute warps work on tile t, writer drains tile t\u22121. Use explicit warp-ID role checks to keep the hot paths branch-free and keep only the role-specific state live. - Why on A100: Ampere\u2019s cp.async and deep in-flight queues benefit from having a dedicated warp issuing copies early and continuously. Specializing roles cuts register pressure per warp (producer doesn\u2019t hold accumulators; writer doesn\u2019t keep reduction state), often unlocking more CTAs/SM on A100\u2019s 64K register file. It also reduces instruction-cache pressure and divergence in inner loops, improving SFU hiding via inter-warp overlap. - Targets: Asynchronous operations and latency hiding, parallelism/occupancy (register pressure reduction), and control-flow simplification (role-specific straight-line code).",
+      "round_number": 2,
+      "idea_id": "idea_r2_92c0a243",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "num_best_kernels": 0,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "pair reduction across chunks - Description: Partition each very long row into many independent chunks so multiple CTAs process the same row concurrently. Kernel A (stats): each CTA computes a chunk-local pair (m_i, s_i) where m_i = max(x_chunk) and s_i = sum(exp(x \u2212 m_i)). Write (m_i, s_i) to a per-row array. Kernel B (reduce + normalize): one CTA per row reduces all pairs via the associative combine: Given (m1, s1) and (m2, s2), let m = max(m1, m2); s = s1*exp(m1 \u2212 m) + s2*exp(m2 \u2212 m). After obtaining final (m_row, s_row), re-read the row tilewise and write y = exp(x \u2212 m_row) / s_row. Use vectorized 128B-coalesced loads/stores in both kernels. If contention allows, kernel B can be fused with normalization; otherwise keep two kernels for simplicity. - Why on A100: With 393,216 elements per row (~1.5 MB), a single CTA per row may underutilize memory and SFUs if kernel parameters are conservative (e.g., to stay within register limits). Allowing many CTAs per row increases global parallelism and HBM queue depth, driving bandwidth closer to the 1935 GB/s roof. The (m, s) pair algebra avoids re-sweeping chunks to align to the final max, so pass count remains two over the input (stats pass + normalize pass), same as a standard 2-pass algorithm, but with higher concurrency. - Targets: Parallelism & occupancy (grid-level), memory throughput (more concurrent coalesced readers), and reduction algorithm structure (associative pair combine to enable multi-CTA).",
+      "round_number": 2,
+      "idea_id": "idea_r2_0fd719b1",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "num_best_kernels": 0,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "- Description: Compute exp(x) as 2^(x*log2e) without calling SFU. Decompose t = x*log2e into t = k + f where k = floor(t), f \u2208 [0,1). Implement: - Use a small shared or constant-memory LUT for 2^(j/256) for j=0..255 (1 KB if FP32). - Approximate 2^f with a 3rd\u20134th order minimax polynomial evaluated with FMAs (e.g., P(f) \u2248 1 + c1 f + c2 f^2 + c3 f^3 [+ c4 f^4]). - Reconstruct via y = ldexp(LUT[j] * P(frac), k), where j = floor(f*256), frac = f \u2212 j/256. Tune degree/LUT size to balance accuracy and speed; keep accumulations in FP32. Combine with rcp.approx plus one Newton step for the normalization 1/s. This path is fully FMA-bound, largely freeing the SFUs. - Why on A100: A100 has very high FP32 FMA throughput relative to SFU throughput, and FMAs are easy to hide with warp-level ILP. Shifting exp from SFUs to FMAs/LUT loads can increase throughput when SFUs are the bottleneck even after pipelining. The LUT comfortably fits in SMEM (or the constant cache), and vectorized evaluation (processing VEC=4\u20138 elements per thread) further boosts ILP and register reuse. - Targets: Compute & instruction optimization (replace SFU with FMA-heavy path), memory (tiny LUT reuse from SMEM/constant cache), and math micro-kernel efficiency (vectorized polynomial evaluation).",
+      "round_number": 2,
+      "idea_id": "idea_r2_ecc4f7a4",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "num_best_kernels": 0,
+        "num_previous_ideas": 4
+      }
+    }
+  ],
+  "kernels": [
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({\"BLOCK_SIZE\": 1024}, num_warps=4, num_stages=3),\n        triton.Config({\"BLOCK_SIZE\": 2048}, num_warps=4, num_stages=3),\n        triton.Config({\"BLOCK_SIZE\": 4096}, num_warps=8, num_stages=3),\n        triton.Config({\"BLOCK_SIZE\": 8192}, num_warps=8, num_stages=3),\n    ],\n    key=[\"N\"],\n)\n@triton.jit\ndef softmax_online_kernel(\n    x_ptr, y_ptr,\n    stride_xm, stride_xn,\n    stride_ym, stride_yn,\n    M, N,\n    BLOCK_SIZE: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    # Offsets within a tile\n    offs = tl.arange(0, BLOCK_SIZE)\n    # Row base pointers\n    row_x_ptr = x_ptr + pid_m * stride_xm\n    row_y_ptr = y_ptr + pid_m * stride_ym\n\n    # Pass 1: compute row-wise max and sum using online algorithm\n    m = tl.full((), -float(\"inf\"), tl.float32)\n    s = tl.full((), 0.0, tl.float32)\n\n    # Iterate tiles along N\n    for col_start in range(0, N, BLOCK_SIZE):\n        cols = col_start + offs\n        mask = cols < N\n        # Stream loads with L2-preferred caching\n        x = tl.load(row_x_ptr + cols * stride_xn, mask=mask, other=-float(\"inf\"), cache_modifier=\".cg\")\n        x = x.to(tl.float32)\n        tile_max = tl.max(x, axis=0)  # scalar\n        m_new = tl.maximum(m, tile_max)\n        # Rescale running sum for new max\n        s = s * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new), axis=0)\n        m = m_new\n\n    # Pass 2: normalize and store\n    inv_s = 1.0 / s\n    for col_start in range(0, N, BLOCK_SIZE):\n        cols = col_start + offs\n        mask = cols < N\n        x = tl.load(row_x_ptr + cols * stride_xn, mask=mask, other=-float(\"inf\"), cache_modifier=\".cg\")\n        x = x.to(tl.float32)\n        out = tl.exp(x - m) * inv_s\n        # Cast back to input dtype for storage\n        tl.store(row_y_ptr + cols * stride_yn, out.to(x.dtype.element_ty), mask=mask)\n\n\ndef triton_softmax(x: torch.Tensor, dim: int = 1) -> torch.Tensor:\n    assert dim in (1, -1), \"This kernel supports softmax over dim=1.\"\n    if not x.is_cuda:\n        x = x.cuda(non_blocking=True)\n    x = x.contiguous()\n    M, N = x.shape\n    y = torch.empty_like(x)\n\n    stride_xm = x.stride(0)\n    stride_xn = x.stride(1)\n    stride_ym = y.stride(0)\n    stride_yn = y.stride(1)\n\n    grid = (M,)\n    softmax_online_kernel[grid](\n        x, y,\n        stride_xm, stride_xn,\n        stride_ym, stride_yn,\n        M, N,\n    )\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized Softmax using a tiled, online algorithm with Triton.\n    Two streaming passes over the feature dimension use pipelined loads and reductions.\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return triton_softmax(x, dim=1)",
+      "kernel_id": "kernel_r2_idea_r2_92c0a243_0_a24960",
+      "idea_id": "idea_r2_92c0a243",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 41:54:\n        m = m_new\n\n    # Pass 2: normalize and store\n    inv_s = 1.0 / s\n    for col_start in range(0, N, BLOCK_SIZE):\n        cols = col_start + offs\n        mask = cols < N\n        x = ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "5c0940b7168fbd3d3604b64716ed69448c43bd64e907fa1f6c4bf08dde6e5d4e",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Warp-specialized producer/consumer pipeline within each CTA - Description: Split the CTA\u2019s warps into fixed roles to reduce per-warp register footprint and maximize overlap. Example: 1 \u201cproducer\u201d warp issues cp.async.cg.shared.global to fill a 3-stage shared-memory ring buffer of tiles; 6\u201310 \u201ccompute\u201d warps read from SMEM, perform max/exp/sum on register micro-tiles; 1 \u201cwriter\u201d warp performs normalization and tl.store with streaming policy. Use a small, fixed SMEM tile (e.g., 4096 FP32 = 16 KB) and a 3-stage ring (\u224848 KB/CTA). Producer posts early cp.async for tile t+1, compute warps work on tile t, writer drains tile t\u22121. Use explicit warp-ID role checks to keep the hot paths branch-free and keep only the role-specific state live. - Why on A100: Ampere\u2019s cp.async and deep in-flight queues benefit from having a dedicated warp issuing copies early and continuously. Specializing roles cuts register pressure per warp (producer doesn\u2019t hold accumulators; writer doesn\u2019t keep reduction state), often unlocking more CTAs/SM on A100\u2019s 64K register file. It also reduces instruction-cache pressure and divergence in inner loops, improving SFU hiding via inter-warp overlap. - Targets: Asynchronous operations and latency hiding, parallelism/occupancy (register pressure reduction), and control-flow simplification (role-specific straight-line code).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef softmax_stats_chunks_kernel(\n    x_ptr,         # *f32 [B, N]\n    m_ptr,         # *f32 [B * CHUNKS]\n    s_ptr,         # *f32 [B * CHUNKS]\n    stride_x,      # row stride in elements\n    n_cols,        # N\n    chunks_per_row,\n    CHUNK_SIZE: tl.constexpr,\n    BLOCK_SIZE: tl.constexpr,\n):\n    pid = tl.program_id(0)\n    row_id = pid // chunks_per_row\n    chunk_id = pid % chunks_per_row\n\n    row_x_ptr = x_ptr + row_id * stride_x\n\n    # Running log-sum-exp stats\n    m = tl.full((), -float(\"inf\"), tl.float32)\n    s = tl.zeros((), tl.float32)\n\n    # Stream over this chunk in BLOCK_SIZE tiles\n    chunk_col_start = chunk_id * CHUNK_SIZE\n    for base in range(0, CHUNK_SIZE, BLOCK_SIZE):\n        offs = chunk_col_start + base + tl.arange(0, BLOCK_SIZE)\n        mask = offs < n_cols\n        vals = tl.load(row_x_ptr + offs, mask=mask, other=-float(\"inf\"))\n        vals = vals.to(tl.float32)\n\n        local_max = tl.max(vals, axis=0)\n        m_new = tl.maximum(m, local_max)\n\n        # scale previous sum to new max\n        s = s * tl.exp(m - m_new)\n        # accumulate current tile contribution\n        s += tl.sum(tl.exp(vals - m_new), axis=0)\n\n        m = m_new\n\n    pair_idx = row_id * chunks_per_row + chunk_id\n    tl.store(m_ptr + pair_idx, m)\n    tl.store(s_ptr + pair_idx, s)\n\n\n@triton.jit\ndef softmax_reduce_normalize_kernel(\n    x_ptr,         # *f32 [B, N]\n    y_ptr,         # *f32 [B, N]\n    m_ptr,         # *f32 [B * CHUNKS]\n    s_ptr,         # *f32 [B * CHUNKS]\n    stride_x,      # elements\n    stride_y,      # elements\n    n_cols,        # N\n    chunks_per_row,\n    CHUNK_SIZE: tl.constexpr,\n    BLOCK_SIZE: tl.constexpr,\n):\n    row_id = tl.program_id(0)\n    base_pair = row_id * chunks_per_row\n\n    # Reduce all (m_i, s_i) pairs for this row\n    m = tl.full((), -float(\"inf\"), tl.float32)\n    s = tl.zeros((), tl.float32)\n    for c in range(0, chunks_per_row):\n        mi = tl.load(m_ptr + base_pair + c)\n        si = tl.load(s_ptr + base_pair + c)\n        m_new = tl.maximum(m, mi)\n        s = s * tl.exp(m - m_new) + si * tl.exp(mi - m_new)\n        m = m_new\n\n    # Normalize: y = exp(x - m) / s\n    row_x_ptr = x_ptr + row_id * stride_x\n    row_y_ptr = y_ptr + row_id * stride_y\n    for base in range(0, n_cols, BLOCK_SIZE):\n        offs = base + tl.arange(0, BLOCK_SIZE)\n        mask = offs < n_cols\n        x = tl.load(row_x_ptr + offs, mask=mask, other=0.0).to(tl.float32)\n        y = tl.exp(x - m) / s\n        tl.store(row_y_ptr + offs, y, mask=mask)\n\n\ndef triton_softmax_pairreduce(x: torch.Tensor, dim: int = 1) -> torch.Tensor:\n    assert x.ndim == 2 and dim == 1, \"Only 2D tensors with dim=1 are supported.\"\n    assert x.is_cuda, \"Input must be on CUDA.\"\n    x = x.contiguous().to(torch.float32)\n\n    B, N = x.shape\n    device = x.device\n    y = torch.empty_like(x, dtype=torch.float32, device=device)\n\n    # Tuning knobs\n    CHUNK_SIZE = 4096  # multiple of 128, power-of-two friendly\n    BLOCK_SIZE = 1024\n\n    chunks_per_row = (N + CHUNK_SIZE - 1) // CHUNK_SIZE\n    # Pair buffers\n    m_pairs = torch.empty((B * chunks_per_row,), dtype=torch.float32, device=device)\n    s_pairs = torch.empty_like(m_pairs)\n\n    grid_stats = lambda meta: (B * chunks_per_row,)\n    softmax_stats_chunks_kernel[grid_stats](\n        x,\n        m_pairs,\n        s_pairs,\n        x.stride(0),\n        N,\n        chunks_per_row,\n        CHUNK_SIZE=CHUNK_SIZE,\n        BLOCK_SIZE=BLOCK_SIZE,\n        num_warps=4,\n        num_stages=2,\n    )\n\n    grid_reduce = lambda meta: (B,)\n    softmax_reduce_normalize_kernel[grid_reduce](\n        x,\n        y,\n        m_pairs,\n        s_pairs,\n        x.stride(0),\n        y.stride(0),\n        N,\n        chunks_per_row,\n        CHUNK_SIZE=CHUNK_SIZE,\n        BLOCK_SIZE=BLOCK_SIZE,\n        num_warps=4,\n        num_stages=2,\n    )\n\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Softmax using pair reduction across chunks:\n      - Kernel A: per-chunk log-sum-exp stats (m_i, s_i) with one pass per chunk\n      - Kernel B: per-row reduction of pairs and normalization in a second pass\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        if x.device.type != \"cuda\":\n            # CPU fallback for functional correctness\n            return torch.softmax(x, dim=1)\n        return triton_softmax_pairreduce(x, dim=1)",
+      "kernel_id": "kernel_r2_idea_r2_0fd719b1_0_5dec3c",
+      "idea_id": "idea_r2_0fd719b1",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "e3613c6d86971ab0e7c50e44f483556b53e6cecb2fbddda07cf0373d159513c5",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "pair reduction across chunks - Description: Partition each very long row into many independent chunks so multiple CTAs process the same row concurrently. Kernel A (stats): each CTA computes a chunk-local pair (m_i, s_i) where m_i = max(x_chunk) and s_i = sum(exp(x \u2212 m_i)). Write (m_i, s_i) to a per-row array. Kernel B (reduce + normalize): one CTA per row reduces all pairs via the associative combine: Given (m1, s1) and (m2, s2), let m = max(m1, m2); s = s1*exp(m1 \u2212 m) + s2*exp(m2 \u2212 m). After obtaining final (m_row, s_row), re-read the row tilewise and write y = exp(x \u2212 m_row) / s_row. Use vectorized 128B-coalesced loads/stores in both kernels. If contention allows, kernel B can be fused with normalization; otherwise keep two kernels for simplicity. - Why on A100: With 393,216 elements per row (~1.5 MB), a single CTA per row may underutilize memory and SFUs if kernel parameters are conservative (e.g., to stay within register limits). Allowing many CTAs per row increases global parallelism and HBM queue depth, driving bandwidth closer to the 1935 GB/s roof. The (m, s) pair algebra avoids re-sweeping chunks to align to the final max, so pass count remains two over the input (stats pass + normalize pass), same as a standard 2-pass algorithm, but with higher concurrency. - Targets: Parallelism & occupancy (grid-level), memory throughput (more concurrent coalesced readers), and reduction algorithm structure (associative pair combine to enable multi-CTA).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import math\nimport torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n# Polynomial coefficients for 2^r on r in [0, 1/256)\n# Using Taylor expansion of exp(r*ln2) up to 4th order\nLN2 = 0.6931471805599453\nC1 = LN2\nC2 = (LN2 * LN2) * 0.5\nC3 = (LN2 * LN2 * LN2) / 6.0\nC4 = (LN2 * LN2 * LN2 * LN2) / 24.0\nLOG2E = 1.4426950408889634\nINV_256 = 1.0 / 256.0\n\n\n@triton.jit\ndef softmax_row_kernel_exp_fma(\n    x_ptr, y_ptr, lut_ptr,\n    M, N,\n    stride_xm, stride_xn,\n    stride_ym, stride_yn,\n    BLOCK_SIZE: tl.constexpr,\n):\n    row_id = tl.program_id(0)\n    # Pointers to the start of the row\n    x_row_ptr = x_ptr + row_id * stride_xm\n    y_row_ptr = y_ptr + row_id * stride_ym\n\n    # 1) Compute max value in the row for numerical stability\n    max_val = -float(\"inf\")\n    col = 0\n    while col < N:\n        offs = col + tl.arange(0, BLOCK_SIZE)\n        mask = offs < N\n        x = tl.load(x_row_ptr + offs * stride_xn, mask=mask, other=-float(\"inf\"))\n        block_max = tl.max(x, axis=0)\n        max_val = tl.maximum(max_val, block_max)\n        col += BLOCK_SIZE\n\n    # 2) Compute the denominator: sum of exp(x - max)\n    sum_val = 0.0\n    col = 0\n    while col < N:\n        offs = col + tl.arange(0, BLOCK_SIZE)\n        mask = offs < N\n        x = tl.load(x_row_ptr + offs * stride_xn, mask=mask, other=-float(\"inf\"))\n        x = x - max_val\n\n        # Approx exp(x) using 2^(x*log2e) with LUT + 4th-order poly and ldexp power-of-two scaling\n        t = x * LOG2E  # x * log2(e)\n        k = tl.floor(t)\n        f = t - k\n\n        ff = f * 256.0\n        j = tl.floor(ff).to(tl.int32)\n        # Clamp j into [0, 255]\n        j = tl.max(tl.min(j, 255), 0)\n        r = f - (j.to(tl.float32) * INV_256)\n\n        base = tl.load(lut_ptr + j, mask=mask, other=1.0)\n\n        # Horner form polynomial evaluation for 2^r in r in [0, 1/256)\n        # P(r) \u2248 1 + C1*r + C2*r^2 + C3*r^3 + C4*r^4\n        p = ((C4 * r + C3) * r + C2) * r + C1\n        p = p * r + 1.0\n\n        y = base * p\n        # Multiply by 2^k with ldexp to avoid SFU\n        y = tl.ldexp(y, k.to(tl.int32))\n\n        # Accumulate sum across the block\n        sum_val += tl.sum(y, axis=0)\n        col += BLOCK_SIZE\n\n    # Guard against zero to avoid div-by-zero\n    sum_val = tl.maximum(sum_val, 1e-20)\n\n    # 3) Write normalized results\n    inv_sum = 1.0 / sum_val  # single division per row\n\n    col = 0\n    while col < N:\n        offs = col + tl.arange(0, BLOCK_SIZE)\n        mask = offs < N\n        x = tl.load(x_row_ptr + offs * stride_xn, mask=mask, other=-float(\"inf\"))\n        x = x - max_val\n\n        # Recompute approx exp(x) using the same path\n        t = x * LOG2E\n        k = tl.floor(t)\n        f = t - k\n\n        ff = f * 256.0\n        j = tl.floor(ff).to(tl.int32)\n        j = tl.max(tl.min(j, 255), 0)\n        r = f - (j.to(tl.float32) * INV_256)\n\n        base = tl.load(lut_ptr + j, mask=mask, other=1.0)\n\n        p = ((C4 * r + C3) * r + C2) * r + C1\n        p = p * r + 1.0\n\n        y = base * p\n        y = tl.ldexp(y, k.to(tl.int32))\n\n        y = y * inv_sum\n        tl.store(y_row_ptr + offs * stride_yn, y, mask=mask)\n        col += BLOCK_SIZE\n\n\ndef triton_softmax_fma_exp(x: torch.Tensor, lut: torch.Tensor, block_size: int = 1024):\n    assert x.is_cuda and lut.is_cuda, \"tensors must be on CUDA\"\n    x = x.contiguous()\n    M, N = x.shape\n    y = torch.empty_like(x)\n\n    stride_xm, stride_xn = x.stride()\n    stride_ym, stride_yn = y.stride()\n\n    grid = lambda meta: (M,)\n\n    softmax_row_kernel_exp_fma[grid](\n        x, y, lut,\n        M, N,\n        stride_xm, stride_xn,\n        stride_ym, stride_yn,\n        BLOCK_SIZE=block_size,\n        num_warps=8,\n        num_stages=1,\n    )\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Softmax with custom Triton kernel using FMA-heavy exp approximation:\n    exp(x) \u2248 ldexp( LUT[ floor(frac*256) ] * P(frac_r), k ),\n    where x*log2(e) = k + frac, frac_r in [0, 1/256), and P is a 4th-order poly.\n    \"\"\"\n    def __init__(self):\n        super().__init__()\n        self.register_buffer(\"exp2_lut\", torch.empty(0), persistent=False)\n\n    def _ensure_lut(self, device, dtype=torch.float32):\n        if (self.exp2_lut.numel() != 256) or (self.exp2_lut.device != device) or (self.exp2_lut.dtype != dtype):\n            j = torch.arange(256, device=device, dtype=dtype)\n            self.exp2_lut = torch.pow(torch.tensor(2.0, device=device, dtype=dtype), j * (1.0 / 256.0))\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        if not x.is_cuda:\n            return torch.softmax(x, dim=1)\n        x = x.contiguous()\n        self._ensure_lut(x.device, torch.float32)\n        return triton_softmax_fma_exp(x, self.exp2_lut, block_size=1024)",
+      "kernel_id": "kernel_r2_idea_r2_ecc4f7a4_0_e446e6",
+      "idea_id": "idea_r2_ecc4f7a4",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 34:16:\n\n    # 2) Compute the denominator: sum of exp(x - max)\n    sum_val = 0.0\n    col = 0\n    while col < N:\n        offs = col + tl.arange(0, BLOCK_SIZE)\n        mask = offs < N\n        x = t...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "a584b32b87ad5cba511e5e7ae2385385ed38b24000d7a127ded80b8e7f6a28a9",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "- Description: Compute exp(x) as 2^(x*log2e) without calling SFU. Decompose t = x*log2e into t = k + f where k = floor(t), f \u2208 [0,1). Implement: - Use a small shared or constant-memory LUT for 2^(j/256) for j=0..255 (1 KB if FP32). - Approximate 2^f with a 3rd\u20134th order minimax polynomial evaluated with FMAs (e.g., P(f) \u2248 1 + c1 f + c2 f^2 + c3 f^3 [+ c4 f^4]). - Reconstruct via y = ldexp(LUT[j] * P(frac), k), where j = floor(f*256), frac = f \u2212 j/256. Tune degree/LUT size to balance accuracy and speed; keep accumulations in FP32. Combine with rcp.approx plus one Newton step for the normalization 1/s. This path is fully FMA-bound, largely freeing the SFUs. - Why on A100: A100 has very high FP32 FMA throughput relative to SFU throughput, and FMAs are easy to hide with warp-level ILP. Shifting exp from SFUs to FMAs/LUT loads can increase throughput when SFUs are the bottleneck even after pipelining. The LUT comfortably fits in SMEM (or the constant cache), and vectorized evaluation (processing VEC=4\u20138 elements per thread) further boosts ILP and register reuse. - Targets: Compute & instruction optimization (replace SFU with FMA-heavy path), memory (tiny LUT reuse from SMEM/constant cache), and math micro-kernel efficiency (vectorized polynomial evaluation).",
+        "temperature": 1.0
+      }
+    }
+  ]
+}

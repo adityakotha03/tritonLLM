@@ -1,0 +1,365 @@
+{
+  "metadata": {
+    "timestamp": "20251116_181052",
+    "problem_name": "1_Conv2D_ReLU_BiasAdd",
+    "gpu_name": "A100-80GB",
+    "model_name": "gpt-5",
+    "model_provider": "openai"
+  },
+  "config": {
+    "num_rounds": 3,
+    "width_per_round": [
+      3,
+      3
+    ],
+    "depth_per_round": [
+      1,
+      1
+    ],
+    "top_k_bank": 5,
+    "model_name": "gpt-5",
+    "model_provider": "openai",
+    "temperature": 1.0,
+    "max_completion_tokens": 16384,
+    "gpu_name": "A100-80GB",
+    "problem_name": "1_Conv2D_ReLU_BiasAdd",
+    "num_correct_trials": 5,
+    "num_perf_trials": 100,
+    "evaluation_timeout": 600
+  },
+  "statistics": {
+    "total_kernels": 6,
+    "compiled_kernels": 4,
+    "correct_kernels": 1,
+    "best_speedup": 1.1211656441717792,
+    "unique_hashes": 6,
+    "rounds_tracked": 3
+  },
+  "round_summaries": [
+    {
+      "round": 0,
+      "total": 1,
+      "compiled": 1,
+      "correct": 1,
+      "best_speedup": 1.1211656441717792
+    },
+    {
+      "round": 1,
+      "total": 3,
+      "compiled": 2,
+      "correct": 0,
+      "best_speedup": 0.0
+    },
+    {
+      "round": 2,
+      "total": 2,
+      "compiled": 1,
+      "correct": 0,
+      "best_speedup": 0.0
+    }
+  ],
+  "best_kernel": {
+    "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({'BLOCK_PIX': 64, 'BLOCK_CO': 64, 'K_TILE': 64}, num_warps=4, num_stages=2),\n        triton.Config({'BLOCK_PIX': 128, 'BLOCK_CO': 64, 'K_TILE': 32}, num_warps=8, num_stages=2),\n        triton.Config({'BLOCK_PIX': 64, 'BLOCK_CO': 128, 'K_TILE': 32}, num_warps=8, num_stages=2),\n    ],\n    key=['N', 'C_IN', 'H', 'W', 'C_OUT', 'K', 'H_OUT', 'W_OUT'],\n)\n@triton.jit\ndef conv2d_relu_addbias_kernel(\n    x_ptr,                          # *float* [N, C_IN, H, W]\n    w2d_ptr,                        # *float* [K_TOTAL, C_OUT] (packed weights)\n    b_conv_ptr,                     # *float* [C_OUT]\n    b_extra_ptr,                    # *float* [C_OUT]\n    y_ptr,                          # *float* [N, C_OUT, H_OUT, W_OUT]\n    N: tl.constexpr,                # batch size\n    C_IN: tl.constexpr,             # input channels\n    H: tl.constexpr,                # input height\n    W: tl.constexpr,                # input width\n    C_OUT: tl.constexpr,            # output channels\n    K: tl.constexpr,                # kernel size (assume square)\n    H_OUT: tl.constexpr,            # output height\n    W_OUT: tl.constexpr,            # output width\n    x_sN, x_sC, x_sH, x_sW,         # strides for x\n    w2d_sR, w2d_sC,                 # strides for packed weight 2D (rows, cols)\n    y_sN, y_sC, y_sH, y_sW,         # strides for y\n    BLOCK_PIX: tl.constexpr,\n    BLOCK_CO: tl.constexpr,\n    K_TILE: tl.constexpr,\n):\n    # Program IDs\n    pid_pix = tl.program_id(0)  # tiles over N*H_OUT*W_OUT\n    pid_co = tl.program_id(1)   # tiles over C_OUT\n\n    # Offsets for pixels (flattened n*h*w)\n    pix_offs = pid_pix * BLOCK_PIX + tl.arange(0, BLOCK_PIX)\n    co_offs = pid_co * BLOCK_CO + tl.arange(0, BLOCK_CO)\n\n    pix_mask = pix_offs < (N * H_OUT * W_OUT)\n    co_mask = co_offs < C_OUT\n\n    # Map flattened pixel indices to (n, h, w)\n    HW_OUT = H_OUT * W_OUT\n    n = pix_offs // HW_OUT\n    rem = pix_offs % HW_OUT\n    h = rem // W_OUT\n    w = rem % W_OUT\n\n    # Base pointer for each pixel (top-left of receptive field)\n    x_base = x_ptr + n[:, None] * x_sN + h[:, None] * x_sH + w[:, None] * x_sW  # [BLOCK_PIX, 1]\n\n    # Accumulator\n    acc = tl.zeros((BLOCK_PIX, BLOCK_CO), dtype=tl.float32)\n\n    K_TOTAL = C_IN * K * K\n    # Reduction loop over K_TOTAL in tiles\n    for k0 in range(0, K_TOTAL, K_TILE):\n        r_idx = k0 + tl.arange(0, K_TILE)  # [K_TILE]\n        r_mask = r_idx < K_TOTAL\n\n        # Convert reduction index to (ci, kh, kw)\n        KK = K * K\n        ci = r_idx // KK\n        rem2 = r_idx % KK\n        kh = rem2 // K\n        kw = rem2 % K\n\n        # Load A: [BLOCK_PIX, K_TILE] from input patches\n        a_ptrs = x_base + ci[None, :] * x_sC + kh[None, :] * x_sH + kw[None, :] * x_sW\n        A = tl.load(a_ptrs, mask=(pix_mask[:, None] & r_mask[None, :]), other=0.0)\n\n        # Load B: [K_TILE, BLOCK_CO] from packed weights\n        b_ptrs = w2d_ptr + r_idx[:, None] * w2d_sR + co_offs[None, :] * w2d_sC\n        B = tl.load(b_ptrs, mask=(r_mask[:, None] & co_mask[None, :]), other=0.0)\n\n        # Matmul accumulate\n        acc += tl.dot(A, B)\n\n    # Add conv bias\n    b_conv = tl.load(b_conv_ptr + co_offs, mask=co_mask, other=0.0)\n    acc = acc + b_conv[None, :]\n\n    # ReLU\n    acc = tl.maximum(acc, 0.0)\n\n    # Add extra bias (broadcast over spatial)\n    b_extra = tl.load(b_extra_ptr + co_offs, mask=co_mask, other=0.0)\n    acc = acc + b_extra[None, :]\n\n    # Store output\n    y_ptrs = (\n        y_ptr\n        + n[:, None] * y_sN\n        + co_offs[None, :] * y_sC\n        + h[:, None] * y_sH\n        + w[:, None] * y_sW\n    )\n    tl.store(y_ptrs, acc, mask=(pix_mask[:, None] & co_mask[None, :]))\n\n\ndef triton_conv2d_relu_addbias(x: torch.Tensor, w: torch.Tensor, b_conv: torch.Tensor, b_extra: torch.Tensor):\n    \"\"\"\n    Fused conv2d (stride=1, padding=0, dilation=1, groups=1) + ReLU + add extra bias.\n    x: [N, C_IN, H, W]\n    w: [C_OUT, C_IN, K, K]\n    b_conv: [C_OUT]\n    b_extra: [C_OUT] or [C_OUT, 1, 1]\n    \"\"\"\n    assert x.is_cuda and w.is_cuda and b_extra.is_cuda, \"All tensors must be CUDA\"\n    assert x.dim() == 4 and w.dim() == 4, \"x and w must be 4D (NCHW and OIHW)\"\n    N, C_IN, H, W = x.shape\n    C_OUT, C_IN_w, K, K_w = w.shape\n    assert C_IN == C_IN_w and K == K_w, \"Incompatible conv weight shape\"\n    if b_conv is None:\n        b_conv = torch.zeros(C_OUT, device=x.device, dtype=x.dtype)\n    else:\n        assert b_conv.numel() == C_OUT, \"conv bias shape mismatch\"\n    b_extra_flat = b_extra.view(C_OUT).contiguous()\n\n    # Output dims for padding=0, stride=1\n    H_OUT = H - K + 1\n    W_OUT = W - K + 1\n    assert H_OUT > 0 and W_OUT > 0, \"Invalid output size; check kernel size and padding\"\n\n    # Pack weights to 2D [K_TOTAL, C_OUT] with contiguous columns (coalesced loads across co)\n    # Original w is [C_OUT, C_IN, K, K] (OIHW)\n    w2d = w.reshape(C_OUT, C_IN * K * K).transpose(0, 1).contiguous()  # [K_TOTAL, C_OUT]\n\n    # Allocate output\n    y = torch.empty((N, C_OUT, H_OUT, W_OUT), device=x.device, dtype=x.dtype)\n\n    # Ensure contiguity for expected strides\n    x_c = x.contiguous()\n    y_c = y  # will fill directly\n    # Strides in elements\n    x_sN, x_sC, x_sH, x_sW = x_c.stride()\n    y_sN, y_sC, y_sH, y_sW = y_c.stride()\n    w2d_sR, w2d_sC = w2d.stride()\n\n    grid = lambda meta: (\n        triton.cdiv(N * H_OUT * W_OUT, meta['BLOCK_PIX']),\n        triton.cdiv(C_OUT, meta['BLOCK_CO']),\n    )\n\n    conv2d_relu_addbias_kernel[grid](\n        x_c, w2d, b_conv.contiguous(), b_extra_flat,\n        y_c,\n        N, C_IN, H, W, C_OUT, K, H_OUT, W_OUT,\n        x_sN, x_sC, x_sH, x_sW,\n        w2d_sR, w2d_sC,\n        y_sN, y_sC, y_sH, y_sW,\n    )\n    return y_c\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model that fuses Conv2d + ReLU + bias add using a custom Triton kernel.\n    Assumes stride=1, padding=0, dilation=1, groups=1 as in the provided Model.\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super(ModelNew, self).__init__()\n        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, bias=True)\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n        # Fallback zero bias in case conv.bias is None (shouldn't happen since bias=True)\n        self.register_buffer(\"zero_bias\", torch.zeros(out_channels), persistent=False)\n\n    def forward(self, x):\n        assert x.is_cuda, \"Input must be on CUDA for Triton kernels\"\n        b_conv = self.conv.bias if self.conv.bias is not None else self.zero_bias\n        # Fuse conv + relu + add bias\n        y = triton_conv2d_relu_addbias(x, self.conv.weight, b_conv, self.bias)\n        return y\n\n\n# Default configuration and helpers to match the original interface\nbatch_size = 128\nin_channels = 64\nout_channels = 128\nheight = width = 128\nkernel_size = 3\nbias_shape = (out_channels, 1, 1)\n\ndef get_inputs():\n    return [torch.rand(batch_size, in_channels, height, width, device='cuda')]\n\ndef get_init_inputs():\n    return [in_channels, out_channels, kernel_size, bias_shape]",
+    "kernel_id": "kernel_r0_baseline_1f7b78",
+    "idea_id": "idea_r0_baseline",
+    "round_number": 0,
+    "eval_result": {
+      "compiled": true,
+      "correctness": true,
+      "runtime": 6.52,
+      "runtime_stats": {
+        "max": 6.61,
+        "mean": 6.52,
+        "min": 6.5,
+        "num_trials": 100,
+        "std": 0.0239
+      },
+      "ref_runtime": 7.31,
+      "ref_runtime_compiled": 5.88,
+      "speedup": 1.1211656441717792,
+      "speedup_vs_compiled": 0.901840490797546,
+      "metadata": {
+        "correctness_trials": "(5 / 5)",
+        "device": "0",
+        "hardware": "NVIDIA A100-SXM4-80GB"
+      }
+    },
+    "code_hash": "37c86d8eea28e3d0ac94b92bba7d0c0acf08fe9f2dfc0dd3607ea74dcb57e638",
+    "metadata": {
+      "is_baseline": true,
+      "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel"
+    }
+  },
+  "all_ideas": [
+    {
+      "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel",
+      "round_number": 0,
+      "idea_id": "idea_r0_baseline",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "is_baseline": true
+      }
+    },
+    {
+      "idea_text": "- What: Recast the 3x3 conv as an implicit GEMM in Triton using NHWC activations and RSCK (or KCRS) weights, compute on Tensor Cores in BF16/FP16 (or TF32), accumulate in FP32, and fuse ReLU+bias in the epilogue while results are still in registers. Use TC-friendly tiles (e.g., BLOCK_M=128 over NHW, BLOCK_N=128 over C_out, BLOCK_K=32 over C_in*KH*KW, all multiples of 16). - Why on A100: Leverages 312 TFLOPS BF16/FP16 or 156 TFLOPS TF32 vs 19.5 TFLOPS FP32. NHWC aligns memory access for tensor core mma.sync paths. Fusing bias+ReLU avoids extra global reads/writes, cutting bandwidth and latency. - Targets: Compute throughput (Tensor Cores), memory traffic reduction (fusion), memory access alignment (NHWC coalescing).",
+      "round_number": 1,
+      "idea_id": "idea_r1_58767e76",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "cp.async multi-stage pipeline with double/triple buffering and bank-conflict-aware shared memory - What: Stage activation and weight tiles into shared memory with cp.async (tl.async_load / num_stages>1), using a 2\u20133 stage pipeline. While one tile computes on SMEM, the next tile is prefetched from HBM asynchronously. Use 128-bit vectorized global loads/stores, l2::cache hints, and skew/padding in SMEM (e.g., add +8 elements per row) to avoid 32-bank conflicts. Commit/wait groups to overlap copy and compute; tune BLOCK_K to match copy/compute balance. - Why on A100: Ampere\u2019s cp.async and large 164 KB SMEM enable effective latency hiding. With ~1935 GB/s bandwidth, overlapping memory with compute and eliminating bank conflicts sustains higher throughput and improves tensor core feed. - Targets: Memory access & latency hiding (async prefetch, vectorization), shared memory efficiency (bank-conflict avoidance), overall pipeline utilization.",
+      "round_number": 1,
+      "idea_id": "idea_r1_694752a6",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Persistent CTA with weight-stationary scheduling for high reuse of 3x3 filters - What: Launch persistent thread blocks where each CTA \u201cowns\u201d a tile of output channels (e.g., 32\u201364 Cout) and keeps their 3x3 filters resident in registers/SMEM across many NHW tiles/batches. Iterate over spatial tiles (and batch) inside the CTA, accumulating in registers, then apply fused bias+ReLU and store. Optionally use split-K when Cin*KH*KW is large to keep occupancy high. Map CTAs to traverse NHW in-order to maximize L2 residency of activations. - Why on A100: 3x3 filters are small; pinning them on-chip amortizes global weight loads over many output pixels. Persistent CTAs improve cache locality and reduce kernel launch/queueing overhead. With 64K regs/SM and 164 KB SMEM, resident weights plus small activation tiles fit comfortably. - Targets: Memory reuse (dram weight traffic reduction), parallelism/occupancy (persistent blocks, split-K), bandwidth reduction and epilogue fusion.",
+      "round_number": 1,
+      "idea_id": "idea_r1_73699539",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "tensor-core pipeline with fused epilogue - What: Implement 3x3 conv via Winograd F(4x4) tiles instead of direct/implicit-GEMM. Pre-transform weights offline to the Winograd domain (6x6) in a TC-friendly blocked layout (e.g., C_out\u00d7C_in in multiples of 16). In-kernel: (a) load a 6x6 tile of activations per 4x4 output tile, (b) do separable Winograd input transforms in SMEM/registers, (c) perform 36 small \u201cchannels-reduction\u201d GEMMs over K=C_in (one per Winograd component) on tensor cores (BF16/FP16, FP32 accumulate), (d) inverse-transform to 4x4 output, then fuse bias+ReLU while values are still in registers, and vector-store. - Why on A100: Winograd reduces 3x3 MACs by ~2.25x, so more of the 312 TFLOPS tensor-core peak is usable on real work. The small transforms are bandwidth-light and fit in registers/SMEM; 164 KB SMEM lets you stage multiple 6x6 tiles. Pre-transformed weights fit well in L2 and can be reused across many tiles; fused epilogue avoids extra HBM traffic. - Targets: Compute throughput (fewer MACs, tensor cores), memory traffic (reuse pre-transformed filters, fused epilogue), instruction overhead (blocked transforms).",
+      "round_number": 2,
+      "idea_id": "idea_r2_5cce52b4",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Input-stationary sliding-window with register rotation and 3-line SMEM buffer - What: Use a direct-convolution kernel that is input-stationary in X. Each CTA processes a spatial tile (e.g., H_tile\u00d7W_tile) for a block of output channels. Maintain a 3-row rolling buffer of activations in SMEM (with halo) and, per thread, a 3\u00d73 register window. Sweep horizontally: at each step, rotate the 3\u00d73 registers left, fetch only the new rightmost column (3 elements) from SMEM via 128-bit vectorized loads, optionally exchange across lanes with warp shuffles to minimize redundant loads. Compute multiple neighboring outputs per thread (e.g., 2\u00d72 micro-tile) to maximize overlap of input patches. Keep that thread\u2019s 3\u00d73 filter weights for its assigned output channels in registers across many X steps; advance Y by sliding the SMEM line buffer. - Why on A100: Greatly reduces activation traffic by reusing 2/3 of the window between adjacent X positions; 64K registers/SM and 164 KB SMEM comfortably hold windows, micro-tiles, and a 3-line buffer. Coalesced 128-bit loads for the \u201cnew\u201d column maximize bandwidth utilization; minimal control flow and steady, compute-dense inner loops keep the SM issue slots busy even without heavy shared-memory staging of entire K-tiles. - Targets: Memory access (coalescing, reuse), instruction efficiency (steady FMA stream, minimal address recompute), register/SMEM locality.",
+      "round_number": 2,
+      "idea_id": "idea_r2_47af19cb",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Mask-free interior specialization + 2D block swizzle + cache modifiers - What: - Interior specialization: Pad H, W, and channel dimensions to multiples of tile sizes at allocation or via views. Launch an \u201cinterior\u201d kernel that assumes no bounds checks (no masks), using tl.assume_aligned and tl.multiple_of to enable 128-bit vector loads/stores and remove predication. Use a tiny \u201cborder\u201d kernel only for the padded edges. - 2D block swizzle: Map program_ids with a Morton/Z-order or blocked-wavefront swizzle over (NHW tiles \u00d7 C_out tiles) so neighboring CTAs work on adjacent spatial tiles of the same C_out range, maximizing L2 reuse of both activations and weights and reducing L2 set conflicts. - Cache control: Use cache_modifier=\".ca\" for activations (temporal reuse within CTA), cache_modifier=\".cg\" + evict_last for weights (prefer L2 residency across CTAs), and cache_modifier=\".cs\" for output stores (streaming). Ensure base pointers are 128B-aligned to hit full transaction width. - Why on A100: Removing masks and predication cuts instructions and register pressure, boosting occupancy and ILP. Swizzled tiling improves L2 hit rates and reduces thrash across the large on-chip L2, while cache modifiers align accesses with intended reuse distances. Wider, aligned transactions better exploit the ~1935 GB/s HBM bandwidth. - Targets: Control flow & loop (no masks, fewer branches), memory (L2 locality, coalescing, cache policy), parallelism/occupancy (lower regs per thread).",
+      "round_number": 2,
+      "idea_id": "idea_r2_b5ef7a7d",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_1f7b78"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    }
+  ],
+  "all_kernels": [
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({'BLOCK_PIX': 64, 'BLOCK_CO': 64, 'K_TILE': 64}, num_warps=4, num_stages=2),\n        triton.Config({'BLOCK_PIX': 128, 'BLOCK_CO': 64, 'K_TILE': 32}, num_warps=8, num_stages=2),\n        triton.Config({'BLOCK_PIX': 64, 'BLOCK_CO': 128, 'K_TILE': 32}, num_warps=8, num_stages=2),\n    ],\n    key=['N', 'C_IN', 'H', 'W', 'C_OUT', 'K', 'H_OUT', 'W_OUT'],\n)\n@triton.jit\ndef conv2d_relu_addbias_kernel(\n    x_ptr,                          # *float* [N, C_IN, H, W]\n    w2d_ptr,                        # *float* [K_TOTAL, C_OUT] (packed weights)\n    b_conv_ptr,                     # *float* [C_OUT]\n    b_extra_ptr,                    # *float* [C_OUT]\n    y_ptr,                          # *float* [N, C_OUT, H_OUT, W_OUT]\n    N: tl.constexpr,                # batch size\n    C_IN: tl.constexpr,             # input channels\n    H: tl.constexpr,                # input height\n    W: tl.constexpr,                # input width\n    C_OUT: tl.constexpr,            # output channels\n    K: tl.constexpr,                # kernel size (assume square)\n    H_OUT: tl.constexpr,            # output height\n    W_OUT: tl.constexpr,            # output width\n    x_sN, x_sC, x_sH, x_sW,         # strides for x\n    w2d_sR, w2d_sC,                 # strides for packed weight 2D (rows, cols)\n    y_sN, y_sC, y_sH, y_sW,         # strides for y\n    BLOCK_PIX: tl.constexpr,\n    BLOCK_CO: tl.constexpr,\n    K_TILE: tl.constexpr,\n):\n    # Program IDs\n    pid_pix = tl.program_id(0)  # tiles over N*H_OUT*W_OUT\n    pid_co = tl.program_id(1)   # tiles over C_OUT\n\n    # Offsets for pixels (flattened n*h*w)\n    pix_offs = pid_pix * BLOCK_PIX + tl.arange(0, BLOCK_PIX)\n    co_offs = pid_co * BLOCK_CO + tl.arange(0, BLOCK_CO)\n\n    pix_mask = pix_offs < (N * H_OUT * W_OUT)\n    co_mask = co_offs < C_OUT\n\n    # Map flattened pixel indices to (n, h, w)\n    HW_OUT = H_OUT * W_OUT\n    n = pix_offs // HW_OUT\n    rem = pix_offs % HW_OUT\n    h = rem // W_OUT\n    w = rem % W_OUT\n\n    # Base pointer for each pixel (top-left of receptive field)\n    x_base = x_ptr + n[:, None] * x_sN + h[:, None] * x_sH + w[:, None] * x_sW  # [BLOCK_PIX, 1]\n\n    # Accumulator\n    acc = tl.zeros((BLOCK_PIX, BLOCK_CO), dtype=tl.float32)\n\n    K_TOTAL = C_IN * K * K\n    # Reduction loop over K_TOTAL in tiles\n    for k0 in range(0, K_TOTAL, K_TILE):\n        r_idx = k0 + tl.arange(0, K_TILE)  # [K_TILE]\n        r_mask = r_idx < K_TOTAL\n\n        # Convert reduction index to (ci, kh, kw)\n        KK = K * K\n        ci = r_idx // KK\n        rem2 = r_idx % KK\n        kh = rem2 // K\n        kw = rem2 % K\n\n        # Load A: [BLOCK_PIX, K_TILE] from input patches\n        a_ptrs = x_base + ci[None, :] * x_sC + kh[None, :] * x_sH + kw[None, :] * x_sW\n        A = tl.load(a_ptrs, mask=(pix_mask[:, None] & r_mask[None, :]), other=0.0)\n\n        # Load B: [K_TILE, BLOCK_CO] from packed weights\n        b_ptrs = w2d_ptr + r_idx[:, None] * w2d_sR + co_offs[None, :] * w2d_sC\n        B = tl.load(b_ptrs, mask=(r_mask[:, None] & co_mask[None, :]), other=0.0)\n\n        # Matmul accumulate\n        acc += tl.dot(A, B)\n\n    # Add conv bias\n    b_conv = tl.load(b_conv_ptr + co_offs, mask=co_mask, other=0.0)\n    acc = acc + b_conv[None, :]\n\n    # ReLU\n    acc = tl.maximum(acc, 0.0)\n\n    # Add extra bias (broadcast over spatial)\n    b_extra = tl.load(b_extra_ptr + co_offs, mask=co_mask, other=0.0)\n    acc = acc + b_extra[None, :]\n\n    # Store output\n    y_ptrs = (\n        y_ptr\n        + n[:, None] * y_sN\n        + co_offs[None, :] * y_sC\n        + h[:, None] * y_sH\n        + w[:, None] * y_sW\n    )\n    tl.store(y_ptrs, acc, mask=(pix_mask[:, None] & co_mask[None, :]))\n\n\ndef triton_conv2d_relu_addbias(x: torch.Tensor, w: torch.Tensor, b_conv: torch.Tensor, b_extra: torch.Tensor):\n    \"\"\"\n    Fused conv2d (stride=1, padding=0, dilation=1, groups=1) + ReLU + add extra bias.\n    x: [N, C_IN, H, W]\n    w: [C_OUT, C_IN, K, K]\n    b_conv: [C_OUT]\n    b_extra: [C_OUT] or [C_OUT, 1, 1]\n    \"\"\"\n    assert x.is_cuda and w.is_cuda and b_extra.is_cuda, \"All tensors must be CUDA\"\n    assert x.dim() == 4 and w.dim() == 4, \"x and w must be 4D (NCHW and OIHW)\"\n    N, C_IN, H, W = x.shape\n    C_OUT, C_IN_w, K, K_w = w.shape\n    assert C_IN == C_IN_w and K == K_w, \"Incompatible conv weight shape\"\n    if b_conv is None:\n        b_conv = torch.zeros(C_OUT, device=x.device, dtype=x.dtype)\n    else:\n        assert b_conv.numel() == C_OUT, \"conv bias shape mismatch\"\n    b_extra_flat = b_extra.view(C_OUT).contiguous()\n\n    # Output dims for padding=0, stride=1\n    H_OUT = H - K + 1\n    W_OUT = W - K + 1\n    assert H_OUT > 0 and W_OUT > 0, \"Invalid output size; check kernel size and padding\"\n\n    # Pack weights to 2D [K_TOTAL, C_OUT] with contiguous columns (coalesced loads across co)\n    # Original w is [C_OUT, C_IN, K, K] (OIHW)\n    w2d = w.reshape(C_OUT, C_IN * K * K).transpose(0, 1).contiguous()  # [K_TOTAL, C_OUT]\n\n    # Allocate output\n    y = torch.empty((N, C_OUT, H_OUT, W_OUT), device=x.device, dtype=x.dtype)\n\n    # Ensure contiguity for expected strides\n    x_c = x.contiguous()\n    y_c = y  # will fill directly\n    # Strides in elements\n    x_sN, x_sC, x_sH, x_sW = x_c.stride()\n    y_sN, y_sC, y_sH, y_sW = y_c.stride()\n    w2d_sR, w2d_sC = w2d.stride()\n\n    grid = lambda meta: (\n        triton.cdiv(N * H_OUT * W_OUT, meta['BLOCK_PIX']),\n        triton.cdiv(C_OUT, meta['BLOCK_CO']),\n    )\n\n    conv2d_relu_addbias_kernel[grid](\n        x_c, w2d, b_conv.contiguous(), b_extra_flat,\n        y_c,\n        N, C_IN, H, W, C_OUT, K, H_OUT, W_OUT,\n        x_sN, x_sC, x_sH, x_sW,\n        w2d_sR, w2d_sC,\n        y_sN, y_sC, y_sH, y_sW,\n    )\n    return y_c\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model that fuses Conv2d + ReLU + bias add using a custom Triton kernel.\n    Assumes stride=1, padding=0, dilation=1, groups=1 as in the provided Model.\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super(ModelNew, self).__init__()\n        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, bias=True)\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n        # Fallback zero bias in case conv.bias is None (shouldn't happen since bias=True)\n        self.register_buffer(\"zero_bias\", torch.zeros(out_channels), persistent=False)\n\n    def forward(self, x):\n        assert x.is_cuda, \"Input must be on CUDA for Triton kernels\"\n        b_conv = self.conv.bias if self.conv.bias is not None else self.zero_bias\n        # Fuse conv + relu + add bias\n        y = triton_conv2d_relu_addbias(x, self.conv.weight, b_conv, self.bias)\n        return y\n\n\n# Default configuration and helpers to match the original interface\nbatch_size = 128\nin_channels = 64\nout_channels = 128\nheight = width = 128\nkernel_size = 3\nbias_shape = (out_channels, 1, 1)\n\ndef get_inputs():\n    return [torch.rand(batch_size, in_channels, height, width, device='cuda')]\n\ndef get_init_inputs():\n    return [in_channels, out_channels, kernel_size, bias_shape]",
+      "kernel_id": "kernel_r0_baseline_1f7b78",
+      "idea_id": "idea_r0_baseline",
+      "round_number": 0,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 6.52,
+        "runtime_stats": {
+          "max": 6.61,
+          "mean": 6.52,
+          "min": 6.5,
+          "num_trials": 100,
+          "std": 0.0239
+        },
+        "ref_runtime": 7.31,
+        "ref_runtime_compiled": 5.88,
+        "speedup": 1.1211656441717792,
+        "speedup_vs_compiled": 0.901840490797546,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "37c86d8eea28e3d0ac94b92bba7d0c0acf08fe9f2dfc0dd3607ea74dcb57e638",
+      "metadata": {
+        "is_baseline": true,
+        "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel"
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef conv3x3_igemm_nhwc_rsck_kernel(\n    x_ptr,          # [N, H, W, C] BF16\n    w_ptr,          # [K_total, Cout] BF16 where K_total = C * KH * KW (RSCK flattened to K x Cout)\n    bias_conv_ptr,  # [Cout] FP32\n    bias_out_ptr,   # [Cout] FP32 (original \"bias\" param flattened)\n    y_ptr,          # [N, H_out, W_out, Cout] FP32\n    N, H, W, C, H_out, W_out, KH, KW, Cout, K_total,\n    BLOCK_M: tl.constexpr,  # tile over M = N * H_out * W_out\n    BLOCK_N: tl.constexpr,  # tile over Cout\n    BLOCK_K: tl.constexpr,  # tile over K = C * KH * KW\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    mask_m = offs_m < (N * H_out * W_out)\n    mask_n = offs_n < Cout\n\n    # Decode M-indices -> (n, oh, ow)\n    nhw_stride = H_out * W_out\n    n_idx = offs_m // nhw_stride\n    rem = offs_m % nhw_stride\n    oh_idx = rem // W_out\n    ow_idx = rem % W_out\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # Iterate across K dimension\n    for k0 in range(0, K_total, BLOCK_K):\n        k_offsets = k0 + tl.arange(0, BLOCK_K)\n        mask_k = k_offsets < K_total\n\n        # Decode K-offsets -> (r, s, c)\n        c_idx = k_offsets % C\n        rs = k_offsets // C\n        s_idx = rs % KW\n        r_idx = rs // KW\n\n        # Compute input coordinates for this K-tile and M-tile\n        in_h = oh_idx[:, None] + r_idx[None, :]\n        in_w = ow_idx[:, None] + s_idx[None, :]\n\n        # NHWC memory layout strides\n        stride_n = H * W * C\n        stride_h = W * C\n        stride_w = C\n        stride_c = 1\n\n        # Compute input addresses\n        a_ptrs = (\n            n_idx[:, None] * stride_n\n            + in_h * stride_h\n            + in_w * stride_w\n            + c_idx[None, :] * stride_c\n        )\n\n        a_mask = mask_m[:, None] & mask_k[None, :]\n        A = tl.load(x_ptr + a_ptrs, mask=a_mask, other=0).to(tl.bfloat16)\n\n        # Load weight tile [BLOCK_K, BLOCK_N] from [K_total, Cout]\n        b_ptrs = k_offsets[:, None] * Cout + offs_n[None, :]\n        b_mask = mask_k[:, None] & mask_n[None, :]\n        B = tl.load(w_ptr + b_ptrs, mask=b_mask, other=0).to(tl.bfloat16)\n\n        # Tensor-core matmul with FP32 accumulation\n        acc += tl.dot(A, B, out_dtype=tl.float32)\n\n    # Epilogue: add conv bias -> ReLU -> add external bias; all while in registers\n    bias_conv = tl.load(bias_conv_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)[None, :]\n    acc = acc + bias_conv\n    acc = tl.maximum(acc, 0.0)\n    bias_out = tl.load(bias_out_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)[None, :]\n    acc = acc + bias_out\n\n    # Store result to NHWC output\n    y_ptrs = (\n        (n_idx[:, None] * (H_out * W_out * Cout))\n        + (oh_idx[:, None] * (W_out * Cout))\n        + (ow_idx[:, None] * Cout)\n        + offs_n[None, :]\n    )\n    y_mask = mask_m[:, None] & mask_n[None, :]\n    tl.store(y_ptr + y_ptrs, acc, mask=y_mask)\n\n\ndef triton_conv3x3_nhwc_rsck_relu_bias(x_nhwc_bf16: torch.Tensor,\n                                       w_rsck_ksn_bf16: torch.Tensor,\n                                       bias_conv_f32: torch.Tensor,\n                                       bias_out_f32: torch.Tensor,\n                                       KH: int, KW: int) -> torch.Tensor:\n    assert x_nhwc_bf16.is_cuda and w_rsck_ksn_bf16.is_cuda, \"Inputs must be CUDA tensors\"\n    N, H, W, C = x_nhwc_bf16.shape\n    Cout = bias_conv_f32.shape[0]\n    H_out = H - KH + 1\n    W_out = W - KW + 1\n    K_total = C * KH * KW\n\n    y = torch.empty((N, H_out, W_out, Cout), device=x_nhwc_bf16.device, dtype=torch.float32)\n\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 32\n\n    grid = lambda meta: (\n        triton.cdiv(N * H_out * W_out, meta['BLOCK_M']),\n        triton.cdiv(Cout, meta['BLOCK_N'])\n    )\n\n    conv3x3_igemm_nhwc_rsck_kernel[grid](\n        x_nhwc_bf16, w_rsck_ksn_bf16, bias_conv_f32, bias_out_f32, y,\n        N, H, W, C, H_out, W_out, KH, KW, Cout, K_total,\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=4, num_stages=3\n    )\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized 3x3 convolution using Triton implicit-GEMM on Tensor Cores (BF16 inputs/weights, FP32 accum),\n    with fused conv-bias + ReLU + external bias in the epilogue. Uses NHWC activations and RSCK weights.\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super().__init__()\n        assert isinstance(kernel_size, int), \"Only square kernel supported\"\n        self.in_channels = in_channels\n        self.out_channels = out_channels\n        self.kernel_size = kernel_size\n\n        # Parameters to match reference model semantics:\n        # - weight and conv_bias correspond to nn.Conv2d(..., bias=True)\n        # - bias is the extra (out_channels, 1, 1) term added AFTER ReLU\n        k = kernel_size\n        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, k, k))\n        self.conv_bias = nn.Parameter(torch.randn(out_channels))\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [N, C, H, W] -> NHWC for Tensor Core-friendly access\n        N, C, H, W = x.shape\n        KH = KW = self.kernel_size\n        H_out = H - KH + 1\n        W_out = W - KW + 1\n        assert H_out > 0 and W_out > 0, \"Kernel larger than input without padding is not supported\"\n\n        # Prepare activations in NHWC and cast to BF16\n        x_nhwc_bf16 = x.permute(0, 2, 3, 1).contiguous().to(torch.bfloat16)  # [N, H, W, C]\n\n        # Prepack weights to [K_total, Cout] in BF16: RSCK (r,s,c,k) -> flatten K (r,s,c) then Cout\n        # Original weight: [Cout, Cin, KH, KW] (O, I, R, S)\n        # Convert to (R, S, I, O) then reshape to [K_total, O]\n        w_rsck = self.weight.permute(2, 3, 1, 0).contiguous()  # [R, S, I, O]\n        K_total = C * KH * KW\n        w_ksn = w_rsck.view(KH * KW * C, self.out_channels).contiguous().to(torch.bfloat16)  # [K_total, Cout]\n\n        # Biases: conv bias added before ReLU, external bias added after ReLU\n        bias_conv_f32 = self.conv_bias.contiguous()\n        bias_out_f32 = self.bias.view(self.out_channels).contiguous()\n\n        # Launch Triton kernel\n        y_nhwc_f32 = triton_conv3x3_nhwc_rsck_relu_bias(\n            x_nhwc_bf16, w_ksn, bias_conv_f32, bias_out_f32, KH, KW\n        )  # [N, H_out, W_out, Cout], FP32\n\n        # Convert back to NCHW\n        y_nchw_f32 = y_nhwc_f32.permute(0, 3, 1, 2).contiguous()\n        return y_nchw_f32",
+      "kernel_id": "kernel_r1_idea_r1_58767e76_0_382456",
+      "idea_id": "idea_r1_58767e76",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "avg_difference": [
+            "5.539736",
+            "5.539343",
+            "5.539077",
+            "5.539556",
+            "5.539649"
+          ],
+          "correctness_issue": "Output mismatch",
+          "correctness_trials": "(0 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "max_difference": [
+            "61.839249",
+            "63.760006",
+            "60.932915",
+            "62.043468",
+            "64.194153"
+          ]
+        }
+      },
+      "code_hash": "ca546932b6b40057a2c73c962a9a1f281491691dcbe550b20122422847fa85ee",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "- What: Recast the 3x3 conv as an implicit GEMM in Triton using NHWC activations and RSCK (or KCRS) weights, compute on Tensor Cores in BF16/FP16 (or TF32), accumulate in FP32, and fuse ReLU+bias in the epilogue while results are still in registers. Use TC-friendly tiles (e.g., BLOCK_M=128 over NHW, BLOCK_N=128 over C_out, BLOCK_K=32 over C_in*KH*KW, all multiples of 16). - Why on A100: Leverages 312 TFLOPS BF16/FP16 or 156 TFLOPS TF32 vs 19.5 TFLOPS FP32. NHWC aligns memory access for tensor core mma.sync paths. Fusing bias+ReLU avoids extra global reads/writes, cutting bandwidth and latency. - Targets: Compute throughput (Tensor Cores), memory traffic reduction (fusion), memory access alignment (NHWC coalescing).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef conv_im2col_gemm_bias_relu_kernel(\n    x_ptr,               # *f32, input tensor [B, Cin, H, W]\n    w_ptr,               # *f32, weights in (K, N) = (Cin*KH*KW, Cout)\n    bias_conv_ptr,       # *f32, conv bias [Cout]\n    bias_extra_ptr,      # *f32, extra bias [Cout]\n    out_ptr,             # *f32, output tensor [B, Cout, OH, OW]\n\n    B: tl.constexpr,     # int\n    Cin: tl.constexpr,   # int\n    H: tl.constexpr,     # int\n    W: tl.constexpr,     # int\n    Cout: tl.constexpr,  # int\n    KH: tl.constexpr,    # int\n    KW: tl.constexpr,    # int\n    OH: tl.constexpr,    # int\n    OW: tl.constexpr,    # int\n\n    stride_xn: tl.constexpr,  # strides for x\n    stride_xc: tl.constexpr,\n    stride_xh: tl.constexpr,\n    stride_xw: tl.constexpr,\n\n    stride_wk: tl.constexpr,  # strides for w (K, N)\n    stride_wn: tl.constexpr,\n\n    stride_on: tl.constexpr,  # strides for out\n    stride_oc: tl.constexpr,\n    stride_oh: tl.constexpr,\n    stride_ow: tl.constexpr,\n\n    M, N, K,  # M=B*OH*OW, N=Cout, K=Cin*KH*KW\n\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    BLOCK_K: tl.constexpr,\n):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_m = tl.max_contiguous(offs_m, 1)\n    offs_n = tl.max_contiguous(offs_n, 1)\n\n    m_mask = offs_m < M\n    n_mask = offs_n < N\n\n    # Decode M index -> (b, oh, ow)\n    OHOW = OH * OW\n    b = offs_m // OHOW\n    tmp = offs_m - b * OHOW\n    oh = tmp // OW\n    ow = tmp - oh * OW\n\n    # Precompute base offsets for input and output per-row (depends only on M index)\n    base_in = b * stride_xn + oh * stride_xh + ow * stride_xw\n    base_out = b * stride_on + oh * stride_oh + ow * stride_ow\n\n    # Precompute output column offsets\n    out_col = offs_n * stride_oc\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # K loop\n    for k0 in range(0, K, BLOCK_K):\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n        k_mask = offs_k < K\n\n        # Decode K index -> (cin, kh, kw)\n        KH_KW = KH * KW\n        cin = offs_k // KH_KW\n        rem = offs_k - cin * KH_KW\n        kh = rem // KW\n        kw = rem - kh * KW\n\n        # A pointers: x[b, cin, oh+kh, ow+kw]\n        a_delta_k = cin * stride_xc + kh * stride_xh + kw * stride_xw\n        a_ptrs = x_ptr + base_in[:, None] + a_delta_k[None, :]\n\n        # B pointers: w[(k), n]\n        b_ptrs = w_ptr + (offs_k[:, None] * stride_wk + offs_n[None, :] * stride_wn)\n\n        # Loads with L2 cache hint; mask appropriately\n        a = tl.load(a_ptrs, mask=m_mask[:, None] & k_mask[None, :], other=0.0, cache_modifier=\".cg\")\n        b_mat = tl.load(b_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0, cache_modifier=\".cg\")\n\n        acc += tl.dot(a, b_mat)\n\n    # Epilogue: add conv bias, apply ReLU, then add extra bias\n    bias_conv = tl.load(bias_conv_ptr + offs_n, mask=n_mask, other=0.0)\n    bias_extra = tl.load(bias_extra_ptr + offs_n, mask=n_mask, other=0.0)\n    out_tile = acc + bias_conv[None, :]\n    out_tile = tl.maximum(out_tile, 0.0)\n    out_tile = out_tile + bias_extra[None, :]\n\n    out_ptrs = out_ptr + base_out[:, None] + out_col[1 * 0 + None, :]  # broadcast add\n    tl.store(out_ptrs, out_tile, mask=m_mask[:, None] & n_mask[None, :])\n\n\ndef triton_conv_bias_relu(x: torch.Tensor, w: torch.Tensor, bias_conv: torch.Tensor, bias_extra: torch.Tensor):\n    assert x.is_cuda and w.is_cuda and bias_conv.is_cuda and bias_extra.is_cuda\n    assert x.dtype == w.dtype == bias_conv.dtype == bias_extra.dtype\n    B, Cin, H, W = x.shape\n    Cout = w.shape[0]\n    KH, KW = w.shape[2], w.shape[3]\n    # Output dims for stride=1, padding=0, dilation=1\n    OH = H - KH + 1\n    OW = W - KW + 1\n    assert OH > 0 and OW > 0, \"Invalid spatial shapes for zero padding and stride=1.\"\n\n    # Prepare weight matrix W_col of shape (K, N) = (Cin*KH*KW, Cout)\n    K = Cin * KH * KW\n    N = Cout\n    W_col = w.reshape(Cout, K).transpose(0, 1).contiguous()\n\n    # Prepare output tensor\n    out = torch.empty((B, Cout, OH, OW), device=x.device, dtype=x.dtype)\n\n    # Strides\n    sxn, sxc, sxh, sxw = x.stride()\n    swk, swn = W_col.stride()  # (K, N)\n    son, soc, soh, sow = out.stride()\n\n    M = B * OH * OW\n\n    # Kernel launch params\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 32\n\n    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))\n\n    conv_im2col_gemm_bias_relu_kernel[grid](\n        x, W_col, bias_conv, bias_extra, out,\n        B, Cin, H, W, Cout, KH, KW, OH, OW,\n        sxn, sxc, sxh, sxw,\n        swk, swn,\n        son, soc, soh, sow,\n        M, N, K,\n        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n        num_warps=8, num_stages=3,\n    )\n    return out\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized Conv2d + ReLU + bias using Triton with multi-stage pipeline.\n    Matches: y = ReLU(conv(x) + conv_bias) + extra_bias\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super().__init__()\n        if isinstance(kernel_size, int):\n            kh = kw = kernel_size\n        else:\n            kh, kw = kernel_size\n        self.in_channels = in_channels\n        self.out_channels = out_channels\n        self.kh = kh\n        self.kw = kw\n\n        # Parameters: conv weight, conv bias, and extra bias (shape [Cout,1,1])\n        self.weight = nn.Parameter(torch.empty(out_channels, in_channels, kh, kw))\n        self.conv_bias = nn.Parameter(torch.empty(out_channels))\n        self.bias = nn.Parameter(torch.empty(bias_shape))\n\n        # Kaiming Uniform init similar to nn.Conv2d\n        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))\n        fan_in = in_channels * kh * kw\n        bound = 1 / math.sqrt(fan_in)\n        nn.init.uniform_(self.conv_bias, -bound, bound)\n        nn.init.zeros_(self.bias)\n\n    def forward(self, x):\n        import math\n        assert x.is_cuda, \"Input must be on CUDA for Triton kernels.\"\n        B, Cin, H, W = x.shape\n        assert Cin == self.in_channels\n        OH = H - self.kh + 1\n        OW = W - self.kw + 1\n        # Ensure biases are flattened to [Cout]\n        extra_bias = self.bias.view(self.out_channels)\n        y = triton_conv_bias_relu(\n            x.contiguous(), self.weight.contiguous(), self.conv_bias.contiguous(), extra_bias.contiguous()\n        )\n        return y",
+      "kernel_id": "kernel_r1_idea_r1_694752a6_0_e3d082",
+      "idea_id": "idea_r1_694752a6",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "f7162ab6c9d192dc23368e2c7b52dd44aaa806024aaa1f88ea38d4fc28fe7f85",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "cp.async multi-stage pipeline with double/triple buffering and bank-conflict-aware shared memory - What: Stage activation and weight tiles into shared memory with cp.async (tl.async_load / num_stages>1), using a 2\u20133 stage pipeline. While one tile computes on SMEM, the next tile is prefetched from HBM asynchronously. Use 128-bit vectorized global loads/stores, l2::cache hints, and skew/padding in SMEM (e.g., add +8 elements per row) to avoid 32-bank conflicts. Commit/wait groups to overlap copy and compute; tune BLOCK_K to match copy/compute balance. - Why on A100: Ampere\u2019s cp.async and large 164 KB SMEM enable effective latency hiding. With ~1935 GB/s bandwidth, overlapping memory with compute and eliminating bank conflicts sustains higher throughput and improves tensor core feed. - Targets: Memory access & latency hiding (async prefetch, vectorization), shared memory efficiency (bank-conflict avoidance), overall pipeline utilization.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef conv3x3_persistent_kernel(\n    x_ptr,                # float*         [N, Cin, H, W]\n    w_ptr,                # float*         [Cout, Cin, 3, 3]\n    b_conv_ptr,           # float*         [Cout]\n    b_ext_ptr,            # float*         [Cout] (from (Cout,1,1))\n    out_ptr,              # float*         [N, Cout, OH, OW]\n    N, Cin, H, W, Cout, OH, OW,\n    stride_xn, stride_xc, stride_xh, stride_xw,\n    stride_wco, stride_wci, stride_wkh, stride_wkw,\n    stride_on, stride_oc, stride_oh, stride_ow,\n    NUM_WAVES: tl.constexpr,\n    BLOCK_COUT: tl.constexpr,\n    C_BLOCK: tl.constexpr,\n    TILE_H: tl.constexpr,\n    TILE_W: tl.constexpr,\n):\n    pid_co = tl.program_id(0)\n    pid_wave = tl.program_id(1)\n\n    co_start = pid_co * BLOCK_COUT\n    co_offsets = co_start + tl.arange(0, BLOCK_COUT)\n    co_mask = co_offsets < Cout\n\n    nh_tiles = (OH + TILE_H - 1) // TILE_H\n    nw_tiles = (OW + TILE_W - 1) // TILE_W\n    tiles_per_batch = nh_tiles * nw_tiles\n    total_tiles = N * tiles_per_batch\n\n    tile_id = pid_wave\n    while tile_id < total_tiles:\n        n = tile_id // tiles_per_batch\n        rem = tile_id % tiles_per_batch\n        th = rem // nw_tiles\n        tw = rem % nw_tiles\n\n        oh_base = th * TILE_H\n        ow_base = tw * TILE_W\n\n        oh_offsets = oh_base + tl.arange(0, TILE_H)\n        ow_offsets = ow_base + tl.arange(0, TILE_W)\n        oh_mask = oh_offsets < OH\n        ow_mask = ow_offsets < OW\n\n        # Accumulator per [co, oh, ow]\n        acc = tl.zeros((BLOCK_COUT, TILE_H, TILE_W), dtype=tl.float32)\n\n        ci0 = 0\n        while ci0 < Cin:\n            ci_offsets = ci0 + tl.arange(0, C_BLOCK)\n            ci_mask = ci_offsets < Cin\n\n            # For each (kh, kw) in 3x3\n            for kh in tl.static_range(0, 3):\n                for kw in tl.static_range(0, 3):\n                    # Load weight chunk: [BLOCK_COUT, C_BLOCK]\n                    w_ptrs = (\n                        w_ptr\n                        + co_offsets[:, None] * stride_wco\n                        + ci_offsets[None, :] * stride_wci\n                        + kh * stride_wkh\n                        + kw * stride_wkw\n                    )\n                    w_mask = co_mask[:, None] & ci_mask[None, :]\n                    w_chunk = tl.load(w_ptrs, mask=w_mask, other=0.0)\n\n                    # Load activation tile: [C_BLOCK, TILE_H, TILE_W]\n                    in_h = oh_offsets + kh\n                    in_w = ow_offsets + kw\n                    x_ptrs = (\n                        x_ptr\n                        + n * stride_xn\n                        + ci_offsets[:, None, None] * stride_xc\n                        + in_h[None, :, None] * stride_xh\n                        + in_w[None, None, :] * stride_xw\n                    )\n                    x_mask = (\n                        ci_mask[:, None, None]\n                        & (in_h[None, :, None] < H)\n                        & (in_w[None, None, :] < W)\n                        & oh_mask[None, :, None]\n                        & ow_mask[None, None, :]\n                    )\n                    x_chunk = tl.load(x_ptrs, mask=x_mask, other=0.0)\n\n                    # Reduction over C_BLOCK\n                    for ci in tl.static_range(0, C_BLOCK):\n                        w_vec = w_chunk[:, ci]  # [BLOCK_COUT]\n                        x_mat = x_chunk[ci, :, :]  # [TILE_H, TILE_W]\n                        acc += w_vec[:, None, None] * x_mat[None, :, :]\n\n            ci0 += C_BLOCK\n\n        # Add conv bias [Cout] and ReLU\n        b_conv = tl.load(b_conv_ptr + co_offsets, mask=co_mask, other=0.0)\n        acc = acc + b_conv[:, None, None]\n        acc = tl.maximum(acc, 0.0)\n\n        # Add external bias (post-ReLU) [Cout]\n        b_ext = tl.load(b_ext_ptr + co_offsets, mask=co_mask, other=0.0)\n        acc = acc + b_ext[:, None, None]\n\n        # Store\n        out_ptrs = (\n            out_ptr\n            + n * stride_on\n            + co_offsets[:, None, None] * stride_oc\n            + oh_offsets[None, :, None] * stride_oh\n            + ow_offsets[None, None, :] * stride_ow\n        )\n        store_mask = co_mask[:, None, None] & oh_mask[None, :, None] & ow_mask[None, None, :]\n        tl.store(out_ptrs, acc, mask=store_mask)\n\n        tile_id += NUM_WAVES\n\n\ndef conv3x3_relu_bias_triton(x, weight, bias_conv, bias_ext, *, BLOCK_COUT=32, C_BLOCK=32, TILE_H=8, TILE_W=16, NUM_WAVES=8):\n    assert x.is_cuda and weight.is_cuda and bias_conv.is_cuda and bias_ext.is_cuda, \"All tensors must be CUDA.\"\n    # Ensure dtypes are float32 for this kernel\n    x = x.contiguous().to(torch.float32)\n    weight = weight.contiguous().to(torch.float32)\n    bias_conv = bias_conv.contiguous().to(torch.float32)\n    # Flatten external bias (Cout,1,1) -> (Cout,)\n    bias_ext = bias_ext.contiguous().view(-1).to(torch.float32)\n\n    N, Cin, H, W = x.shape\n    Cout, Cin_w, KH, KW = weight.shape\n    assert KH == 3 and KW == 3, \"Kernel size must be 3x3\"\n    assert Cin_w == Cin, \"Weight Cin must match input Cin\"\n    OH = H - 3 + 1\n    OW = W - 3 + 1\n    out = torch.empty((N, Cout, OH, OW), device=x.device, dtype=torch.float32)\n\n    # Strides (in elements)\n    stride_xn, stride_xc, stride_xh, stride_xw = x.stride()\n    stride_wco, stride_wci, stride_wkh, stride_wkw = weight.stride()\n    stride_on, stride_oc, stride_oh, stride_ow = out.stride()\n\n    # Choose number of waves not exceeding total tiles\n    nh_tiles = (OH + TILE_H - 1) // TILE_H\n    nw_tiles = (OW + TILE_W - 1) // TILE_W\n    total_tiles = N * nh_tiles * nw_tiles\n    waves = min(max(1, NUM_WAVES), max(1, total_tiles))\n\n    grid = (triton.cdiv(Cout, BLOCK_COUT), waves)\n\n    conv3x3_persistent_kernel[grid](\n        x, weight, bias_conv, bias_ext, out,\n        N, Cin, H, W, Cout, OH, OW,\n        stride_xn, stride_xc, stride_xh, stride_xw,\n        stride_wco, stride_wci, stride_wkh, stride_wkw,\n        stride_on, stride_oc, stride_oh, stride_ow,\n        NUM_WAVES=waves,\n        BLOCK_COUT=BLOCK_COUT,\n        C_BLOCK=C_BLOCK,\n        TILE_H=TILE_H,\n        TILE_W=TILE_W,\n        num_warps=8,\n        num_stages=2,\n    )\n    return out\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized 3x3 Conv (NCHW) with persistent CTAs over spatial+batch,\n    weight-stationary scheduling, and fused conv-bias+ReLU+external-bias epilogue.\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super().__init__()\n        assert kernel_size == 3, \"This optimized model supports kernel_size=3 only.\"\n        self.in_channels = in_channels\n        self.out_channels = out_channels\n        self.kernel_size = kernel_size\n\n        # Parameters: Conv weights and bias; and external bias (Cout,1,1)\n        # Kaiming-like init\n        w = torch.empty(out_channels, in_channels, kernel_size, kernel_size)\n        nn.init.kaiming_uniform_(w, a=math.sqrt(5))\n        self.weight = nn.Parameter(w)\n\n        b_conv = torch.empty(out_channels)\n        fan_in = in_channels * kernel_size * kernel_size\n        bound = 1 / math.sqrt(fan_in)\n        nn.init.uniform_(b_conv, -bound, bound)\n        self.bias_conv = nn.Parameter(b_conv)\n\n        # External bias added AFTER ReLU\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n\n    def forward(self, x):\n        # Ensure parameters are on same device/dtype family; kernel uses float32 internally\n        out = conv3x3_relu_bias_triton(x, self.weight, self.bias_conv, self.bias)\n        return out\n\n\n# Needed for initialization in ModelNew\nimport math",
+      "kernel_id": "kernel_r1_idea_r1_73699539_0_8b7812",
+      "idea_id": "idea_r1_73699539",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 87:32:\n                    x_mask = (\n                        ci_mask[:, None, None]\n                        & (in_h[None, :, None] < H)\n                        & (in_w[None, None, :] < W)\n     ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "f6c7c2a221d1679b053866123243d1e69e70dc3210f05fda978d5f40f342f882",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Persistent CTA with weight-stationary scheduling for high reuse of 3x3 filters - What: Launch persistent thread blocks where each CTA \u201cowns\u201d a tile of output channels (e.g., 32\u201364 Cout) and keeps their 3x3 filters resident in registers/SMEM across many NHW tiles/batches. Iterate over spatial tiles (and batch) inside the CTA, accumulating in registers, then apply fused bias+ReLU and store. Optionally use split-K when Cin*KH*KW is large to keep occupancy high. Map CTAs to traverse NHW in-order to maximize L2 residency of activations. - Why on A100: 3x3 filters are small; pinning them on-chip amortizes global weight loads over many output pixels. Persistent CTAs improve cache locality and reduce kernel launch/queueing overhead. With 64K regs/SM and 164 KB SMEM, resident weights plus small activation tiles fit comfortably. - Targets: Memory reuse (dram weight traffic reduction), parallelism/occupancy (persistent blocks, split-K), bandwidth reduction and epilogue fusion.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "",
+      "kernel_id": "kernel_r2_idea_r2_5cce52b4_0_500472",
+      "idea_id": "idea_r2_5cce52b4",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "tensor-core pipeline with fused epilogue - What: Implement 3x3 conv via Winograd F(4x4) tiles instead of direct/implicit-GEMM. Pre-transform weights offline to the Winograd domain (6x6) in a TC-friendly blocked layout (e.g., C_out\u00d7C_in in multiples of 16). In-kernel: (a) load a 6x6 tile of activations per 4x4 output tile, (b) do separable Winograd input transforms in SMEM/registers, (c) perform 36 small \u201cchannels-reduction\u201d GEMMs over K=C_in (one per Winograd component) on tensor cores (BF16/FP16, FP32 accumulate), (d) inverse-transform to 4x4 output, then fuse bias+ReLU while values are still in registers, and vector-store. - Why on A100: Winograd reduces 3x3 MACs by ~2.25x, so more of the 312 TFLOPS tensor-core peak is usable on real work. The small transforms are bandwidth-light and fit in registers/SMEM; 164 KB SMEM lets you stage multiple 6x6 tiles. Pre-transformed weights fit well in L2 and can be reused across many tiles; fused epilogue avoids extra HBM traffic. - Targets: Compute throughput (fewer MACs, tensor cores), memory traffic (reuse pre-transformed filters, fused epilogue), instruction overhead (blocked transforms).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "",
+      "kernel_id": "kernel_r2_idea_r2_47af19cb_0_6f23a6",
+      "idea_id": "idea_r2_47af19cb",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Input-stationary sliding-window with register rotation and 3-line SMEM buffer - What: Use a direct-convolution kernel that is input-stationary in X. Each CTA processes a spatial tile (e.g., H_tile\u00d7W_tile) for a block of output channels. Maintain a 3-row rolling buffer of activations in SMEM (with halo) and, per thread, a 3\u00d73 register window. Sweep horizontally: at each step, rotate the 3\u00d73 registers left, fetch only the new rightmost column (3 elements) from SMEM via 128-bit vectorized loads, optionally exchange across lanes with warp shuffles to minimize redundant loads. Compute multiple neighboring outputs per thread (e.g., 2\u00d72 micro-tile) to maximize overlap of input patches. Keep that thread\u2019s 3\u00d73 filter weights for its assigned output channels in registers across many X steps; advance Y by sliding the SMEM line buffer. - Why on A100: Greatly reduces activation traffic by reusing 2/3 of the window between adjacent X positions; 64K registers/SM and 164 KB SMEM comfortably hold windows, micro-tiles, and a 3-line buffer. Coalesced 128-bit loads for the \u201cnew\u201d column maximize bandwidth utilization; minimal control flow and steady, compute-dense inner loops keep the SM issue slots busy even without heavy shared-memory staging of entire K-tiles. - Targets: Memory access (coalescing, reuse), instruction efficiency (steady FMA stream, minimal address recompute), register/SMEM locality.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef conv2d_fused_interior_kernel(\n    x_ptr, w_ptr, bconv_ptr, bpost_ptr, y_ptr,\n    N, C, H, W,\n    K, R, S,\n    Ho, Wo,\n    x_sN, x_sC, x_sH, x_sW,\n    w_sK, w_sC, w_sR, w_sS,\n    y_sN, y_sC, y_sH, y_sW,\n    num_m_tiles, num_n_tiles,\n    GROUP_M: tl.constexpr,\n    BLOCK_M: tl.constexpr,  # tile over M = N*Ho*Wo\n    BLOCK_N: tl.constexpr,  # tile over K = out_channels\n    BLOCK_K: tl.constexpr,  # reduction over C*R*S\n):\n    pid = tl.program_id(0)\n    # 2D serpentine swizzle across (M-tiles, N-tiles)\n    pid_m = pid // num_n_tiles\n    pid_n = pid % num_n_tiles\n    # grouped serpentine swizzle to improve L2 locality\n    grp = pid_m // GROUP_M\n    in_grp_row = pid_m % GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    # Pointers assumed aligned for wide vector transactions\n    tl.assume_aligned(x_ptr, 128)\n    tl.assume_aligned(w_ptr, 128)\n    tl.assume_aligned(y_ptr, 128)\n    tl.assume_aligned(bconv_ptr, 128)\n    tl.assume_aligned(bpost_ptr, 128)\n\n    # map offs_m -> (n, oh, ow)\n    HWo = Ho * Wo\n    n_ix = offs_m // HWo\n    t_ix = offs_m % HWo\n    oh_ix = t_ix // Wo\n    ow_ix = t_ix % Wo\n\n    # base offsets (per m) for input and output\n    base_x_m = n_ix * x_sN + oh_ix * x_sH + ow_ix * x_sW\n    base_y_m = n_ix * y_sN + oh_ix * y_sH + ow_ix * y_sW\n\n    # precompute per-n base for weights and output\n    base_w_n = offs_n * w_sK\n    base_y_n = offs_n * y_sC\n\n    # accumulator\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    # reduction across Kred = C*R*S\n    Kred = C * R * S\n    # Kred is assumed multiple of BLOCK_K in interior path\n    for k0 in range(0, Kred, BLOCK_K):\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n        # map offs_k -> (c, r, s)\n        crs = R * S\n        ci = offs_k // crs\n        rem = offs_k % crs\n        rr = rem // S\n        ss = rem % S\n\n        base_x_k = ci * x_sC + rr * x_sH + ss * x_sW\n        base_w_k = ci * w_sC + rr * w_sR + ss * w_sS\n\n        # [BM, BK] and [BK, BN]\n        x_offsets = base_x_m[:, None] + base_x_k[None, :]\n        w_offsets = base_w_k[:, None] + base_w_n[None, :]\n\n        a = tl.load(x_ptr + x_offsets, cache_modifier=\".ca\")\n        b = tl.load(w_ptr + w_offsets, cache_modifier=\".cg\")\n        acc += tl.dot(a, b)\n\n    # add conv bias (per out-channel)\n    bconv = tl.load(bconv_ptr + offs_n)\n    acc = acc + bconv[None, :]\n\n    # ReLU\n    acc = tl.maximum(acc, 0.0)\n\n    # add post bias (per out-channel, broadcast)\n    bpost = tl.load(bpost_ptr + offs_n)\n    acc = acc + bpost[None, :]\n\n    # store output\n    y_offsets = base_y_m[:, None] + base_y_n[None, :]\n    tl.store(y_ptr + y_offsets, acc, cache_modifier=\".cs\")\n\n\n@triton.jit\ndef conv2d_fused_border_kernel(\n    x_ptr, w_ptr, bconv_ptr, bpost_ptr, y_ptr,\n    N, C, H, W,\n    K, R, S,\n    Ho, Wo,\n    x_sN, x_sC, x_sH, x_sW,\n    w_sK, w_sC, w_sR, w_sS,\n    y_sN, y_sC, y_sH, y_sW,\n    num_m_tiles_total, num_n_tiles_total,\n    num_m_tiles_full, num_n_tiles_full,\n    GROUP_M: tl.constexpr,\n    BLOCK_M: tl.constexpr,\n    BLOCK_N: tl.constexpr,\n    BLOCK_K: tl.constexpr,\n):\n    pid = tl.program_id(0)\n    pid_m = pid // num_n_tiles_total\n    pid_n = pid % num_n_tiles_total\n\n    # skip tiles fully covered by interior region\n    in_interior = (pid_m < num_m_tiles_full) & (pid_n < num_n_tiles_full)\n    if in_interior:\n        return\n\n    # 2D serpentine swizzle for border as well (keeps locality for remaining tiles)\n    grp = pid_m // GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles_total - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)\n\n    m_mask = offs_m < (N * Ho * Wo)\n    n_mask = offs_n < K\n\n    tl.assume_aligned(x_ptr, 128)\n    tl.assume_aligned(w_ptr, 128)\n    tl.assume_aligned(y_ptr, 128)\n    tl.assume_aligned(bconv_ptr, 128)\n    tl.assume_aligned(bpost_ptr, 128)\n\n    HWo = Ho * Wo\n    n_ix = offs_m // HWo\n    t_ix = offs_m % HWo\n    oh_ix = t_ix // Wo\n    ow_ix = t_ix % Wo\n\n    base_x_m = n_ix * x_sN + oh_ix * x_sH + ow_ix * x_sW\n    base_y_m = n_ix * y_sN + oh_ix * y_sH + ow_ix * y_sW\n\n    base_w_n = offs_n * w_sK\n    base_y_n = offs_n * y_sC\n\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n\n    Kred = C * R * S\n    for k0 in range(0, Kred, BLOCK_K):\n        offs_k = k0 + tl.arange(0, BLOCK_K)\n        k_mask = offs_k < Kred\n\n        crs = R * S\n        ci = offs_k // crs\n        rem = offs_k % crs\n        rr = rem // S\n        ss = rem % S\n\n        base_x_k = ci * x_sC + rr * x_sH + ss * x_sW\n        base_w_k = ci * w_sC + rr * w_sR + ss * w_sS\n\n        x_offsets = base_x_m[:, None] + base_x_k[None, :]\n        w_offsets = base_w_k[:, None] + base_w_n[None, :]\n\n        a = tl.load(x_ptr + x_offsets, mask=m_mask[:, None] & k_mask[None, :], other=0.0, cache_modifier=\".ca\")\n        b = tl.load(w_ptr + w_offsets, mask=k_mask[:, None] & n_mask[None, :], other=0.0, cache_modifier=\".cg\")\n        acc += tl.dot(a, b)\n\n    bconv = tl.load(bconv_ptr + offs_n, mask=n_mask, other=0.0)\n    acc = acc + bconv[None, :]\n\n    acc = tl.maximum(acc, 0.0)\n\n    bpost = tl.load(bpost_ptr + offs_n, mask=n_mask, other=0.0)\n    acc = acc + bpost[None, :]\n\n    y_offsets = base_y_m[:, None] + base_y_n[None, :]\n    tl.store(y_ptr + y_offsets, acc, mask=m_mask[:, None] & n_mask[None, :], cache_modifier=\".cs\")\n\n\ndef _conv2d_fused_triton(x: torch.Tensor, w: torch.Tensor, bconv: torch.Tensor, bpost: torch.Tensor):\n    \"\"\"\n    Fused Conv2d (stride=1, padding=0, dilation=1, groups=1) + ReLU + add(bias_post).\n    Layout: NCHW for x and y; KCRS for weights.\n    \"\"\"\n    assert x.is_cuda and w.is_cuda and bconv.is_cuda and bpost.is_cuda, \"All tensors must be CUDA\"\n    assert x.dtype == w.dtype == bconv.dtype == bpost.dtype == torch.float32, \"Use float32 for this kernel\"\n    assert x.is_contiguous(memory_format=torch.contiguous_format)\n    assert w.is_contiguous(memory_format=torch.contiguous_format)\n    N, C, H, W = x.shape\n    K, Cw, R, S = w.shape\n    assert C == Cw, \"Inconsistent in_channels\"\n    # compute output dims for valid conv (no padding, stride=1)\n    Ho = H - R + 1\n    Wo = W - S + 1\n    assert Ho > 0 and Wo > 0, \"Invalid kernel size for input\"\n\n    # prepare output\n    y = torch.empty((N, K, Ho, Wo), device=x.device, dtype=x.dtype)\n\n    # flatten post-bias from (K, 1, 1) -> (K,)\n    bpost_vec = bpost.view(K)\n\n    # strides in elements\n    x_sN, x_sC, x_sH, x_sW = x.stride()\n    w_sK, w_sC, w_sR, w_sS = w.stride()\n    y_sN, y_sC, y_sH, y_sW = y.stride()\n\n    # problem sizes\n    M = N * Ho * Wo\n    Nn = K\n    Kred = C * R * S\n\n    # tiles\n    BLOCK_M = 128\n    BLOCK_N = 128\n    BLOCK_K = 64  # divides 64*3*3=576 for typical configs; interior kernel assumes divisible\n\n    num_m_tiles_full = M // BLOCK_M\n    num_n_tiles_full = Nn // BLOCK_N\n    num_m_tiles_total = (M + BLOCK_M - 1) // BLOCK_M\n    num_n_tiles_total = (Nn + BLOCK_N - 1) // BLOCK_N\n\n    GROUP_M = 4  # swizzle group size along M tiles\n\n    # Launch interior kernel if any full tiles exist\n    if num_m_tiles_full > 0 and num_n_tiles_full > 0 and (Kred % BLOCK_K == 0):\n        grid_interior = (num_m_tiles_full * num_n_tiles_full,)\n        conv2d_fused_interior_kernel[grid_interior](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_full, num_n_tiles_full,\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n\n    # Launch border kernel for leftovers (and for K-reduction tail if not divisible)\n    if (num_m_tiles_total * num_n_tiles_total) > (num_m_tiles_full * num_n_tiles_full):\n        grid_border = (num_m_tiles_total * num_n_tiles_total,)\n        conv2d_fused_border_kernel[grid_border](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_total, num_n_tiles_total,\n            num_m_tiles_full, num_n_tiles_full,\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n    elif (Kred % BLOCK_K) != 0:\n        # No leftover M/N tiles but K tail exists -> run border over full grid (masked only in K)\n        grid_border = (num_m_tiles_total * num_n_tiles_total,)\n        conv2d_fused_border_kernel[grid_border](\n            x, w, bconv, bpost_vec, y,\n            N, C, H, W,\n            K, R, S,\n            Ho, Wo,\n            x_sN, x_sC, x_sH, x_sW,\n            w_sK, w_sC, w_sR, w_sS,\n            y_sN, y_sC, y_sH, y_sW,\n            num_m_tiles_total, num_n_tiles_total,\n            num_m_tiles_total, num_n_tiles_total,  # mark all as interior to avoid double compute; but border kernel returns immediately -> so re-run safely\n            GROUP_M=GROUP_M,\n            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,\n            num_warps=8, num_stages=4,\n        )\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized model with fused Triton kernel:\n      y = relu(conv2d(x, W, bias_conv)) + bias_post\n    Uses:\n      - Interior specialization (mask-free for full tiles)\n      - 2D serpentine block swizzle\n      - Cache modifiers: .ca for activations, .cg for weights, .cs for stores\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):\n        super().__init__()\n        # Keep nn.Conv2d only as a parameter container (we won't call it in forward)\n        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, bias=True)\n        # Extra bias added post-ReLU\n        self.bias = nn.Parameter(torch.randn(bias_shape))\n\n    def forward(self, x: torch.Tensor):\n        # Ensure inputs are contiguous and on CUDA\n        assert x.is_cuda, \"Input must be CUDA tensor\"\n        x = x.contiguous()\n        w = self.conv.weight.contiguous()\n        bconv = self.conv.bias.contiguous()\n        bpost = self.bias.contiguous()\n        # Fused Triton kernel\n        y = _conv2d_fused_triton(x, w, bconv, bpost)\n        return y",
+      "kernel_id": "kernel_r2_idea_r2_b5ef7a7d_0_9acf37",
+      "idea_id": "idea_r2_b5ef7a7d",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 32:4:\n    in_grp_row = pid_m % GROUP_M\n    cond = grp & 1\n    pid_n = tl.where(cond == 1, num_n_tiles - 1 - pid_n, pid_n)\n\n    tile_m = pid_m\n    tile_n = pid_n\n\n    offs_m = tile_m * BLOCK_M + ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "6ee0f6a8ca5294e2a3ccf76c91e55b0351fbf256e9ec66c5771f85e2a948c721",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Mask-free interior specialization + 2D block swizzle + cache modifiers - What: - Interior specialization: Pad H, W, and channel dimensions to multiples of tile sizes at allocation or via views. Launch an \u201cinterior\u201d kernel that assumes no bounds checks (no masks), using tl.assume_aligned and tl.multiple_of to enable 128-bit vector loads/stores and remove predication. Use a tiny \u201cborder\u201d kernel only for the padded edges. - 2D block swizzle: Map program_ids with a Morton/Z-order or blocked-wavefront swizzle over (NHW tiles \u00d7 C_out tiles) so neighboring CTAs work on adjacent spatial tiles of the same C_out range, maximizing L2 reuse of both activations and weights and reducing L2 set conflicts. - Cache control: Use cache_modifier=\".ca\" for activations (temporal reuse within CTA), cache_modifier=\".cg\" + evict_last for weights (prefer L2 residency across CTAs), and cache_modifier=\".cs\" for output stores (streaming). Ensure base pointers are 128B-aligned to hit full transaction width. - Why on A100: Removing masks and predication cuts instructions and register pressure, boosting occupancy and ILP. Swizzled tiling improves L2 hit rates and reduces thrash across the large on-chip L2, while cache modifiers align accesses with intended reuse distances. Wider, aligned transactions better exploit the ~1935 GB/s HBM bandwidth. - Targets: Control flow & loop (no masks, fewer branches), memory (L2 locality, coalescing, cache policy), parallelism/occupancy (lower regs per thread).",
+        "temperature": 1.0
+      }
+    }
+  ]
+}

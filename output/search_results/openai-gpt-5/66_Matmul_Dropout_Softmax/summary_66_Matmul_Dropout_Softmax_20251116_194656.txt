@@ -1,0 +1,29 @@
+================================================================================
+KERNEL OPTIMIZATION SEARCH RESULTS
+================================================================================
+Problem: 66_Matmul_Dropout_Softmax
+GPU: A100-80GB
+Model: gpt-5 (openai)
+Rounds: 3
+
+OVERALL STATISTICS
+--------------------------------------------------------------------------------
+Total Kernels Generated: 7
+Compiled: 7
+Correct: 2
+Best Speedup: 1.85x
+
+PER-ROUND SUMMARY
+--------------------------------------------------------------------------------
+Round 0: 1 kernels | 1 correct | Best: 0.99x
+Round 1: 3 kernels | 1 correct | Best: 1.85x
+Round 2: 3 kernels | 0 correct | Best: 0.00x
+
+BEST KERNEL
+--------------------------------------------------------------------------------
+Kernel ID: kernel_r1_idea_r1_2b1e23a7_0_f47082
+Round: 1
+Speedup: 1.85x
+Runtime: 2.4000 ms
+Idea: Asynchronous cp.async K-loop with multi-stage double/triple buffering and bank-conflict-free shared memory - Strategy: Tile A and W into shared memory and pipeline the K dimension using cp.async and num_stages=3. While computing on K-slice t, prefetch K-slice t+1 into a second/third buffer. Use 128B vectorized loads per warp, cache_modifier='.cg' for W (reused heavily), and a swizzled shared-memory layout (XOR or 32-bank-friendly permutation) to avoid bank conflicts. Example tiling that fits Ampere SMEM: K_TILE=256, N_TILE=128, M_TILE=64 → ~128 KB for W tile; leave headroom for A tile and staging. Use tl.store in 128B vectors for coalesced writes. - Why it helps on A100: cp.async overlaps global-memory latency with compute, improving SM utilization. Ampere’s large 164 KB shared memory per SM and high L2 bandwidth benefit from staged reuse of W tiles. Swizzled SMEM removes bank conflicts that otherwise throttle mma pipelines. Triple buffering further hides latency at high occupancy. - Targets: Asynchronous operations and latency hiding + memory access/SMEM efficiency.
+================================================================================

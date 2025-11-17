@@ -1,0 +1,374 @@
+{
+  "metadata": {
+    "timestamp": "20251116_172729",
+    "problem_name": "90_cumprod",
+    "gpu_name": "A100-80GB",
+    "model_name": "gpt-5",
+    "model_provider": "openai"
+  },
+  "config": {
+    "num_rounds": 3,
+    "width_per_round": [
+      3,
+      3
+    ],
+    "depth_per_round": [
+      1,
+      1
+    ],
+    "top_k_bank": 5,
+    "model_name": "gpt-5",
+    "model_provider": "openai",
+    "temperature": 1.0,
+    "max_completion_tokens": 16384,
+    "gpu_name": "A100-80GB",
+    "problem_name": "90_cumprod",
+    "num_correct_trials": 5,
+    "num_perf_trials": 100,
+    "evaluation_timeout": 600
+  },
+  "statistics": {
+    "total_kernels": 7,
+    "compiled_kernels": 6,
+    "correct_kernels": 2,
+    "best_speedup": 0.16491862567811935,
+    "unique_hashes": 7,
+    "rounds_tracked": 3
+  },
+  "round_summaries": [
+    {
+      "round": 0,
+      "total": 1,
+      "compiled": 1,
+      "correct": 1,
+      "best_speedup": 0.16491862567811935
+    },
+    {
+      "round": 1,
+      "total": 3,
+      "compiled": 3,
+      "correct": 0,
+      "best_speedup": 0.0
+    },
+    {
+      "round": 2,
+      "total": 3,
+      "compiled": 2,
+      "correct": 1,
+      "best_speedup": 0.07277777777777777
+    }
+  ],
+  "best_kernel": {
+    "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef cumprod_pass1_kernel(\n    x_ptr,          # *const T, input [M, N]\n    y_ptr,          # *T, partial output [M, N]\n    tile_prod_ptr,  # *T, tile products [M, T]\n    M: tl.constexpr,\n    N: tl.constexpr,\n    T: tl.constexpr,             # number of tiles per row\n    BLOCK_N: tl.constexpr,       # tile size along N\n):\n    pid_m = tl.program_id(0)  # row id [0..M)\n    pid_t = tl.program_id(1)  # tile id [0..T)\n\n    # Base linear index of the row\n    row_base = pid_m * N\n    tile_start = pid_t * BLOCK_N\n\n    # Initialize running product for this tile\n    # Use 1 as multiplicative identity; dtype will be inferred by ops\n    carry = 1.0\n\n    # Process the tile sequentially within the program\n    # Note: we rely on mask to avoid OOB accesses\n    i = 0\n    while i < BLOCK_N:\n        col = tile_start + i\n        mask = (pid_m < M) & (col < N)\n        # Load current value; if masked-out, load identity (1.0)\n        val = tl.load(x_ptr + row_base + col, mask=mask, other=1.0)\n        carry = carry * val\n        # Store partial cumulative product for this position\n        tl.store(y_ptr + row_base + col, carry, mask=mask)\n        i += 1\n\n    # Store the product of the entire tile (including masked positions which multiply by 1)\n    # This is used to compute inter-tile prefix multipliers in pass2\n    # tile_prod layout is [M, T]\n    if pid_m < M:\n        tl.store(tile_prod_ptr + pid_m * T + pid_t, carry)\n\n\n@triton.jit\ndef cumprod_pass2_kernel(\n    y_ptr,          # *T, partial output [M, N] from pass1\n    tile_prod_ptr,  # *T, tile products [M, T]\n    out_ptr,        # *T, final output [M, N]\n    M: tl.constexpr,\n    N: tl.constexpr,\n    T: tl.constexpr,             # number of tiles per row\n    BLOCK_N: tl.constexpr,       # tile size along N\n):\n    pid_m = tl.program_id(0)  # row id [0..M)\n\n    row_base = pid_m * N\n    # Running multiplier from previous tiles (exclusive product of prior tiles)\n    carry = 1.0\n\n    t = 0\n    while t < T:\n        tile_start = t * BLOCK_N\n        # Vectorized load/store over the BLOCK_N elements of this tile\n        offs = tile_start + tl.arange(0, BLOCK_N)\n        mask = (pid_m < M) & (offs < N)\n        y = tl.load(y_ptr + row_base + offs, mask=mask, other=1.0)\n        out = y * carry\n        tl.store(out_ptr + row_base + offs, out, mask=mask)\n\n        # Update carry with the product of the current tile\n        tile_prod = tl.load(tile_prod_ptr + pid_m * T + t, mask=(pid_m < M))\n        carry = carry * tile_prod\n        t += 1\n\n\ndef triton_cumprod_last_dim(x2d: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Compute cumprod along the last dimension of a 2D, row-major contiguous tensor using Triton.\n    x2d: [M, N], contiguous, CUDA\n    \"\"\"\n    assert x2d.is_cuda and x2d.is_contiguous(), \"Input must be CUDA and contiguous.\"\n    assert x2d.dim() == 2, \"Input must be 2D.\"\n\n    M, N = x2d.shape\n    # Tunable tile size; fixed here to keep T consistent across passes.\n    BLOCK_N = 1024\n    T = (N + BLOCK_N - 1) // BLOCK_N\n\n    # Allocate output and temporary buffers\n    out = torch.empty_like(x2d)\n    # We will write partial results directly into 'out' in pass1, and then apply multipliers in-place\n    tile_prod = torch.empty((M, T), dtype=x2d.dtype, device=x2d.device)\n\n    # Launch pass1: per-tile sequential scan + tile products\n    grid1 = (M, T)\n    cumprod_pass1_kernel[grid1](\n        x2d, out, tile_prod,\n        M, N, T,\n        BLOCK_N=BLOCK_N,\n        num_warps=2,\n        num_stages=1,\n    )\n\n    # Launch pass2: per-row tile multipliers application (in-place ok)\n    grid2 = (M,)\n    cumprod_pass2_kernel[grid2](\n        out, tile_prod, out,\n        M, N, T,\n        BLOCK_N=BLOCK_N,\n        num_warps=4,\n        num_stages=1,\n    )\n\n    return out\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product along a specified dimension using Triton kernels.\n    If the dimension is not the last, the tensor is temporarily permuted to make the\n    target dimension last, processed, and then permuted back.\n    \"\"\"\n\n    def __init__(self, dim):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        dim = self.dim\n        ndim = x.ndim\n        if dim < 0:\n            dim += ndim\n        assert 0 <= dim < ndim, \"Invalid dim\"\n\n        # If already last dimension and contiguous, we can directly view as 2D\n        if dim != ndim - 1:\n            # Move the target dimension to the last for contiguous scanning\n            x_perm = x.movedim(dim, -1)\n        else:\n            x_perm = x\n\n        # Ensure CUDA and contiguous layout\n        assert x_perm.is_cuda, \"Input must be on CUDA device.\"\n        x_perm = x_perm.contiguous()\n\n        # Collapse all leading dimensions into one batch dimension: [S, N]\n        N = x_perm.shape[-1]\n        S = x_perm.numel() // N\n        x2d = x_perm.view(S, N)\n\n        # Triton cumprod along last dim\n        out2d = triton_cumprod_last_dim(x2d)\n\n        # Reshape back to original permuted shape\n        out_perm = out2d.view_as(x_perm)\n\n        # Move the last dimension back to original position if needed\n        if dim != ndim - 1:\n            out = out_perm.movedim(-1, dim)\n        else:\n            out = out_perm\n        return out\n\n\n# Keep the same helpers to align with the original interface\nbatch_size = 32768\ninput_shape = (32768,)\ndim = 1\n\ndef get_inputs():\n    return [torch.rand(batch_size, *input_shape, device='cuda')]\n\ndef get_init_inputs():\n    return [dim]",
+    "kernel_id": "kernel_r0_baseline_37c925",
+    "idea_id": "idea_r0_baseline",
+    "round_number": 0,
+    "eval_result": {
+      "compiled": true,
+      "correctness": true,
+      "runtime": 55.3,
+      "runtime_stats": {
+        "max": 55.5,
+        "mean": 55.3,
+        "min": 55.3,
+        "num_trials": 100,
+        "std": 0.0206
+      },
+      "ref_runtime": 9.12,
+      "ref_runtime_compiled": 5.42,
+      "speedup": 0.16491862567811935,
+      "speedup_vs_compiled": 0.09801084990958409,
+      "metadata": {
+        "correctness_trials": "(5 / 5)",
+        "device": "0",
+        "hardware": "NVIDIA A100-SXM4-80GB"
+      }
+    },
+    "code_hash": "fb56668ba577b57a721579bd84e607109f7bd686f4f9e44b4ce5e287812bb372",
+    "metadata": {
+      "is_baseline": true,
+      "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel"
+    }
+  },
+  "all_ideas": [
+    {
+      "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel",
+      "round_number": 0,
+      "idea_id": "idea_r0_baseline",
+      "parent_kernel_ids": [],
+      "metadata": {
+        "is_baseline": true
+      }
+    },
+    {
+      "idea_text": "- Strategy: Implement a two-level inclusive scan per row: (a) each thread computes a local cumprod over V elements (e.g., V=8\u201316) it loaded contiguously; (b) perform an intra-warp scan on the last local element via warp shuffles; (c) perform an inter-warp scan using a small shared-memory scratch to propagate the prefix to all threads; (d) stream the row in tiles (e.g., TILE=4096\u20138192 elements) and use a decoupled look-back across tiles: write each tile\u2019s total product to a per-row prefix buffer in global memory, and the next tile reads the previous tile\u2019s total and scales its outputs. This yields an O(log W) inter-thread dependency instead of O(N). - Why it helps on A100: Converts a long serial dependency (32K-length cumprod per row) into highly parallel warp-level and block-level scans, increasing ILP and SM utilization. Shared-memory (fast, 164 KB/SM) handles inter-warp communication cheaply; global \u201clook-back\u201d avoids global syncs while enabling multiple CTAs to progress a row. - Target: Parallelism & control flow (loop restructuring), with modest shared-memory usage and warp-level instructions to increase throughput.",
+      "round_number": 1,
+      "idea_id": "idea_r1_c8605a50",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Asynchronous global\u2192SMEM double-buffering with 128B-aligned vectorized accesses and cache hints - Strategy: Stream each row in large tiles staged through shared memory using cp.async-style pipelining (in Triton: num_stages=3\u20134 with block pointers). While computing the cumprod on tile k in SMEM, prefetch tile k+1 with async copies into a second buffer (double buffer). Enforce 128B alignment and vectorized loads/stores (e.g., 16B/32B per thread lane) so a warp issues full 128B transactions. Use .cg (L2 only) cache policy for streaming to avoid L1 thrash across 32K-wide rows. Store results back in similarly vectorized fashion. - Why it helps on A100: Cumprod is memory-dominated (1 multiply per element). Overlapping global memory latency with compute via cp.async and using wide, coalesced transactions lets you approach the ~1.9 TB/s bandwidth. Bypassing L1 reduces cache pollution; large tiles amortize latency and improve L2 hit rates. - Target: Memory access and latency hiding (async copies, coalescing, double buffering).",
+      "round_number": 1,
+      "idea_id": "idea_r1_27ad5ba4",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Mixed-precision I/O with FP32 accumulation and packed half2/BF16x2 math - Strategy: Load and store in FP16 or BF16 to halve memory traffic; internally accumulate the running product in FP32 to limit precision loss. Use packed vector ops (half2/bfloat162 equivalence) so each instruction processes two values, and unroll per-thread vectors (e.g., V=16) to maximize ILP. Add lightweight dynamic rescaling every K steps (e.g., normalize by extracting exponent with frexp-like logic) if input ranges risk overflow/underflow; otherwise skip for speed. Optionally expose a \u201ctolerance\u201d/dtype knob to select FP16 vs BF16 for better range. - Why it helps on A100: The kernel is bandwidth-bound; halving bytes per element can nearly halve total time. Ampere executes FP16/BF16 vector math at higher throughput than FP32, and FP32 accumulation preserves reasonable numeric stability for products. Packed loads/stores improve memory efficiency and instruction throughput. - Target: Data type & precision (bandwidth reduction + higher arithmetic throughput) with careful accumulation to balance performance and accuracy.",
+      "round_number": 1,
+      "idea_id": "idea_r1_f088cf5a",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 1
+      }
+    },
+    {
+      "idea_text": "Warp-specialized pipeline with multi-row interleaving - Strategy: Split each CTA into specialized warps: (a) loader warps that only move data (cp.async or regular tl.load into SMEM), (b) compute warps that perform local cumprod + intra-warp/CTA carry propagation, (c) store warps that apply the tile carry and write back. Pipeline these stages across multiple rows per CTA (e.g., R=4\u20138 rows per block) so while one row waits on a tile carry or SMEM barrier, other rows keep the compute warps busy. In Triton, use warp specialization knobs (e.g., num_consumer_groups and num_buffers_warp_spec) and small per-row SMEM buffers (double- or triple-buffered). Keep tile sizes large (e.g., 8K\u201316K elements per row tile) to amortize latency, but ensure SMEM fits: R * buffers * tile_bytes \u2264 163 KB. - Why it helps on A100: Warp specialization reduces register pressure per warp (loader/store warps have light register footprints), improving occupancy under the 64K-register/SM constraint. Interleaving multiple rows per CTA hides the inter-tile dependency latency (carry availability) and cp.async wait groups, keeping the SM fully utilized. Ampere\u2019s cp.async + large SMEM (164 KB/SM) and high warp count benefit from deep in-CTA pipelines. - Targets: Parallelism & Occupancy, Asynchronous Operations, Control-flow pipelining.",
+      "round_number": 2,
+      "idea_id": "idea_r2_d095caba",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Conflict-free SMEM layout with swizzle/padding for vectorized staging - Strategy: When staging tiles in shared memory, apply a bank-conflict-avoiding layout for vectorized accesses (float4/half8). Use either (a) padding: index_smem = i + (i >> 5) to insert 1 element every 32, or (b) XOR swizzle on the minor index (e.g., i' = i ^ ((lane_id & 0x10) >> 4)) to break stride-32 patterns. Align SMEM base to 128B and ensure per-warp accesses are 128B multiples. Keep both loads/stores vectorized (e.g., 16B\u201332B per lane) and use the same swizzle on read and write paths. Pair with tl.make_block_ptr to express aligned, rectangular SMEM tiles, and set tl.multiple_of(ptr, 16/32) so Triton emits wide transactions. For global memory, keep 128B coalescing; for streaming input, use L2-only loads; for output, use streaming/evict-first stores to avoid polluting L2 with one-use data. - Why it helps on A100: Ampere has 32 SMEM banks (4 bytes wide). Stride-32 patterns with vectorized words can silently create 2\u20134 way bank conflicts when threads repeatedly touch columns/strides, especially during inter-warp carry reads or when each thread processes multiple contiguous elements. Swizzling/padding eliminates these conflicts, allowing SMEM to sustain near-peak bandwidth. Combined with 128B alignment and wide vector ops, this minimizes both SMEM and GMEM overheads. - Targets: Memory access (coalescing, SMEM bank conflicts), Instruction throughput (wide vector ops).",
+      "round_number": 2,
+      "idea_id": "idea_r2_efa45c00",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    },
+    {
+      "idea_text": "Two-kernel scheme with L2-persisted tile-carry buffer - Strategy: Replace decoupled look-back with a simple, fully parallel two-pass approach leveraging Ampere\u2019s large L2. Kernel A: for each row, compute intra-tile cumprod and write partial outputs to Y; also write each tile\u2019s total product to a compact \u201ctile_totals\u201d buffer (size \u2248 rows \u00d7 tiles_per_row). Kernel B: assign one CTA per row; compute the prefix over tile_totals for that row (only ~4 entries when TILE=8K on 32K rows) and multiply each tile in Y by its row\u2019s carry scalar (vectorized scaling over tiles). On the host, set an L2 persisting cache window (AccessPolicyWindow) over tile_totals to keep this tiny buffer hot in L2 across kernels. Use cache modifiers: stream large Y traffic (stores evict-first), keep tile_totals in L2 (loads .ca or default plus persisting window). - Why it helps on A100: The metadata (tile_totals) is tiny (~0.5\u20132 MB depending on TILE), so it easily fits and persists in A100\u2019s 40 MB L2, making the second pass effectively limited by Y scaling bandwidth. This scheme avoids per-tile inter-CTA waits and look-back dependencies, allowing all CTAs to progress independently at maximum occupancy. While it adds one extra read/write of Y (the scale pass), the removal of synchronization stalls and the high sustained bandwidth of A100 often outweigh the extra traffic for large problem sizes. - Targets: Control flow (algorithmic restructuring), Memory hierarchy (L2 residency and cache policy), Parallelism (CTA independence).",
+      "round_number": 2,
+      "idea_id": "idea_r2_a7bfaf48",
+      "parent_kernel_ids": [
+        "kernel_r0_baseline_37c925"
+      ],
+      "metadata": {
+        "num_best_kernels": 1,
+        "num_previous_ideas": 4
+      }
+    }
+  ],
+  "all_kernels": [
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef cumprod_pass1_kernel(\n    x_ptr,          # *const T, input [M, N]\n    y_ptr,          # *T, partial output [M, N]\n    tile_prod_ptr,  # *T, tile products [M, T]\n    M: tl.constexpr,\n    N: tl.constexpr,\n    T: tl.constexpr,             # number of tiles per row\n    BLOCK_N: tl.constexpr,       # tile size along N\n):\n    pid_m = tl.program_id(0)  # row id [0..M)\n    pid_t = tl.program_id(1)  # tile id [0..T)\n\n    # Base linear index of the row\n    row_base = pid_m * N\n    tile_start = pid_t * BLOCK_N\n\n    # Initialize running product for this tile\n    # Use 1 as multiplicative identity; dtype will be inferred by ops\n    carry = 1.0\n\n    # Process the tile sequentially within the program\n    # Note: we rely on mask to avoid OOB accesses\n    i = 0\n    while i < BLOCK_N:\n        col = tile_start + i\n        mask = (pid_m < M) & (col < N)\n        # Load current value; if masked-out, load identity (1.0)\n        val = tl.load(x_ptr + row_base + col, mask=mask, other=1.0)\n        carry = carry * val\n        # Store partial cumulative product for this position\n        tl.store(y_ptr + row_base + col, carry, mask=mask)\n        i += 1\n\n    # Store the product of the entire tile (including masked positions which multiply by 1)\n    # This is used to compute inter-tile prefix multipliers in pass2\n    # tile_prod layout is [M, T]\n    if pid_m < M:\n        tl.store(tile_prod_ptr + pid_m * T + pid_t, carry)\n\n\n@triton.jit\ndef cumprod_pass2_kernel(\n    y_ptr,          # *T, partial output [M, N] from pass1\n    tile_prod_ptr,  # *T, tile products [M, T]\n    out_ptr,        # *T, final output [M, N]\n    M: tl.constexpr,\n    N: tl.constexpr,\n    T: tl.constexpr,             # number of tiles per row\n    BLOCK_N: tl.constexpr,       # tile size along N\n):\n    pid_m = tl.program_id(0)  # row id [0..M)\n\n    row_base = pid_m * N\n    # Running multiplier from previous tiles (exclusive product of prior tiles)\n    carry = 1.0\n\n    t = 0\n    while t < T:\n        tile_start = t * BLOCK_N\n        # Vectorized load/store over the BLOCK_N elements of this tile\n        offs = tile_start + tl.arange(0, BLOCK_N)\n        mask = (pid_m < M) & (offs < N)\n        y = tl.load(y_ptr + row_base + offs, mask=mask, other=1.0)\n        out = y * carry\n        tl.store(out_ptr + row_base + offs, out, mask=mask)\n\n        # Update carry with the product of the current tile\n        tile_prod = tl.load(tile_prod_ptr + pid_m * T + t, mask=(pid_m < M))\n        carry = carry * tile_prod\n        t += 1\n\n\ndef triton_cumprod_last_dim(x2d: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Compute cumprod along the last dimension of a 2D, row-major contiguous tensor using Triton.\n    x2d: [M, N], contiguous, CUDA\n    \"\"\"\n    assert x2d.is_cuda and x2d.is_contiguous(), \"Input must be CUDA and contiguous.\"\n    assert x2d.dim() == 2, \"Input must be 2D.\"\n\n    M, N = x2d.shape\n    # Tunable tile size; fixed here to keep T consistent across passes.\n    BLOCK_N = 1024\n    T = (N + BLOCK_N - 1) // BLOCK_N\n\n    # Allocate output and temporary buffers\n    out = torch.empty_like(x2d)\n    # We will write partial results directly into 'out' in pass1, and then apply multipliers in-place\n    tile_prod = torch.empty((M, T), dtype=x2d.dtype, device=x2d.device)\n\n    # Launch pass1: per-tile sequential scan + tile products\n    grid1 = (M, T)\n    cumprod_pass1_kernel[grid1](\n        x2d, out, tile_prod,\n        M, N, T,\n        BLOCK_N=BLOCK_N,\n        num_warps=2,\n        num_stages=1,\n    )\n\n    # Launch pass2: per-row tile multipliers application (in-place ok)\n    grid2 = (M,)\n    cumprod_pass2_kernel[grid2](\n        out, tile_prod, out,\n        M, N, T,\n        BLOCK_N=BLOCK_N,\n        num_warps=4,\n        num_stages=1,\n    )\n\n    return out\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product along a specified dimension using Triton kernels.\n    If the dimension is not the last, the tensor is temporarily permuted to make the\n    target dimension last, processed, and then permuted back.\n    \"\"\"\n\n    def __init__(self, dim):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        dim = self.dim\n        ndim = x.ndim\n        if dim < 0:\n            dim += ndim\n        assert 0 <= dim < ndim, \"Invalid dim\"\n\n        # If already last dimension and contiguous, we can directly view as 2D\n        if dim != ndim - 1:\n            # Move the target dimension to the last for contiguous scanning\n            x_perm = x.movedim(dim, -1)\n        else:\n            x_perm = x\n\n        # Ensure CUDA and contiguous layout\n        assert x_perm.is_cuda, \"Input must be on CUDA device.\"\n        x_perm = x_perm.contiguous()\n\n        # Collapse all leading dimensions into one batch dimension: [S, N]\n        N = x_perm.shape[-1]\n        S = x_perm.numel() // N\n        x2d = x_perm.view(S, N)\n\n        # Triton cumprod along last dim\n        out2d = triton_cumprod_last_dim(x2d)\n\n        # Reshape back to original permuted shape\n        out_perm = out2d.view_as(x_perm)\n\n        # Move the last dimension back to original position if needed\n        if dim != ndim - 1:\n            out = out_perm.movedim(-1, dim)\n        else:\n            out = out_perm\n        return out\n\n\n# Keep the same helpers to align with the original interface\nbatch_size = 32768\ninput_shape = (32768,)\ndim = 1\n\ndef get_inputs():\n    return [torch.rand(batch_size, *input_shape, device='cuda')]\n\ndef get_init_inputs():\n    return [dim]",
+      "kernel_id": "kernel_r0_baseline_37c925",
+      "idea_id": "idea_r0_baseline",
+      "round_number": 0,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 55.3,
+        "runtime_stats": {
+          "max": 55.5,
+          "mean": 55.3,
+          "min": 55.3,
+          "num_trials": 100,
+          "std": 0.0206
+        },
+        "ref_runtime": 9.12,
+        "ref_runtime_compiled": 5.42,
+        "speedup": 0.16491862567811935,
+        "speedup_vs_compiled": 0.09801084990958409,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "fb56668ba577b57a721579bd84e607109f7bd686f4f9e44b4ce5e287812bb372",
+      "metadata": {
+        "is_baseline": true,
+        "idea_text": "Given the PyTorch code, replace the operation with a custom Triton kernel"
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef _cumprod_rowwise_tiled_kernel(\n    x_ptr,\n    y_ptr,\n    rows: tl.constexpr,\n    cols,\n    stride_x_row,\n    stride_x_col,\n    stride_y_row,\n    stride_y_col,\n    scratch_ptr,  # per-row scratch of size BLOCK_SIZE\n    BLOCK_SIZE: tl.constexpr,\n    V: tl.constexpr,\n):\n    pid_row = tl.program_id(0)\n    # row base pointers\n    x_row_ptr = x_ptr + pid_row * stride_x_row\n    y_row_ptr = y_ptr + pid_row * stride_y_row\n    # scratch per-row base\n    scratch_row_ptr = scratch_ptr + pid_row * BLOCK_SIZE\n\n    lanes = tl.arange(0, BLOCK_SIZE)\n    v_idx = tl.arange(0, V)\n\n    TILE = BLOCK_SIZE * V\n\n    prev_scale = tl.full((), 1.0, tl.float32)\n    # cast prev_scale to input dtype after computation each iteration\n    # Loop over tiles along the row\n    tile_start = 0\n    while tile_start < cols:\n        # compute per-lane column indices matrix [BLOCK_SIZE, V]\n        col_idx = tile_start + lanes[:, None] * V + v_idx[None, :]\n        # masks\n        mask_valid = col_idx < cols\n\n        # Load values; use 1 as neutral element for masked lanes\n        x_ptrs = x_row_ptr + col_idx * stride_x_col\n        vals = tl.load(x_ptrs, mask=mask_valid, other=1)\n\n        # Per-lane local cumprod over V elements (register-level)\n        for i in range(1, V):\n            vals[:, i] = vals[:, i] * vals[:, i - 1]\n\n        # Last element per lane (product of that lane's V-chunk)\n        last_col = vals[:, V - 1]\n\n        # Determine how many lanes are active in this tile\n        # tile_cols_remaining = max(cols - tile_start, 0)\n        tile_cols_remaining = cols - tile_start\n        has_cols = tile_cols_remaining > 0\n        # ceil_div(tile_cols_remaining, V), ensure non-negative\n        tile_lanes = tl.where(has_cols, (tile_cols_remaining + V - 1) // V, 0)\n\n        # For lanes beyond active tile lanes, neutralize with 1\n        last_col = tl.where(lanes < tile_lanes, last_col, 1)\n\n        # Store last_col to scratch to perform inter-lane inclusive scan\n        tl.store(scratch_row_ptr + lanes, last_col)\n\n        # Perform inclusive scan (Hillis-Steele) across lanes using scratch\n        offset = 1\n        while offset < BLOCK_SIZE:\n            prev = tl.load(scratch_row_ptr + (lanes - offset), mask=lanes >= offset, other=1)\n            last_col = last_col * prev\n            tl.store(scratch_row_ptr + lanes, last_col)\n            offset = offset * 2\n\n        # exclusive prefix (product of all previous lanes), base_scale\n        base_scale = tl.load(scratch_row_ptr + (lanes - 1), mask=lanes >= 1, other=1)\n        # Zero out base_scale for lanes not used\n        base_scale = tl.where(lanes < tile_lanes, base_scale, 1)\n\n        # Apply base_scale to all V values in the lane\n        vals = vals * base_scale[:, None]\n\n        # Multiply by running prefix from previous tiles (prev_scale)\n        # Cast prev_scale to the same dtype as x/y\n        prev_scale_cast = prev_scale.to(vals.dtype)\n        vals = vals * prev_scale_cast\n\n        # Store results\n        tl.store(y_row_ptr + col_idx * stride_y_col, vals, mask=mask_valid)\n\n        # Update prev_scale *= tile_total (product of this entire tile)\n        # tile_total is the inclusive scan value at the last active lane\n        last_lane_idx = tile_lanes - 1\n        tile_total = tl.load(scratch_row_ptr + last_lane_idx, mask=tile_lanes > 0, other=1)\n        # Accumulate in float32 for stability, then cast next iteration\n        prev_scale = prev_scale * tile_total.to(prev_scale.dtype)\n\n        tile_start += TILE\n\n\ndef _triton_cumprod_dim(x: torch.Tensor, dim: int) -> torch.Tensor:\n    assert x.is_cuda, \"Input must be on CUDA device.\"\n    ndim = x.ndim\n    if dim < 0:\n        dim = ndim + dim\n    assert 0 <= dim < ndim\n\n    # Move the target dim to the last for contiguous row-wise processing\n    perm = [i for i in range(ndim) if i != dim] + [dim]\n    inv_perm = list(range(ndim))\n    for i, p in enumerate(perm):\n        inv_perm[p] = i\n\n    x_perm = x.permute(perm).contiguous()\n    rows = int(torch.prod(torch.tensor(x_perm.shape[:-1], device=x.device))) if x_perm.ndim > 1 else 1\n    cols = x_perm.shape[-1]\n    x_2d = x_perm.reshape(rows, cols).contiguous()\n    y_2d = torch.empty_like(x_2d)\n\n    # Strides in elements\n    stride_x_row = x_2d.stride(0)\n    stride_x_col = x_2d.stride(1)\n    stride_y_row = y_2d.stride(0)\n    stride_y_col = y_2d.stride(1)\n\n    # Kernel meta-parameters\n    BLOCK_SIZE = 256\n    V = 16  # TILE = 4096 elements per tile\n    # Per-row scratch buffer for inter-lane scan (BLOCK_SIZE elements per row)\n    scratch = torch.empty((rows, BLOCK_SIZE), device=x.device, dtype=x.dtype)\n\n    grid = (rows,)\n    _cumprod_rowwise_tiled_kernel[grid](\n        x_2d,\n        y_2d,\n        rows,\n        cols,\n        stride_x_row,\n        stride_x_col,\n        stride_y_row,\n        stride_y_col,\n        scratch,\n        BLOCK_SIZE=BLOCK_SIZE,\n        V=V,\n        num_warps=4,\n        num_stages=2,\n    )\n\n    y_perm = y_2d.view(*x_perm.shape).permute(inv_perm).contiguous()\n    return y_perm\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product along a specified dimension using Triton.\n    Implements a two-level scan per row:\n      - Per-thread (lane) local cumprod over V elements\n      - Inter-lane inclusive scan via scratch to propagate prefixes\n      - Row streaming in tiles with a running prefix (look-back) across tiles\n    \"\"\"\n    def __init__(self, dim: int):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return _triton_cumprod_dim(x, self.dim)\n\n\n# Keep the same helpers as reference for compatibility\nbatch_size = 32768\ninput_shape = (32768,)\ndim = 1\n\ndef get_inputs():\n    return [torch.rand(batch_size, *input_shape, device=\"cuda\")]\n\ndef get_init_inputs():\n    return [dim]",
+      "kernel_id": "kernel_r1_idea_r1_c8605a50_0_7d02ba",
+      "idea_id": "idea_r1_c8605a50",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 42:25:\n        # compute per-lane column indices matrix [BLOCK_SIZE, V]\n        col_idx = tile_start + lanes[:, None] * V + v_idx[None, :]\n        # masks\n        mask_valid = col_idx < cols\n\n  ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "c7de4d654cabac4b6f272a532838a38ac85673740559e18fa2bd3285193cccc3",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "- Strategy: Implement a two-level inclusive scan per row: (a) each thread computes a local cumprod over V elements (e.g., V=8\u201316) it loaded contiguously; (b) perform an intra-warp scan on the last local element via warp shuffles; (c) perform an inter-warp scan using a small shared-memory scratch to propagate the prefix to all threads; (d) stream the row in tiles (e.g., TILE=4096\u20138192 elements) and use a decoupled look-back across tiles: write each tile\u2019s total product to a per-row prefix buffer in global memory, and the next tile reads the previous tile\u2019s total and scales its outputs. This yields an O(log W) inter-thread dependency instead of O(N). - Why it helps on A100: Converts a long serial dependency (32K-length cumprod per row) into highly parallel warp-level and block-level scans, increasing ILP and SM utilization. Shared-memory (fast, 164 KB/SM) handles inter-warp communication cheaply; global \u201clook-back\u201d avoids global syncs while enabling multiple CTAs to progress a row. - Target: Parallelism & control flow (loop restructuring), with modest shared-memory usage and warp-level instructions to increase throughput.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.autotune(\n    configs=[\n        triton.Config({\"BLOCK_N\": 128, \"num_warps\": 2}, num_stages=3),\n        triton.Config({\"BLOCK_N\": 256, \"num_warps\": 4}, num_stages=3),\n        triton.Config({\"BLOCK_N\": 256, \"num_warps\": 8}, num_stages=4),\n        triton.Config({\"BLOCK_N\": 512, \"num_warps\": 8}, num_stages=4),\n    ],\n    key=[\"N\"],\n)\n@triton.jit\ndef cumprod_rowwise_kernel(\n    x_ptr,\n    y_ptr,\n    M: tl.constexpr,\n    N: tl.constexpr,\n    stride_xm,\n    stride_xn,\n    stride_ym,\n    stride_yn,\n    BLOCK_N: tl.constexpr,\n):\n    pid = tl.program_id(0)\n    # guard program id\n    if pid >= M:\n        return\n\n    # Base pointers for this row\n    row_x = x_ptr + pid * stride_xm\n    row_y = y_ptr + pid * stride_ym\n\n    # Index vector for building per-lane updates\n    idx = tl.arange(0, BLOCK_N)\n\n    # Running product carried across tiles\n    carry = tl.full([1], 1.0, dtype=tl.float32)\n\n    # Prefetch first tile\n    offs0 = idx\n    mask0 = offs0 < N\n    ptr0 = row_x + offs0 * stride_xn\n    # Use .cg to prefer L2 (streaming)\n    x_next = tl.load(ptr0, mask=mask0, other=1.0, cache_modifier=\".cg\")\n    # Ensure alignment hints to favor 128B transactions\n    tl.multiple_of(offs0, 32)\n\n    # Iterate over tiles with software pipelining: consume current, prefetch next\n    for col in range(0, N, BLOCK_N):\n        offs = col + idx\n        mask = offs < N\n        x_cur = x_next\n\n        nxt_col = col + BLOCK_N\n        if nxt_col < N:\n            offs_n = nxt_col + idx\n            mask_n = offs_n < N\n            ptr_n = row_x + offs_n * stride_xn\n            x_next = tl.load(ptr_n, mask=mask_n, other=1.0, cache_modifier=\".cg\")\n\n        # Compute cumulative product within tile in fp32\n        vals = tl.astype(x_cur, tl.float32)\n        # Build the result vector via unrolled scalar recurrence\n        res = tl.zeros([BLOCK_N], dtype=tl.float32)\n        c = carry\n        # Unrolled sequential prefix within the tile; masked positions use multiplicative identity (1)\n        for i in tl.static_range(0, BLOCK_N):\n            vi = vals[i]\n            c = c * vi\n            res = tl.where(idx == i, c, res)\n        carry = c\n\n        # Store back to output\n        out_vals = res\n        tl.store(row_y + offs * stride_yn, out_vals, mask=mask)\n\n    return\n\n\ndef _cumprod_triton(x: torch.Tensor, dim: int) -> torch.Tensor:\n    # If not CUDA or unsupported dtype, fallback to PyTorch\n    if not x.is_cuda or x.dtype not in (torch.float32,):\n        return torch.cumprod(x, dim=dim)\n\n    # Move target dim to last and make contiguous\n    ndim = x.ndim\n    dim = dim if dim >= 0 else dim + ndim\n    perm = [i for i in range(ndim) if i != dim] + [dim]\n    x_perm = x.permute(perm).contiguous()\n    M = x_perm.numel() // x_perm.shape[-1]\n    N = x_perm.shape[-1]\n    x_2d = x_perm.view(M, N)\n    y_2d = torch.empty_like(x_2d)\n\n    # Strides in elements (contiguous after permute)\n    stride_xm = x_2d.stride(0)\n    stride_xn = x_2d.stride(1)\n    stride_ym = y_2d.stride(0)\n    stride_yn = y_2d.stride(1)\n\n    # Launch configuration\n    grid = (M,)\n\n    cumprod_rowwise_kernel[grid](\n        x_2d,\n        y_2d,\n        M,\n        N,\n        stride_xm,\n        stride_xn,\n        stride_ym,\n        stride_yn,\n    )\n\n    # Restore original layout\n    inv_perm = list(range(ndim))\n    for i, p in enumerate(perm):\n        inv_perm[p] = i\n    y = y_2d.view(*x_perm.shape).permute(inv_perm).contiguous()\n    return y\n\n\nclass ModelNew(nn.Module):\n    def __init__(self, dim):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor):\n        return _cumprod_triton(x, self.dim)",
+      "kernel_id": "kernel_r1_idea_r1_27ad5ba4_0_294c06",
+      "idea_id": "idea_r1_27ad5ba4",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 50:15:\n        mask = offs < N\n        x_cur = x_next\n\n        nxt_col = col + BLOCK_N\n        if nxt_col < N:\n            offs_n = nxt_col + idx\n            mask_n = offs_n < N\n            ptr_...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "5553577e247e38f409e96ef6d1a18ab3f1fb77eeff310ebc51f2d406a6fe493f",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Asynchronous global\u2192SMEM double-buffering with 128B-aligned vectorized accesses and cache hints - Strategy: Stream each row in large tiles staged through shared memory using cp.async-style pipelining (in Triton: num_stages=3\u20134 with block pointers). While computing the cumprod on tile k in SMEM, prefetch tile k+1 with async copies into a second buffer (double buffer). Enforce 128B alignment and vectorized loads/stores (e.g., 16B/32B per thread lane) so a warp issues full 128B transactions. Use .cg (L2 only) cache policy for streaming to avoid L1 thrash across 32K-wide rows. Store results back in similarly vectorized fashion. - Why it helps on A100: Cumprod is memory-dominated (1 multiply per element). Overlapping global memory latency with compute via cp.async and using wide, coalesced transactions lets you approach the ~1.9 TB/s bandwidth. Bypassing L1 reduces cache pollution; large tiles amortize latency and improve L2 hit rates. - Target: Memory access and latency hiding (async copies, coalescing, double buffering).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef cumprod_rows_kernel(\n    x_ptr,  # *input dtype (fp16/bf16/fp32)\n    y_ptr,  # *output dtype (fp16/bf16/fp32) - usually same as input for I/O optimization\n    M,      # number of rows\n    N,      # number of columns (scan length)\n    stride_xm,\n    stride_xn,\n    stride_ym,\n    stride_yn,\n    OUT_FP16: tl.constexpr,  # store out as fp16\n    OUT_BF16: tl.constexpr,  # store out as bf16\n    BLOCK_M: tl.constexpr,   # number of rows handled per program\n    UNROLL: tl.constexpr,    # unroll factor along N to improve ILP\n):\n    pid = tl.program_id(0)\n    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)\n    mask_m = rows < M\n\n    # Running product per row in fp32 for numeric stability\n    running = tl.full([BLOCK_M], 1.0, tl.float32)\n\n    n = 0\n    # Iterate across the scan dimension (columns)\n    while n < N:\n        # small unrolled loop to improve ILP\n        for u in tl.static_range(0, UNROLL):\n            col = n + u\n            valid = mask_m & (col < N)\n            offs_x = rows * stride_xm + col * stride_xn\n            x_val = tl.load(x_ptr + offs_x, mask=valid, other=1.0)\n            x_f32 = tl.astype(x_val, tl.float32)\n            running = running * x_f32\n            y_val = running\n            offs_y = rows * stride_ym + col * stride_yn\n            if OUT_FP16:\n                tl.store(y_ptr + offs_y, tl.astype(y_val, tl.float16), mask=valid)\n            elif OUT_BF16:\n                tl.store(y_ptr + offs_y, tl.astype(y_val, tl.bfloat16), mask=valid)\n            else:\n                tl.store(y_ptr + offs_y, y_val, mask=valid)\n        n += UNROLL\n\n\ndef triton_cumprod_mixed_io(\n    x: torch.Tensor,\n    dim: int,\n    io_dtype: str = \"auto\",  # \"auto\"|\"same\"|\"fp16\"|\"bf16\"\n    block_m: int = 128,\n    unroll: int = 4,\n):\n    \"\"\"\n    Cumprod along given dim using mixed-precision I/O and fp32 accumulation.\n\n    - If io_dtype == \"auto\":\n        - use x.dtype if it is fp16/bf16 (best bandwidth),\n        - else keep original dtype.\n    - If io_dtype == \"fp16\"/\"bf16\": downcast I/O to that dtype internally and cast result\n      back to input dtype at the end (helps only if input is already in low-precision).\n    \"\"\"\n    if not x.is_cuda:\n        # Fallback on CPU\n        return torch.cumprod(x, dim=dim)\n\n    # Normalize dimension\n    dim = dim if dim >= 0 else dim + x.ndim\n\n    # Move scan dimension to the last axis for contiguous access, then flatten leading dims\n    x_moved = x.movedim(dim, -1)\n    orig_shape = x_moved.shape\n    M = int(torch.tensor(orig_shape[:-1]).prod().item()) if len(orig_shape) > 1 else 1\n    N = orig_shape[-1]\n    x_2d = x_moved.reshape(M, N).contiguous()\n\n    # Decide I/O dtype\n    if io_dtype == \"auto\":\n        if x_2d.dtype in (torch.float16, torch.bfloat16):\n            dtype_io = x_2d.dtype\n        else:\n            dtype_io = x_2d.dtype  # keep same\n    elif io_dtype == \"fp16\":\n        dtype_io = torch.float16\n    elif io_dtype == \"bf16\":\n        dtype_io = torch.bfloat16\n    else:\n        dtype_io = x_2d.dtype\n\n    # Prepare I/O tensors\n    x_io = x_2d if x_2d.dtype == dtype_io else x_2d.to(dtype_io)\n    y_io = torch.empty_like(x_io)\n\n    # Kernel config\n    BLOCK_M = block_m\n    UNROLL = unroll\n    grid = lambda meta: (triton.cdiv(M, meta[\"BLOCK_M\"]),)\n\n    # Launch\n    cumprod_rows_kernel[grid](\n        x_io,\n        y_io,\n        M,\n        N,\n        x_io.stride(0),\n        x_io.stride(1),\n        y_io.stride(0),\n        y_io.stride(1),\n        OUT_FP16=(dtype_io == torch.float16),\n        OUT_BF16=(dtype_io == torch.bfloat16),\n        BLOCK_M=BLOCK_M,\n        UNROLL=UNROLL,\n    )\n\n    # Cast back to original dtype if needed\n    y_2d = y_io if dtype_io == x.dtype else y_io.to(x.dtype)\n\n    # Restore original shape and dimension order\n    y = y_2d.reshape(orig_shape).movedim(-1, dim)\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product along a given dimension using Triton:\n    - Mixed-precision I/O (fp16/bf16) with fp32 accumulation to reduce bandwidth.\n    - Vectorized across rows; sequential along scan axis to preserve correctness.\n    - Optional I/O dtype control via io_dtype.\n    \"\"\"\n\n    def __init__(self, dim: int, io_dtype: str = \"auto\", block_m: int = 128, unroll: int = 4):\n        super().__init__()\n        self.dim = dim\n        self.io_dtype = io_dtype\n        self.block_m = block_m\n        self.unroll = unroll\n\n    def forward(self, x: torch.Tensor):\n        return triton_cumprod_mixed_io(\n            x, dim=self.dim, io_dtype=self.io_dtype, block_m=self.block_m, unroll=self.unroll\n        )",
+      "kernel_id": "kernel_r1_idea_r1_f088cf5a_0_a9273d",
+      "idea_id": "idea_r1_f088cf5a",
+      "round_number": 1,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 31:20:\n    running = tl.full([BLOCK_M], 1.0, tl.float32)\n\n    n = 0\n    # Iterate across the scan dimension (columns)\n    while n < N:\n        # small unrolled loop to improve ILP\n        for u ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "c82e05ea3d12ff6a00a4c4f0d0baaeb208fe22d9d6fcfe71ec272880c09ddc17",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Mixed-precision I/O with FP32 accumulation and packed half2/BF16x2 math - Strategy: Load and store in FP16 or BF16 to halve memory traffic; internally accumulate the running product in FP32 to limit precision loss. Use packed vector ops (half2/bfloat162 equivalence) so each instruction processes two values, and unroll per-thread vectors (e.g., V=16) to maximize ILP. Add lightweight dynamic rescaling every K steps (e.g., normalize by extracting exponent with frexp-like logic) if input ranges risk overflow/underflow; otherwise skip for speed. Optionally expose a \u201ctolerance\u201d/dtype knob to select FP16 vs BF16 for better range. - Why it helps on A100: The kernel is bandwidth-bound; halving bytes per element can nearly halve total time. Ampere executes FP16/BF16 vector math at higher throughput than FP32, and FP32 accumulation preserves reasonable numeric stability for products. Packed loads/stores improve memory efficiency and instruction throughput. - Target: Data type & precision (bandwidth reduction + higher arithmetic throughput) with careful accumulation to balance performance and accuracy.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\ndef _to_triton_dtype(dtype):\n    if dtype == torch.float16:\n        return tl.float16\n    if dtype == torch.bfloat16:\n        return tl.bfloat16\n    if dtype == torch.float32:\n        return tl.float32\n    raise NotImplementedError(f\"Unsupported dtype: {dtype}\")\n\n\n@triton.autotune(\n    configs=[\n        triton.Config(\n            {\"R\": 4, \"CHUNK\": 256},\n            num_warps=4,\n            num_stages=3,\n            num_consumer_groups=2,\n            num_buffers_warp_spec=3,\n        ),\n        triton.Config(\n            {\"R\": 8, \"CHUNK\": 128},\n            num_warps=4,\n            num_stages=3,\n            num_consumer_groups=2,\n            num_buffers_warp_spec=3,\n        ),\n        triton.Config(\n            {\"R\": 4, \"CHUNK\": 512},\n            num_warps=8,\n            num_stages=3,\n            num_consumer_groups=2,\n            num_buffers_warp_spec=3,\n        ),\n    ],\n    key=[\"N\"],\n)\n@triton.jit\ndef cumprod_rows_kernel(\n    x_ptr,  # *DTYPE\n    y_ptr,  # *DTYPE\n    M,      # rows\n    N,      # cols (scan length)\n    stride_m,  # row stride\n    stride_n,  # col stride\n    DTYPE: tl.constexpr,\n    R: tl.constexpr,       # rows per block\n    CHUNK: tl.constexpr,   # elements per chunk along N\n):\n    pid = tl.program_id(0)\n\n    # rows this program processes\n    row_start = pid * R\n    rows = row_start + tl.arange(0, R)\n    row_mask = rows < M\n\n    # per-row running carry (product so far). Keep as vector of length R.\n    one = tl.full([R], 1, dtype=DTYPE)\n    carry = one\n\n    # Precompute arange helpers\n    ids_r = tl.arange(0, R)\n\n    # Process the row in interleaved CHUNKs along N dimension\n    for col in range(0, N, CHUNK):\n        offs = col + tl.arange(0, CHUNK)\n        mask_cols = offs < N\n\n        # Load a CHUNK vector for each of the R rows we own (masked)\n        vals_list = [tl.zeros([CHUNK], dtype=DTYPE) for _ in range(R)]\n        for r in range(R):\n            row_valid = row_mask[r]\n            base_x = x_ptr + rows[r] * stride_m + offs * stride_n\n            vals_list[r] = tl.load(base_x, mask=mask_cols & row_valid, other=1).to(DTYPE)\n\n        # Interleave compute across rows to hide dependencies; do sequential prefix within CHUNK\n        for j in range(0, CHUNK):\n            col_valid = mask_cols[j]\n            for r in range(R):\n                row_valid = row_mask[r]\n                active = row_valid & col_valid\n\n                # Select scalar carry for this row\n                sel = ids_r == r\n                carry_r = tl.sum(carry * sel, axis=0).to(DTYPE)\n\n                v = vals_list[r][j]\n                prod = carry_r * v\n\n                out_ptr = y_ptr + rows[r] * stride_m + (col + j) * stride_n\n                tl.store(out_ptr, prod, mask=active)\n\n                # Update carry only if element was valid\n                new_carry_r = tl.where(active, prod, carry_r)\n                carry = tl.where(sel, new_carry_r, carry)\n\n\ndef triton_cumprod(x: torch.Tensor, dim: int):\n    assert x.is_cuda, \"Input must be on CUDA\"\n    if dim < 0:\n        dim = x.dim() + dim\n    # Move dim to last for row-wise scan\n    if dim != x.dim() - 1:\n        x_moved = x.movedim(dim, -1).contiguous()\n        moved_back = True\n    else:\n        x_moved = x.contiguous()\n        moved_back = False\n\n    # Flatten leading dims into M\n    *lead, N = x_moved.shape\n    M = 1\n    for d in lead:\n        M *= d if d > 0 else 1\n    x2d = x_moved.reshape(M, N)\n    y2d = torch.empty_like(x2d)\n\n    # Strides in elements\n    stride_m = x2d.stride(0)\n    stride_n = x2d.stride(1)\n\n    DTYPE = _to_triton_dtype(x2d.dtype)\n\n    grid = lambda meta: ((M + meta[\"R\"] - 1) // meta[\"R\"],)\n\n    cumprod_rows_kernel[grid](\n        x2d, y2d,\n        M, N,\n        stride_m, stride_n,\n        DTYPE=DTYPE,\n    )\n\n    y_moved = y2d.reshape(*lead, N)\n    if moved_back:\n        y = y_moved.movedim(-1, dim)\n    else:\n        y = y_moved\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product using a Triton kernel with warp-specialized pipeline\n    and multi-row interleaving along the specified dimension.\n    \"\"\"\n    def __init__(self, dim):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor):\n        return triton_cumprod(x, self.dim)",
+      "kernel_id": "kernel_r2_idea_r2_d095caba_0_545e91",
+      "idea_id": "idea_r2_d095caba",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": false,
+        "correctness": false,
+        "runtime": -1.0,
+        "speedup": -1.0,
+        "error": "'NoneType' object has no attribute 'get'"
+      },
+      "code_hash": "c95267ad69620a44b4bcfedfcdbe4fe14c12dcfe3b89d9b99599b5e7a35e7c67",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Warp-specialized pipeline with multi-row interleaving - Strategy: Split each CTA into specialized warps: (a) loader warps that only move data (cp.async or regular tl.load into SMEM), (b) compute warps that perform local cumprod + intra-warp/CTA carry propagation, (c) store warps that apply the tile carry and write back. Pipeline these stages across multiple rows per CTA (e.g., R=4\u20138 rows per block) so while one row waits on a tile carry or SMEM barrier, other rows keep the compute warps busy. In Triton, use warp specialization knobs (e.g., num_consumer_groups and num_buffers_warp_spec) and small per-row SMEM buffers (double- or triple-buffered). Keep tile sizes large (e.g., 8K\u201316K elements per row tile) to amortize latency, but ensure SMEM fits: R * buffers * tile_bytes \u2264 163 KB. - Why it helps on A100: Warp specialization reduces register pressure per warp (loader/store warps have light register footprints), improving occupancy under the 64K-register/SM constraint. Interleaving multiple rows per CTA hides the inter-tile dependency latency (carry availability) and cp.async wait groups, keeping the SM fully utilized. Ampere\u2019s cp.async + large SMEM (164 KB/SM) and high warp count benefit from deep in-CTA pipelines. - Targets: Parallelism & Occupancy, Asynchronous Operations, Control-flow pipelining.",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\n@triton.jit\ndef cumprod_row_kernel(\n    x_ptr,            # *T\n    out_ptr,          # *T\n    rows,             # int32\n    cols,             # int32\n    stride_x_row,     # int32\n    stride_x_col,     # int32\n    stride_o_row,     # int32\n    stride_o_col,     # int32\n    BLOCK_SIZE: tl.constexpr,\n    PAD_EVERY: tl.constexpr,   # e.g., 32 for 32 banks\n):\n    pid = tl.program_id(0)\n    if pid >= rows:\n        return\n\n    # Row base pointers\n    x_row_ptr = x_ptr + pid * stride_x_row\n    o_row_ptr = out_ptr + pid * stride_o_row\n\n    # Vector of intra-tile indices\n    idx = tl.arange(0, BLOCK_SIZE)\n\n    # Shared memory buffer with 1 pad every 32 elements to avoid bank conflicts\n    PAD_COUNT = BLOCK_SIZE // PAD_EVERY\n    SMEM_SIZE = BLOCK_SIZE + PAD_COUNT\n    # allocate shared memory (float32 for compute to improve stability)\n    smem = tl.zeros((SMEM_SIZE,), dtype=tl.float32, scope=\"shared\")\n\n    # inclusive scan across the row, chunked by tiles\n    carry = tl.full((), 1.0, tl.float32)\n\n    # loop over tiles horizontally\n    tile_start = 0\n    while tile_start < cols:\n        remaining = cols - tile_start\n        valid = tl.minimum(remaining, BLOCK_SIZE)\n        mask = idx < valid\n\n        # global load (L2-only) + cast to f32\n        gptr = x_row_ptr + (tile_start + idx) * stride_x_col\n        vals = tl.load(gptr, mask=mask, other=1.0, cache_modifier=\".cg\")\n        vals = vals.to(tl.float32)\n\n        # conflict-free smem index: insert 1 pad element every 32\n        # sidx = i + floor(i / 32)\n        sidx = idx + (idx // PAD_EVERY)\n\n        # stage into smem using swizzled indices\n        tl.store(smem + sidx, vals, mask=mask)\n\n        # Hillis-Steele inclusive scan in shared memory with swizzled access\n        offset = 1\n        while offset < BLOCK_SIZE:\n            cur = tl.load(smem + sidx, mask=mask, other=1.0)\n            has_neighbor = (idx >= offset) & mask\n            nbr_idx = idx - offset\n            nbr_sidx = nbr_idx + (nbr_idx // PAD_EVERY)\n            nbr = tl.load(smem + nbr_sidx, mask=has_neighbor, other=1.0)\n            cur = tl.where(has_neighbor, cur * nbr, cur)\n            tl.store(smem + sidx, cur, mask=mask)\n            offset *= 2\n\n        # read back scanned tile\n        scan_vals = tl.load(smem + sidx, mask=mask, other=1.0)\n\n        # multiply by carry from previous tiles\n        scan_vals = scan_vals * carry\n\n        # streaming store to output (avoid polluting L2)\n        optr = o_row_ptr + (tile_start + idx) * stride_o_col\n        tl.store(optr, scan_vals, mask=mask, cache_modifier=\".cs\")\n\n        # update carry by the last valid element of this tile\n        last_idx = valid - 1\n        last_sidx = last_idx + (last_idx // PAD_EVERY)\n        tile_prod = tl.load(smem + last_sidx)\n        carry = carry * tile_prod\n\n        tile_start += BLOCK_SIZE\n\n\ndef _flatten_for_dim(x: torch.Tensor, dim: int):\n    # Move `dim` to the last dimension and flatten all others into the first\n    nd = x.ndim\n    dim = dim if dim >= 0 else dim + nd\n    if dim < 0 or dim >= nd:\n        raise ValueError(\"Invalid dim\")\n    perm = [d for d in range(nd) if d != dim] + [dim]\n    x_perm = x.permute(perm).contiguous()\n    cols = x_perm.shape[-1]\n    rows = x_perm.numel() // cols\n    x_2d = x_perm.view(rows, cols)\n    return x_2d, perm, dim, rows, cols\n\n\ndef _unflatten_from_dim(out_2d: torch.Tensor, orig_shape, perm, dim):\n    # Restore original shape and permutation\n    cols = orig_shape[dim]\n    rows = out_2d.numel() // cols\n    out_perm_shape = list(orig_shape)\n    out_perm_shape.pop(dim)\n    out_perm_shape.append(cols)\n    out_perm = out_2d.view(*out_perm_shape)\n    # invert perm\n    inv_perm = [0] * len(perm)\n    for i, p in enumerate(perm):\n        inv_perm[p] = i\n    return out_perm.permute(inv_perm).contiguous()\n\n\ndef triton_cumprod(x: torch.Tensor, dim: int):\n    if not x.is_cuda:\n        return torch.cumprod(x, dim=dim)\n\n    x2d, perm, d, rows, cols = _flatten_for_dim(x, dim)\n    out2d = torch.empty_like(x2d)\n\n    # strides in elements (torch strides are already in elements)\n    stride_x_row = x2d.stride(0)\n    stride_x_col = x2d.stride(1)\n    stride_o_row = out2d.stride(0)\n    stride_o_col = out2d.stride(1)\n\n    BLOCK_SIZE = 1024  # 1024 elements per tile; multiple of 32 for 128B alignment\n    PAD_EVERY = 32     # insert 1 pad every 32 to avoid bank conflicts\n\n    grid = (rows,)\n    num_warps = 8\n    num_stages = 2\n\n    # Launch\n    cumprod_row_kernel[grid](\n        x2d, out2d,\n        rows, cols,\n        stride_x_row, stride_x_col,\n        stride_o_row, stride_o_col,\n        BLOCK_SIZE=BLOCK_SIZE,\n        PAD_EVERY=PAD_EVERY,\n        num_warps=num_warps,\n        num_stages=num_stages,\n    )\n\n    return _unflatten_from_dim(out2d, x.shape, perm, d)\n\n\nclass ModelNew(nn.Module):\n    def __init__(self, dim):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor):\n        return triton_cumprod(x, self.dim)",
+      "kernel_id": "kernel_r2_idea_r2_efa45c00_0_5a7800",
+      "idea_id": "idea_r2_efa45c00",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": false,
+        "runtime": -1,
+        "runtime_stats": {},
+        "ref_runtime": -1,
+        "ref_runtime_compiled": -1,
+        "speedup": -1,
+        "speedup_vs_compiled": -1,
+        "metadata": {
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB",
+          "runtime_error": "at 28:11:\n    # Row base pointers\n    x_row_ptr = x_ptr + pid * stride_x_row\n    o_row_ptr = out_ptr + pid * stride_o_row\n\n    # Vector of intra-tile indices\n    idx = tl.arange(0, BLOCK_SIZE)\n\n   ...",
+          "runtime_error_name": "triton.compiler.errors.CompilationError"
+        }
+      },
+      "code_hash": "4a821fb035e5c8d4ad0bdff1764e5111e652574c983970f5e203e5179964eb5e",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Conflict-free SMEM layout with swizzle/padding for vectorized staging - Strategy: When staging tiles in shared memory, apply a bank-conflict-avoiding layout for vectorized accesses (float4/half8). Use either (a) padding: index_smem = i + (i >> 5) to insert 1 element every 32, or (b) XOR swizzle on the minor index (e.g., i' = i ^ ((lane_id & 0x10) >> 4)) to break stride-32 patterns. Align SMEM base to 128B and ensure per-warp accesses are 128B multiples. Keep both loads/stores vectorized (e.g., 16B\u201332B per lane) and use the same swizzle on read and write paths. Pair with tl.make_block_ptr to express aligned, rectangular SMEM tiles, and set tl.multiple_of(ptr, 16/32) so Triton emits wide transactions. For global memory, keep 128B coalescing; for streaming input, use L2-only loads; for output, use streaming/evict-first stores to avoid polluting L2 with one-use data. - Why it helps on A100: Ampere has 32 SMEM banks (4 bytes wide). Stride-32 patterns with vectorized words can silently create 2\u20134 way bank conflicts when threads repeatedly touch columns/strides, especially during inter-warp carry reads or when each thread processes multiple contiguous elements. Swizzling/padding eliminates these conflicts, allowing SMEM to sustain near-peak bandwidth. Combined with 128B alignment and wide vector ops, this minimizes both SMEM and GMEM overheads. - Targets: Memory access (coalescing, SMEM bank conflicts), Instruction throughput (wide vector ops).",
+        "temperature": 1.0
+      }
+    },
+    {
+      "code": "import math\nimport torch\nimport torch.nn as nn\nimport triton\nimport triton.language as tl\n\n\ndef _ceil_div(a, b):\n    return (a + b - 1) // b\n\n\n@triton.jit\ndef _cumprod_tile_kernel(\n    x_ptr,                # *f32\n    y_ptr,                # *f32\n    tile_totals_ptr,      # *f32\n    B,                    # total number of independent sequences (outer * tail)\n    Ncols,                # length along cumprod dimension\n    tail,                 # product of sizes after dim (stride along dim)\n    row_stride,           # Ncols * tail\n    tile_size,            # elements per tile\n    tiles_per_row,        # number of tiles along the row\n    BLOCK_R: tl.constexpr # number of sequences processed per program\n):\n    pid_tile = tl.program_id(0)\n    pid_rows = tl.program_id(1)\n\n    row_idx = pid_rows * BLOCK_R + tl.arange(0, BLOCK_R)\n    mask_rows = row_idx < B\n\n    # base offset for each sequence (row, tail-index) at column 0\n    base = (row_idx // tail) * row_stride + (row_idx % tail)\n\n    col_start = pid_tile * tile_size\n\n    acc = tl.full([BLOCK_R], 1.0, tl.float32)\n\n    # process tile sequentially along columns, vectorized across rows\n    for i in range(0, tl.constexpr(0) + 1):  # dummy to enable dynamic loop; replaced below\n        pass\n    # unrolled dynamic loop\n    i = 0\n    while i < tile_size:\n        col = col_start + i\n        mask_i = mask_rows & (col < Ncols)\n        offs = base + col * tail\n        v = tl.load(x_ptr + offs, mask=mask_i, other=1.0)\n        acc = acc * v\n        tl.store(y_ptr + offs, acc, mask=mask_i)\n        i += 1\n\n    # write tile totals\n    tt_offs = row_idx * tiles_per_row + pid_tile\n    tl.store(tile_totals_ptr + tt_offs, acc, mask=mask_rows)\n\n\n@triton.jit\ndef _scale_tiles_kernel(\n    y_ptr,                # *f32\n    tile_totals_ptr,      # *f32\n    B,                    # total number of independent sequences\n    Ncols,                # length along cumprod dimension\n    tail,                 # stride along dim\n    row_stride,           # Ncols * tail\n    tile_size,            # elements per tile\n    tiles_per_row,        # number of tiles along the row\n    BLOCK_R: tl.constexpr # number of sequences processed per program\n):\n    pid_tile = tl.program_id(0)\n    pid_rows = tl.program_id(1)\n\n    row_idx = pid_rows * BLOCK_R + tl.arange(0, BLOCK_R)\n    mask_rows = row_idx < B\n\n    # base offset for each sequence (row, tail-index) at column 0\n    base = (row_idx // tail) * row_stride + (row_idx % tail)\n    col_start = pid_tile * tile_size\n\n    # compute carry = product of tile_totals for tiles < pid_tile\n    carry = tl.full([BLOCK_R], 1.0, tl.float32)\n    k = 0\n    while k < pid_tile:\n        tt_offs_k = row_idx * tiles_per_row + k\n        prev_total = tl.load(tile_totals_ptr + tt_offs_k, mask=mask_rows, other=1.0)\n        carry = carry * prev_total\n        k += 1\n\n    # scale the current tile by carry\n    i = 0\n    while i < tile_size:\n        col = col_start + i\n        mask_i = mask_rows & (col < Ncols)\n        offs = base + col * tail\n        yv = tl.load(y_ptr + offs, mask=mask_i, other=1.0)\n        yv = yv * carry\n        tl.store(y_ptr + offs, yv, mask=mask_i)\n        i += 1\n\n\ndef _cumprod_triton(x: torch.Tensor, dim: int, tile_size: int = 8192, block_r: int = 128):\n    assert x.is_cuda, \"Input must be on CUDA\"\n    # Work in float32 for numerical stability and kernel simplicity\n    orig_dtype = x.dtype\n    if orig_dtype != torch.float32:\n        x = x.to(torch.float32)\n\n    # Make contiguous to ensure row-major layout assumptions\n    x = x.contiguous()\n    shape = list(x.shape)\n    ndim = x.dim()\n    dim = dim % ndim\n\n    # Compute parameters for strided cumprod along 'dim'\n    Ncols = shape[dim]\n    outer = 1\n    for k in range(0, dim):\n        outer *= shape[k]\n    tail = 1\n    for k in range(dim + 1, ndim):\n        tail *= shape[k]\n    B = outer * tail\n    row_stride = Ncols * tail\n\n    # Allocate outputs and tile totals buffer\n    y = torch.empty_like(x, dtype=torch.float32)\n    tiles_per_row = _ceil_div(Ncols, tile_size)\n    tile_totals = torch.empty((B * tiles_per_row,), device=x.device, dtype=torch.float32)\n\n    # Launch Kernel A: intra-tile cumprod + tile totals\n    grid0 = (tiles_per_row, _ceil_div(B, block_r))\n    _cumprod_tile_kernel[grid0](\n        x, y, tile_totals,\n        B, Ncols, tail, row_stride, tile_size, tiles_per_row,\n        BLOCK_R=block_r,\n        num_warps=4,\n        num_stages=2,\n    )\n\n    # Launch Kernel B: prefix over tile_totals per row and scale tiles in-place\n    _scale_tiles_kernel[grid0](\n        y, tile_totals,\n        B, Ncols, tail, row_stride, tile_size, tiles_per_row,\n        BLOCK_R=block_r,\n        num_warps=4,\n        num_stages=2,\n    )\n\n    if orig_dtype != torch.float32:\n        y = y.to(orig_dtype)\n    return y\n\n\nclass ModelNew(nn.Module):\n    \"\"\"\n    Optimized cumulative product using a two-kernel scheme with tile totals.\n    \"\"\"\n    def __init__(self, dim: int):\n        super().__init__()\n        self.dim = dim\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return _cumprod_triton(x, self.dim)",
+      "kernel_id": "kernel_r2_idea_r2_a7bfaf48_0_f0b0d7",
+      "idea_id": "idea_r2_a7bfaf48",
+      "round_number": 2,
+      "eval_result": {
+        "compiled": true,
+        "correctness": true,
+        "runtime": 126,
+        "runtime_stats": {
+          "max": 127,
+          "mean": 126,
+          "min": 125,
+          "num_trials": 100,
+          "std": 0.41
+        },
+        "ref_runtime": 9.17,
+        "ref_runtime_compiled": 5.44,
+        "speedup": 0.07277777777777777,
+        "speedup_vs_compiled": 0.04317460317460318,
+        "metadata": {
+          "correctness_trials": "(5 / 5)",
+          "device": "0",
+          "hardware": "NVIDIA A100-SXM4-80GB"
+        }
+      },
+      "code_hash": "6487ab487a82bac577763358a89c05ae165fd8179e9409edaafa7f0f6cf6cfbe",
+      "metadata": {
+        "implementation_index": 0,
+        "idea_text": "Two-kernel scheme with L2-persisted tile-carry buffer - Strategy: Replace decoupled look-back with a simple, fully parallel two-pass approach leveraging Ampere\u2019s large L2. Kernel A: for each row, compute intra-tile cumprod and write partial outputs to Y; also write each tile\u2019s total product to a compact \u201ctile_totals\u201d buffer (size \u2248 rows \u00d7 tiles_per_row). Kernel B: assign one CTA per row; compute the prefix over tile_totals for that row (only ~4 entries when TILE=8K on 32K rows) and multiply each tile in Y by its row\u2019s carry scalar (vectorized scaling over tiles). On the host, set an L2 persisting cache window (AccessPolicyWindow) over tile_totals to keep this tiny buffer hot in L2 across kernels. Use cache modifiers: stream large Y traffic (stores evict-first), keep tile_totals in L2 (loads .ca or default plus persisting window). - Why it helps on A100: The metadata (tile_totals) is tiny (~0.5\u20132 MB depending on TILE), so it easily fits and persists in A100\u2019s 40 MB L2, making the second pass effectively limited by Y scaling bandwidth. This scheme avoids per-tile inter-CTA waits and look-back dependencies, allowing all CTAs to progress independently at maximum occupancy. While it adds one extra read/write of Y (the scale pass), the removal of synchronization stalls and the high sustained bandwidth of A100 often outweigh the extra traffic for large problem sizes. - Targets: Control flow (algorithmic restructuring), Memory hierarchy (L2 residency and cache policy), Parallelism (CTA independence).",
+        "temperature": 1.0
+      }
+    }
+  ]
+}

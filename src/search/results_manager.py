@@ -68,7 +68,7 @@ class ResultsManager:
             "all_kernels": [kernel.to_dict() for kernel in all_kernels]
         }
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2)
         
         print(f"\nResults saved to: {filepath}")
@@ -110,7 +110,7 @@ class ResultsManager:
             "kernels": [kernel.to_dict() for kernel in kernels]
         }
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(round_results, f, indent=2)
         
         return filepath
@@ -125,7 +125,7 @@ class ResultsManager:
         Returns:
             Dictionary with search results
         """
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             results = json.load(f)
         return results
     
@@ -157,7 +157,7 @@ class ResultsManager:
 
 """
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(header)
             f.write(kernel.code)
         
@@ -268,7 +268,7 @@ class ResultsManager:
         filename = f"summary_{config.problem_name}_{timestamp}.txt"
         filepath = os.path.join(self.output_dir, filename)
         
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(report)
         
         print(f"Summary report saved to: {filepath}")

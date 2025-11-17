@@ -40,7 +40,7 @@ def save_generated_code(problem_name, generated_code):
     output_dir = 'output/zeroshot/gemini-2.5-pro'
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{problem_name}.py")
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding='utf-8') as f:
         f.write(generated_code)
     return output_path
 
