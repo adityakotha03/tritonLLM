@@ -66,3 +66,92 @@ def clean_markdown_code_qwen(code: str) -> str:
         return '\n'.join(code_lines)
     else:
         return code
+
+def clean_markdown_code_gpt_oss(code: str) -> str:
+    """
+    Extract code from GPT-OSS model output which has a specific format with channel tags.
+    GPT-OSS uses tags like <|channel|>final<|message|> to mark the final code section.
+    
+    Args:
+        code: The generated text with GPT-OSS specific formatting
+        
+    Returns:
+        Only the code inside the final code block, or the original text if no code block found
+    """
+    # Look for the final code section marker
+    if '<|channel|>final<|message|>' in code:
+        final_section = code.split('<|channel|>final<|message|>')[-1]
+    else:
+        final_section = code
+    
+    # Remove the return tag if present
+    if '<|return|>' in final_section:
+        final_section = final_section.split('<|return|>')[0]
+    
+    # Now extract code from markdown code blocks
+    lines = final_section.split('\n')
+    inside_code_block = False
+    code_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        if stripped.startswith('```'):
+            if not inside_code_block:
+                inside_code_block = True
+            else:
+                break
+            continue
+
+        if inside_code_block:
+            code_lines.append(line)
+    
+    if code_lines:
+        return '\n'.join(code_lines)
+    else:
+        return clean_markdown_code_qwen(code)
+
+def clean_markdown_code_qwen3_thinking(code: str) -> str:
+    """
+    Extract code from Qwen3 model output with <think> tags.
+    The qwen3 renderer produces output with thinking sections before the actual code.
+    Format: <think>thinking content</think>\n\n```python\ncode\n```<|im_end|>
+    
+    Args:
+        code: The generated text with Qwen3 thinking tags and markdown formatting
+        
+    Returns:
+        Only the code inside the code block, removing thinking sections and tags
+    """
+    # Remove the <|im_end|> tag if present
+    if '<|im_end|>' in code:
+        code = code.split('<|im_end|>')[0]
+    
+    # Remove the <think> section if present
+    if '<think>' in code and '</think>' in code:
+        # Extract everything after </think>
+        code = code.split('</think>')[-1]
+    
+    # Now extract code from markdown code blocks
+    lines = code.split('\n')
+    inside_code_block = False
+    code_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        if stripped.startswith('```'):
+            if not inside_code_block:
+                inside_code_block = True
+            else:
+                break
+            continue
+
+        if inside_code_block:
+            code_lines.append(line)
+    
+    if code_lines:
+        return '\n'.join(code_lines)
+    else:
+        # Fallback: try the standard Qwen cleaning
+        return clean_markdown_code_qwen(code)

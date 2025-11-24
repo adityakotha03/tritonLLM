@@ -26,7 +26,7 @@ def save_generated_code(rel_path, generated_code, base_output_dir="output/zerosh
     output_path = os.path.join(base_output_dir, rel_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding='utf-8') as f:
         f.write(generated_code)
     
     return output_path

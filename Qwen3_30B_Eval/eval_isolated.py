@@ -12,7 +12,7 @@ def extract_problem_name(file_path):
 def initialize_csv(csv_path):
     """Initialize CSV file with headers"""
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, 'w', newline='') as f:
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             'Problem',
@@ -33,7 +33,7 @@ def initialize_csv(csv_path):
 
 def append_result_to_csv(csv_path, problem_name, level, result=None, error=None):
     """Append a single result to the CSV file"""
-    with open(csv_path, 'a', newline='') as f:
+    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         
         if error:
@@ -142,7 +142,7 @@ except Exception as e:
     
     # Write script to temporary file
     temp_script = f'temp_eval_{problem_name}.py'
-    with open(temp_script, 'w') as f:
+    with open(temp_script, 'w', encoding='utf-8') as f:
         f.write(script_content)
     
     try:
