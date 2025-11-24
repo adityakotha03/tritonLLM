@@ -1,0 +1,291 @@
+Problem,Level,Hardware,Device,Compiled,Correctness,Ref_PyTorch_Runtime_ms,Ref_PyTorch_Compiled_Runtime_ms,Triton_Runtime_ms,Speedup,Speedup_vs_Compiled,Status,Error_Message,Timestamp
+100_HingeLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:09:22
+10_3D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:09:25
+11_4D_tensor_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:09:30
+12_Matmul_with_diagonal_matrices_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.6000,7.6500,0.1410,53.90,54.26,SUCCESS,,2025-11-24 17:09:42
+13_Matmul_for_symmetric_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:09:49
+14_Matmul_for_upper_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.6800,7.7200,2.2800,3.37,3.39,SUCCESS,,2025-11-24 17:10:02
+15_Matmul_for_lower_triangular_matrices,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:10:06
+16_Matmul_with_transposed_A,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:10:10
+17_Matmul_with_transposed_B,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:10:13
+18_Matmul_with_transposed_both,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:10:16
+19_ReLU,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-24 17:11:26
+1_Square_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:11:31
+20_LeakyReLU,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-24 17:12:40
+21_Sigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.3600,7.3000,1.01,1.01,SUCCESS,,2025-11-24 17:13:48
+22_Tanh,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:14:03
+23_Softmax,level1,NVIDIA A100-SXM4-80GB,0,True,True,15.2000,11.6000,54.7000,0.28,0.21,SUCCESS,,2025-11-24 17:18:48
+24_LogSoftmax,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,Evaluation timeout (>5 minutes),2025-11-24 17:23:48
+25_Swish,level1,NVIDIA A100-SXM4-80GB,0,True,True,18.1000,7.3700,7.3300,2.47,1.01,SUCCESS,,2025-11-24 17:25:02
+26_GELU_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:25:15
+27_SELU_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.4500,7.3400,1.00,1.01,SUCCESS,,2025-11-24 17:26:24
+28_HardSigmoid,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3400,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-24 17:27:34
+29_Softplus,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3300,7.3400,7.2900,1.01,1.01,SUCCESS,,2025-11-24 17:28:39
+2_Standard_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:28:46
+30_Softsign,level1,NVIDIA A100-SXM4-80GB,0,True,True,25.5000,7.3900,7.3400,3.47,1.01,SUCCESS,,2025-11-24 17:29:54
+31_ELU,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.4400,7.3300,1.00,1.02,SUCCESS,,2025-11-24 17:31:07
+32_HardTanh,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.3500,7.3800,7.3400,1.00,1.01,SUCCESS,,2025-11-24 17:32:19
+33_BatchNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:32:56
+34_InstanceNorm,level1,NVIDIA A100-SXM4-80GB,0,True,True,17.0000,13.5000,17.7000,0.96,0.76,SUCCESS,,2025-11-24 17:34:30
+35_GroupNorm_,level1,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 17:34:52
+36_RMSNorm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:35:12
+37_FrobeniusNorm_,level1,NVIDIA A100-SXM4-80GB,0,True,True,13.8000,12.6000,13.8000,1.00,0.91,SUCCESS,,2025-11-24 17:36:41
+38_L1Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:37:02
+39_L2Norm_,level1,NVIDIA A100-SXM4-80GB,0,True,True,16.0000,17.3000,40.0000,0.40,0.43,SUCCESS,,2025-11-24 17:38:40
+3_Batched_matrix_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:39:04
+40_LayerNorm,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:39:09
+41_Max_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:39:30
+42_Max_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:39:44
+43_Max_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:39:58
+44_Average_Pooling_1D,level1,NVIDIA A100-SXM4-80GB,0,True,True,13.2000,3.3900,4.5500,2.90,0.75,SUCCESS,,2025-11-24 17:40:37
+45_Average_Pooling_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:41:12
+46_Average_Pooling_3D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:41:32
+47_Sum_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,True,5.1600,5.4900,17.1000,0.30,0.32,SUCCESS,,2025-11-24 17:43:08
+48_Mean_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:43:37
+49_Max_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:44:02
+4_Matrix_vector_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:45:26
+50_conv_standard_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:45:30
+51_Argmax_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:45:51
+52_Argmin_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:46:09
+53_Min_reduction_over_a_dimension,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:46:31
+54_conv_standard_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:46:41
+55_conv_standard_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:46:51
+56_conv_standard_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:46:56
+57_conv_transposed_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:47:05
+58_conv_transposed_3D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:47:12
+59_conv_standard_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:47:21
+5_Matrix_scalar_multiplication,level1,NVIDIA A100-SXM4-80GB,0,True,True,4.9000,4.9400,4.9100,1.00,1.01,SUCCESS,,2025-11-24 17:48:18
+60_conv_standard_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:48:26
+61_conv_transposed_3D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:48:38
+62_conv_standard_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:48:46
+63_conv_standard_2D__square_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:48:58
+64_conv_transposed_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:49:11
+65_conv_transposed_2D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:49:21
+66_conv_standard_3D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:49:32
+67_conv_standard_1D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:49:44
+68_conv_transposed_3D__square_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:49:49
+69_conv_transposed_2D__asymmetric_input__asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:50:03
+6_Matmul_with_large_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,True,4.0400,4.0400,6.9900,0.58,0.58,SUCCESS,,2025-11-24 17:50:36
+70_conv_transposed_3D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:50:46
+71_conv_transposed_2D__asymmetric_input__square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:50:53
+72_conv_transposed_3D_asymmetric_input_asymmetric_kernel___strided_padded_grouped_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:50:59
+73_conv_transposed_3D_asymmetric_input_square_kernel__strided_padded__grouped,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:51:06
+74_conv_transposed_1D_dilated,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:51:21
+75_conv_transposed_2D_asymmetric_input_asymmetric_kernel_strided__grouped____padded____dilated__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:51:28
+76_conv_standard_1D_dilated_strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:51:51
+77_conv_transposed_3D_square_input_square_kernel___padded____dilated____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:52:00
+78_conv_transposed_2D_asymmetric_input_asymmetric_kernel___padded__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:52:08
+79_conv_transposed_1D_asymmetric_input_square_kernel___padded____strided____dilated__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:52:16
+7_Matmul_with_small_K_dimension_,level1,NVIDIA A100-SXM4-80GB,0,True,True,7.8600,8.0700,3.0700,2.56,2.63,SUCCESS,,2025-11-24 17:52:37
+80_conv_standard_2D_square_input_asymmetric_kernel___dilated____padded__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:52:44
+81_conv_transposed_2D_asymmetric_input_square_kernel___dilated____padded____strided__,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:52:52
+82_conv_depthwise_2D_square_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:53:01
+83_conv_depthwise_2D_square_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:53:07
+84_conv_depthwise_2D_asymmetric_input_square_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:53:45
+85_conv_depthwise_2D_asymmetric_input_asymmetric_kernel,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:53:52
+86_conv_depthwise_separable_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:54:02
+87_conv_pointwise_2D,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:54:16
+88_MinGPTNewGelu,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:54:21
+89_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:54:34
+8_Matmul_with_irregular_shapes_,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:54:45
+90_cumprod,level1,NVIDIA A100-SXM4-80GB,0,True,True,9.0800,5.4400,92.3000,0.10,0.06,SUCCESS,,2025-11-24 17:55:45
+91_cumsum_reverse,level1,NVIDIA A100-SXM4-80GB,0,True,True,20.1000,12.2000,116.0000,0.17,0.11,SUCCESS,,2025-11-24 17:56:48
+92_cumsum_exclusive,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:56:57
+93_masked_cumsum,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:59:05
+94_MSELoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 17:59:25
+95_CrossEntropyLoss,level1,NVIDIA A100-SXM4-80GB,0,True,True,0.8350,0.6210,0.3630,2.30,1.71,SUCCESS,,2025-11-24 17:59:39
+96_HuberLoss,level1,NVIDIA A100-SXM4-80GB,0,True,True,9.6500,4.7700,9.6400,1.00,0.49,SUCCESS,,2025-11-24 18:01:14
+97_ScaledDotProductAttention,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:01:20
+98_KLDivLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:01:29
+99_TripletMarginLoss,level1,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:01:57
+9_Tall_skinny_matrix_multiplication_,level1,NVIDIA A100-SXM4-80GB,0,True,True,4.1600,4.4600,1010.0000,0.00,0.00,SUCCESS,,2025-11-24 18:04:00
+100_ConvTranspose3d_Clamp_Min_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:04
+10_ConvTranspose2d_MaxPool_Hardtanh_Mean_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:11
+11_ConvTranspose2d_BatchNorm_Tanh_MaxPool_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:14
+12_Gemm_Multiply_LeakyReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:19
+13_ConvTranspose3d_Mean_Add_Softmax_Tanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:27
+14_Gemm_Divide_Sum_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:31
+15_ConvTranspose3d_BatchNorm_Subtract,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:36
+16_ConvTranspose2d_Mish_Add_Hardtanh_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:40
+17_Conv2d_InstanceNorm_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:48
+18_Matmul_Sum_Max_AvgPool_LogSumExp_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:52
+19_ConvTranspose2d_GELU_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:04:59
+1_Conv2D_ReLU_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:03
+20_ConvTranspose3d_Sum_ResidualAdd_Multiply_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:07
+21_Conv2d_Add_Scale_Sigmoid_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:11
+22_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:15
+23_Conv3d_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:19
+24_Conv3d_Min_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:22
+25_Conv2d_Min_Tanh_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:26
+26_ConvTranspose3d_Add_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:38
+27_Conv3d_HardSwish_GroupNorm_Mean,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:42
+28_BMM_InstanceNorm_Sum_ResidualAdd_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:47
+29_Matmul_Mish_Mish,level2,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:05:50
+2_ConvTranspose2d_BiasAdd_Clamp_Scaling_Clamp_Divide,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:05:56
+30_Gemm_GroupNorm_Hardtanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:00
+31_Conv2d_Min_Add_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:05
+32_Conv2d_Scaling_Min,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:06:20
+33_Gemm_Scale_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:25
+34_ConvTranspose3d_LayerNorm_GELU_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:29
+35_Conv2d_Subtract_HardSwish_MaxPool_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:33
+36_ConvTranspose2d_Min_Sum_GELU_Add,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:36
+37_Matmul_Swish_Sum_GroupNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:06:42
+38_ConvTranspose3d_AvgPool_Clamp_Softmax_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:46
+39_Gemm_Scale_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:52
+3_ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:06:56
+40_Matmul_Scaling_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:06
+41_Gemm_BatchNorm_GELU_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:11
+42_ConvTranspose2d_GlobalAvgPool_BiasAdd_LogSumExp_Sum_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:16
+43_Conv3d_Max_LogSumExp_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:20
+44_ConvTranspose2d_Multiply_GlobalAvgPool_GlobalAvgPool_Mean,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:25
+45_Gemm_Sigmoid_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:30
+46_Conv2d_Subtract_Tanh_Subtract_AvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:35
+47_Conv3d_Mish_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:39
+48_Conv3d_Scaling_Tanh_Multiply_Sigmoid,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:43
+49_ConvTranspose3d_Softmax_Sigmoid,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:46
+4_Conv2d_Mish_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:51
+50_ConvTranspose3d_Scaling_AvgPool_BiasAdd_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:54
+51_Gemm_Subtract_GlobalAvgPool_LogSumExp_GELU_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:07:59
+52_Conv2d_Activation_BatchNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:03
+53_Gemm_Scaling_Hardtanh_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:07
+54_Conv2d_Multiply_LeakyReLU_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:12
+55_Matmul_MaxPool_Sum_Scale,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:27
+56_Matmul_Sigmoid_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:43
+57_Conv2d_ReLU_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:08:47
+58_ConvTranspose3d_LogSumExp_HardSwish_Subtract_Clamp,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:08:52
+59_Matmul_Swish_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,True,16.0000,16.4000,4.5100,3.55,3.64,SUCCESS,,2025-11-24 18:09:18
+5_ConvTranspose2d_Subtract_Tanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:22
+60_ConvTranspose3d_Swish_GroupNorm_HardSwish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:25
+61_ConvTranspose3d_ReLU_GroupNorm,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:09:31
+62_Matmul_GroupNorm_LeakyReLU_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:35
+63_Gemm_ReLU_Divide,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:40
+64_Gemm_LogSumExp_LeakyReLU_LeakyReLU_GELU_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:44
+65_Conv2d_AvgPool_Sigmoid_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:48
+66_Matmul_Dropout_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:09:56
+67_Conv2d_GELU_GlobalAvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:00
+68_Matmul_Min_Subtract,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:06
+69_Conv2d_HardSwish_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:10
+6_Conv3d_Softmax_MaxPool_MaxPool,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:10:14
+70_Gemm_Sigmoid_Scaling_ResidualAdd,level2,NVIDIA A100-SXM4-80GB,0,True,True,8.2400,8.2400,2.5900,3.18,3.18,SUCCESS,,2025-11-24 18:10:26
+71_Conv2d_Divide_LeakyReLU,level2,NVIDIA A100-SXM4-80GB,0,True,True,3.2800,2.1700,2.5500,1.29,0.85,SUCCESS,,2025-11-24 18:10:38
+72_ConvTranspose3d_BatchNorm_AvgPool_AvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:41
+73_Conv2d_BatchNorm_Scaling,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:45
+74_ConvTranspose3d_LeakyReLU_Multiply_LeakyReLU_Max,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:10:48
+75_Gemm_GroupNorm_Min_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:53
+76_Gemm_Add_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:10:58
+77_ConvTranspose3d_Scale_BatchNorm_GlobalAvgPool,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:08
+78_ConvTranspose3d_Max_Max_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:11
+79_Conv3d_Multiply_InstanceNorm_Clamp_Multiply_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:15
+7_Conv3d_ReLU_LeakyReLU_GELU_Sigmoid_BiasAdd,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:19
+80_Gemm_Max_Subtract_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:23
+81_Gemm_Swish_Divide_Clamp_Tanh_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:27
+82_Conv2d_Tanh_Scaling_BiasAdd_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:31
+83_Conv3d_GroupNorm_Min_Clamp_Dropout,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:35
+84_Gemm_BatchNorm_Scaling_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:40
+85_Conv2d_GroupNorm_Scale_MaxPool_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:43
+86_Matmul_Divide_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:47
+87_Conv2d_Subtract_Subtract_Mish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:51
+88_Gemm_GroupNorm_Swish_Multiply_Swish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:11:56
+89_ConvTranspose3d_MaxPool_Softmax_Subtract_Swish_Max,level2,NVIDIA A100-SXM4-80GB,0,True,True,18.9000,18.1000,23.1000,0.82,0.78,SUCCESS,,2025-11-24 18:12:15
+8_Conv3d_Divide_Max_GlobalAvgPool_BiasAdd_Sum,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:19
+90_Conv3d_LeakyReLU_Sum_Clamp_GELU,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:23
+91_ConvTranspose2d_Softmax_BiasAdd_Scaling_Sigmoid,level2,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:12:28
+92_Conv2d_GroupNorm_Tanh_HardSwish_ResidualAdd_LogSumExp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:31
+93_ConvTranspose2d_Add_Min_GELU_Multiply,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:35
+94_Gemm_BiasAdd_Hardtanh_Mish_GroupNorm,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:39
+95_Matmul_Add_Swish_Tanh_GELU_Hardtanh,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:43
+96_ConvTranspose3d_Multiply_Max_GlobalAvgPool_Clamp,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:47
+97_Matmul_BatchNorm_BiasAdd_Divide_Swish,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:51
+98_Matmul_AvgPool_GELU_Scale_Max,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:12:55
+99_Matmul_GELU_Softmax,level2,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:00
+9_Matmul_Subtract_Multiply_ReLU,level2,NVIDIA A100-SXM4-80GB,0,True,True,8.0800,8.1200,1.8300,4.42,4.44,SUCCESS,,2025-11-24 18:13:12
+10_ResNet101,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:16
+11_VGG16,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,"CUDA error: operation not supported on global/shared address space
+Search for `cudaErrorInvalidAddressSpace' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.",2025-11-24 18:13:22
+12_VGG19,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:27
+13_DenseNet121TransitionLayer,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:33
+14_DenseNet121DenseBlock,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:36
+15_DenseNet121,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:41
+16_DenseNet201,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:45
+17_SqueezeNetFireModule,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:49
+18_SqueezeNet,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:53
+19_MobileNetV1,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:13:56
+1_MLP,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:11
+20_MobileNetV2,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:14
+21_EfficientNetMBConv,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:20
+22_EfficientNetB0,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:23
+23_EfficientNetB1,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:27
+24_EfficientNetB2,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:14:30
+25_ShuffleNetUnit,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:18:07
+26_ShuffleNet,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:18:11
+27_RegNet,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,temp_module.triton_relu is not a Module subclass,2025-11-24 18:18:14
+28_VisionTransformer,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:18:21
+29_SwinMLP,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:18:25
+2_ShallowWideMLP,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:18:55
+30_SwinTransformerV2,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:01
+31_VisionAttention,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:04
+32_ConvolutionalVisionTransformer,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:08
+33_VanillaRNN,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,name 'batch_size' is not defined,2025-11-24 18:19:14
+34_VanillaRNNHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:18
+35_LSTM,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:25
+36_LSTMHn,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:29
+37_LSTMCn,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:32
+38_LSTMBidirectional,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:36
+39_GRU,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:44
+3_DeepNarrowMLP,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:47
+40_GRUHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:19:50
+41_GRUBidirectional,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:20:42
+42_GRUBidirectionalHidden,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:22
+43_MinGPTCausalAttention,level3,NVIDIA A100-SXM4-80GB,0,False,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:25
+44_MiniGPTBlock,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,torch.FloatTensor is not a Module subclass,2025-11-24 18:22:28
+45_UNetSoftmax,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:33
+46_NetVladWithGhostClusters,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:37
+47_NetVladNoGhostClusters,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:41
+48_Mamba2ReturnY,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-24 18:22:44
+49_Mamba2ReturnFinalState,level3,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FAILED,cannot unpack non-iterable NoneType object,2025-11-24 18:22:46
+4_LeNet5,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:50
+50_ReLUSelfAttention,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:54
+5_AlexNet,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:22:59
+6_GoogleNetInceptionModule,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:23:04
+7_GoogleNetInceptionV1,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:23:07
+8_ResNetBasicBlock,level3,NVIDIA A100-SXM4-80GB,0,True,False,-1.0000,-1.0000,-1.0000,-1.00,-1.00,SUCCESS,,2025-11-24 18:23:11
+9_ResNet18,level3,NVIDIA A100-SXM4-80GB,0,True,True,2.9200,2.6600,3.2100,0.91,0.83,SUCCESS,,2025-11-24 18:23:29
