@@ -7,7 +7,7 @@ from datetime import datetime
 import dotenv
 import pandas as pd
 import tinker
-from tinker_cookbook import checkpoint_utils, model_info, renderers
+from tinker_cookbook import checkpoint_utils, model_info, renderers, hyperparam_utils
 from tinker_cookbook.supervised.common import compute_mean_nll
 from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.utils import ml_log
@@ -20,7 +20,8 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 # Configuration
 BASE_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 BATCH_SIZE = 128
-LEARNING_RATE = 1e-4
+# LEARNING_RATE = 1e-4
+LEARNING_RATE = hyperparam_utils.get_lr(BASE_MODEL, is_lora=True)
 LORA_RANK = 32
 SAVE_EVERY = 50
 MAX_LENGTH = 16384
