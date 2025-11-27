@@ -1,65 +1,93 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
     xnumel = 2097152
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tl.full([1], 0, tl.int32)
-    tmp2 = triton_helpers.maximum(tmp1, tmp0)
-    tl.store(out_ptr0 + x0, tmp2, xmask)
+    x0 = xindex % 16384
+    x1 = xindex // 16384
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 16384 * x1), xmask)
+    tmp1 = tl.load(in_ptr1 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x2, tmp2, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_relu_1(in_ptr0, in_ptr1, out_ptr0, out_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x1 = xindex // 16384
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tmp5 = 0.0
+    tmp6 = tmp4 <= tmp5
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+    tl.store(out_ptr1 + x2, tmp6, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_relu_2(in_ptr0, in_ptr1, out_ptr0, out_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x1 = xindex // 8192
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tmp5 = 0.0
+    tmp6 = tmp4 <= tmp5
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+    tl.store(out_ptr1 + x2, tmp6, xmask)
 
 
 def call(args):
-    primals_1, primals_2, primals_3, primals_4, primals_5 = args
+    arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(primals_1, (16384, 16384), (16384, 1))
-    assert_size_stride(primals_2, (16384,), (1,))
-    assert_size_stride(primals_3, (16384, 16384), (16384, 1))
-    assert_size_stride(primals_4, (16384,), (1,))
-    assert_size_stride(primals_5, (8192, 16384), (16384, 1))
-    assert_size_stride(primals_6, (8192,), (1,))
+    assert_size_stride(arg0_1, (128, 16384), (16384, 1))
+    assert_size_stride(arg1_1, (16384, 16384), (16384, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((128, 16384), (16384, 1), torch.float32)
-        extern_kernels.mm(primals_1, reinterpret_tensor(primals_2, (16384, 
-            16384), (1, 16384), 0), out=buf0)
-        del primals_1
-        del primals_2
+        triton_poi_fused_add_0[triton.autotune, triton.jit](arg1_1, arg0_1,
+            buf0, 2097152, XBLOCK=128, num_warps=4, num_stages=1)
+        del arg0_1
+        del arg1_1
         buf1 = empty_strided_cuda((128, 16384), (16384, 1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_relu_0[grid(2097152)](buf0, buf1, 2097152, XBLOCK=
-            512, num_warps=8, num_stages=1)
-        del buf0
-        buf2 = empty_strided_cuda((128, 16384), (16384, 1), torch.float32)
-        extern_kernels.mm(buf1, reinterpret_tensor(primals_3, (16384, 16384
-            ), (1, 16384), 0), out=buf2)
-        del primals_3
+        buf2 = empty_strided_cuda((128, 16384), (16384, 1), torch.bool)
+        triton_poi_fused_add_relu_1[triton.autotune, triton.jit](buf0,
+            arg1_1, buf1, buf2, 2097152, XBLOCK=512, num_warps=8, num_stages=1
+            )
+        del arg1_1
         buf3 = empty_strided_cuda((128, 16384), (16384, 1), torch.float32)
-        triton_poi_fused_relu_0[grid(2097152)](buf2, buf3, 2097152, XBLOCK=
-            512, num_warps=8, num_stages=1)
-        del buf2
-        buf4 = empty_strided_cuda((128, 8192), (8192, 1), torch.float32)
-        extern_kernels.addmm(primals_6, buf3, reinterpret_tensor(primals_4, (
-            16384, 8192), (1, 16384), 0), alpha=1, beta=1, out=buf4)
-        del primals_6
-    return buf4, reinterpret_tensor(primals_4, (16384, 8192), (1, 16384), 0
-        ), buf1, buf3, primals_5, primals_4, reinterpret_tensor(primals_4, (
-        8192, 16384), (1, 8192), 0)
+        buf4 = empty_strided_cuda((128, 16384), (16384, 1), torch.bool)
+        triton_poi_fused_add_relu_2[triton.autotune, triton.jit](buf1,
+            buf0, buf3, buf4, 2097152, XBLOCK=512, num_warps=8, num_stages=1)
+        del buf1
+        del buf0
+    return buf3, buf2, buf4
 
 
 class ModelNew(nn.Module):
@@ -84,538 +112,7 @@ class ModelNew(nn.Module):
         self.network = nn.Sequential(*layers)
     
     def forward(self, input_0):
-        primals_1 = self.network[0].weight
-        primals_2 = self.network[0].bias
-        primals_3 = self.network[2].weight
-        primals_4 = self.network[2].bias
-        primals_5 = self.network[4].weight
-        primals_6 = self.network[4].bias
-        primals_4 = self.network[4].bias
-        primals_5 = self.network[4].weight
-        primals_4 = self.network[4].bias
-        primals_4 = primals_4[0]
-        primals_5 = primals_5[0]
-        primals_6 = primals_6[0]
-        primals_4 = primals_4[0]
-        primals_5 = primals_5[0]
-        primals_6 = primals_6[0]
-        primals_5 = primals_5[0]
-        primals_5 = primals_5[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-        primals_6 = primals_6[0]
-       
+        arg1_1 = self.network[0].weight
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
+        return output[0]

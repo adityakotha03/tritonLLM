@@ -1,95 +1,474 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_hardswish_tanh_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 114688
+def triton_poi_fused_hardswish_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 32768
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
     tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tl.load(in_ptr1 + x0, xmask)
-    tmp4 = tl.load(in_ptr0 + (5120 + x0), xmask)
-    tmp5 = tl.load(in_ptr1 + (5120 + x0), xmask)
-    tmp8 = tl.load(in_ptr0 + (10240 + x0), xmask)
-    tmp9 = tl.load(in_ptr1 + (10240 + x0), xmask)
-    tmp2 = tl_math.tanh(tmp1)
-    tmp3 = tmp0 + tmp2
-    tmp6 = tl_math.tanh(tmp5)
-    tmp7 = tmp4 + tmp6
-    tmp10 = tl_math.tanh(tmp9)
-    tmp11 = tmp8 + tmp10
-    tmp12 = tl.where(xmask, tmp3, tmp7)
-    tmp13 = tl.where(xmask, tmp3, tmp11)
-    tmp14 = 0.0
-    tmp15 = tl.full([1], 1, tl.int64)
-    tmp16 = triton_helpers.promote_to_tensor(tl.broadcast_to(tmp15, [1]))
-    tmp17 = libdevice.log1p(tmp14)
-    tmp18 = tmp16 * tmp16
-    tmp19 = tmp14 + tmp18
-    tmp20 = libdevice.log1p(tmp19)
-    tmp21 = tmp17 + tmp20
-    tmp22 = tl.where(xmask, tmp13, tmp14)
-    tmp23 = tl.where(xmask, tmp12, tmp14)
-    tmp24 = tmp23 + tmp22
-    tmp25 = libdevice.log1p(tmp24)
-    tmp26 = tmp21 + tmp25
-    tmp27 = tmp16 * tmp26
-    tl.store(out_ptr0 + x0, tmp27, xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 > tmp1
+    tmp3 = 3.0
+    tmp4 = tmp0 * tmp3
+    tmp5 = tmp4 + tmp1
+    tmp6 = tl.where(tmp2, tmp5, tmp0)
+    tmp7 = 3.0
+    tmp8 = tmp6 / tmp7
+    tmp9 = tl.full([1], 3, tl.int32)
+    tmp10 = tmp8 > tmp9
+    tmp11 = 0.0
+    tmp12 = tl.where(tmp10, tmp11, tmp8)
+    tl.store(out_ptr0 + x0, tmp12, xmask)
 
 
-def call(args):
-    primals_1, primals_2, primals_3, primals_4 = args
-    args.clear()
-    assert_size_stride(primals_1, (16, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_2, (16, 8), (8, 1))
-    assert_size_stride(primals_3, (128, 8, 128, 128), (131072, 16384, 128,
-        1))
-    assert_size_stride(primals_4, (64,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = extern_kernels.convolution(primals_3, primals_1, stride=(1, 
-        1), padding=(1, 1), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf0, (128, 64, 126, 126), (10077696, 157921, 
-        126, 1))
-        buf1 = empty_strided_cuda((128, 64, 126, 126), (10077696, 157921, 
-            126, 1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_hardswish_tanh_0[grid(114688)](buf0, primals_2,
-            buf1, 114688, XBLOCK=512, num_warps=8, num_stages=1)
-    return buf1, primals_1, primals_2, primals_3, primals_4, buf0
-
-
-class ModelNew(nn.Module):
-    """
-    Model that performs a convolution, applies Group Normalization, Tanh, HardSwish, 
-    Residual Addition, and LogSumExp.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, groups, eps=1e-5):
-        super(ModelNew, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.group_norm = nn.GroupNorm(groups, out_channels, eps=eps)
-        self.tanh = nn.Tanh()
-        self.hard_swish = nn.Hardswish()
-
-    def forward(self, input_0):
-        primals_1 = self.conv.weight
-        primals_2 = self.conv.bias
-        primals_3 = input_0
-        primals_4 = self.group_norm.weight
-        primals_5 = self.group_norm.bias
-        output = call([primals_1, primals_2, primals_3, primals_4])
-        return output[0]
+@triton.jit
+def triton_poi_fused__logsumexp_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 4 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (2 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (3 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 > tmp0
+    tmp4 = tmp3 > tmp1
+    tmp6 = tmp5 > tmp3
+    tmp7 = tl.where(tmp4, tmp3, tmp1)
+    tmp8 = tl.where(tmp6, tmp5, tmp7)
+    tmp9 = tl.where(tmp2, tmp1, tmp0)
+    tmp10 = tl.where(tmp4, tmp3, tmp9)
+    tmp11 = tl.where(tmp6, tmp5, tmp10)
+    tmp12 = tmp8 > tmp11
+    tmp13 = tl.where(tmp6, tmp5, tmp11)
+    tmp14 = tl.where(tmp2, tmp1, tmp8)
+    tmp15 = tl.where(tmp4, tmp3, tmp14)
+    tmp16 = tl.where(tmp6, tmp5, tmp15)
+    tmp17 = tmp13 > tmp16
+    tmp18 = tl.where(tmp6, tmp5, tmp16)
+    tmp19 = tl.where(tmp2, tmp1, tmp13)
+    tmp20 = tl.where(tmp4, tmp3, tmp19)
+    tmp21 = tl.where(tmp6, tmp5, tmp20)
+    tmp22 = tmp18 > tmp21
+    tmp23 = tl.where(tmp6, tmp5, tmp21)
+    tmp24 = tl.where(tmp2, tmp1, tmp18)
+    tmp25 = tl.where(tmp4, tmp3, tmp24)
+    tmp26 = tl.where(tmp6, tmp5, tmp25)
+    tmp27 = tmp23 > tmp26
+    tmp28 = tl.where(tmp6, tmp5, tmp26)
+    tmp29 = tl.where(tmp2, tmp1, tmp23)
+    tmp30 = tl.where(tmp4, tmp3, tmp29)
+    tmp31 = tl.where(tmp6, tmp5, tmp30)
+    tmp32 = tmp28 > tmp31
+    tmp33 = tl.where(tmp6, tmp5, tmp31)
+    tmp34 = tl.where(tmp2, tmp1, tmp28)
+    tmp35 = tl.where(tmp4, tmp3, tmp34)
+    tmp36 = tl.where(tmp6, tmp5, tmp35)
+    tmp37 = tmp33 > tmp36
+    tmp38 = tl.where(tmp6, tmp5, tmp36)
+    tmp39 = tl.where(tmp2, tmp1, tmp33)
+    tmp40 = tl.where(tmp4, tmp3, tmp39)
+    tmp41 = tl.where(tmp6, tmp5, tmp40)
+    tmp42 = tmp38 > tmp41
+    tmp43 = tl.where(tmp6, tmp5, tmp41)
+    tmp44 = tl.where(tmp2, tmp1, tmp38)
+    tmp45 = tl.where(tmp4, tmp3, tmp44)
+    tmp46 = tl.where(tmp6, tmp5, tmp45)
+    tmp47 = tmp43 > tmp46
+    tmp48 = tl.where(tmp6, tmp5, tmp46)
+    tmp49 = tl.where(tmp2, tmp1, tmp43)
+    tmp50 = tl.where(tmp4, tmp3, tmp49)
+    tmp51 = tl.where(tmp6, tmp5, tmp50)
+    tmp52 = tmp48 > tmp51
+    tmp53 = tl.where(tmp6, tmp5, tmp51)
+    tmp54 = tl.where(tmp2, tmp1, tmp48)
+    tmp55 = tl.where(tmp4, tmp3, tmp54)
+    tmp56 = tl.where(tmp6, tmp5, tmp55)
+    tmp57 = tmp53 > tmp56
+    tmp58 = tl.where(tmp6, tmp5, tmp56)
+    tmp59 = tl.where(tmp2, tmp1, tmp53)
+    tmp60 = tl.where(tmp4, tmp3, tmp59)
+    tmp61 = tl.where(tmp6, tmp5, tmp60)
+    tmp62 = tmp58 > tmp61
+    tmp63 = tl.where(tmp6, tmp5, tmp61)
+    tmp64 = tl.where(tmp2, tmp1, tmp58)
+    tmp65 = tl.where(tmp4, tmp3, tmp64)
+    tmp66 = tl.where(tmp6, tmp5, tmp65)
+    tmp67 = tmp63 > tmp66
+    tmp68 = tl.where(tmp6, tmp5, tmp66)
+    tmp69 = tl.where(tmp2, tmp1, tmp63)
+    tmp70 = tl.where(tmp4, tmp3, tmp69)
+    tmp71 = tl.where(tmp6, tmp5, tmp70)
+    tmp72 = tmp68 > tmp71
+    tmp73 = tl.where(tmp6, tmp5, tmp71)
+    tmp74 = tl.where(tmp2, tmp1, tmp68)
+    tmp75 = tl.where(tmp4, tmp3, tmp74)
+    tmp76 = tl.where(tmp6, tmp5, tmp75)
+    tmp77 = tmp73 > tmp76
+    tmp78 = tl.where(tmp6, tmp5, tmp76)
+    tmp79 = tl.where(tmp2, tmp1, tmp73)
+    tmp80 = tl.where(tmp4, tmp3, tmp79)
+    tmp81 = tl.where(tmp6, tmp5, tmp80)
+    tmp82 = tmp78 > tmp81
+    tmp83 = tl.where(tmp6, tmp5, tmp81)
+    tmp84 = tl.where(tmp2, tmp1, tmp78)
+    tmp85 = tl.where(tmp4, tmp3, tmp84)
+    tmp86 = tl.where(tmp6, tmp5, tmp85)
+    tmp87 = tmp83 > tmp86
+    tmp88 = tl.where(tmp6, tmp5, tmp86)
+    tmp89 = tl.where(tmp2, tmp1, tmp83)
+    tmp90 = tl.where(tmp4, tmp3, tmp89)
+    tmp91 = tl.where(tmp6, tmp5, tmp90)
+    tmp92 = tmp88 > tmp91
+    tmp93 = tl.where(tmp6, tmp5, tmp91)
+    tmp94 = tl.where(tmp2, tmp1, tmp88)
+    tmp95 = tl.where(tmp4, tmp3, tmp94)
+    tmp96 = tl.where(tmp6, tmp5, tmp95)
+    tmp97 = tmp93 > tmp96
+    tmp98 = tl.where(tmp6, tmp5, tmp96)
+    tmp99 = tl.where(tmp2, tmp1, tmp93)
+    tmp100 = tl.where(tmp4, tmp3, tmp99)
+    tmp101 = tl.where(tmp6, tmp5, tmp100)
+    tmp102 = tmp98 > tmp101
+    tmp103 = tl.where(tmp6, tmp5, tmp101)
+    tmp104 = tl.where(tmp2, tmp1, tmp98)
+    tmp105 = tl.where(tmp4, tmp3, tmp104)
+    tmp106 = tl.where(tmp6, tmp5, tmp105)
+    tmp107 = tmp103 > tmp106
+    tmp108 = tl.where(tmp6, tmp5, tmp106)
+    tmp109 = tl.where(tmp2, tmp1, tmp103)
+    tmp110 = tl.where(tmp4, tmp3, tmp109)
+    tmp111 = tl.where(tmp6, tmp5, tmp110)
+    tmp112 = tmp108 > tmp111
+    tmp113 = tl.where(tmp6, tmp5, tmp111)
+    tmp114 = tl.where(tmp2, tmp1, tmp108)
+    tmp115 = tl.where(tmp4, tmp3, tmp114)
+    tmp116 = tl.where(tmp6, tmp5, tmp115)
+    tmp117 = tmp113 > tmp116
+    tmp118 = tl.where(tmp6, tmp5, tmp116)
+    tmp119 = tl.where(tmp2, tmp1, tmp113)
+    tmp120 = tl.where(tmp4, tmp3, tmp119)
+    tmp121 = tl.where(tmp6, tmp5, tmp120)
+    tmp122 = tmp118 > tmp121
+    tmp123 = tl.where(tmp6, tmp5, tmp121)
+    tmp124 = tl.where(tmp2, tmp1, tmp118)
+    tmp125 = tl.where(tmp4, tmp3, tmp124)
+    tmp126 = tl.where(tmp6, tmp5, tmp125)
+    tmp127 = tmp123 > tmp126
+    tmp128 = tl.where(tmp6, tmp5, tmp126)
+    tmp129 = tl.where(tmp2, tmp1, tmp123)
+    tmp130 = tl.where(tmp4, tmp3, tmp129)
+    tmp131 = tl.where(tmp6, tmp5, tmp130)
+    tmp132 = tmp128 > tmp131
+    tmp133 = tl.where(tmp6, tmp5, tmp131)
+    tmp134 = tl.where(tmp2, tmp1, tmp128)
+    tmp135 = tl.where(tmp4, tmp3, tmp134)
+    tmp136 = tl.where(tmp6, tmp5, tmp135)
+    tmp137 = tmp133 > tmp136
+    tmp138 = tl.where(tmp6, tmp5, tmp136)
+    tmp139 = tl.where(tmp2, tmp1, tmp133)
+    tmp140 = tl.where(tmp4, tmp3, tmp139)
+    tmp141 = tl.where(tmp6, tmp5, tmp140)
+    tmp142 = tmp138 > tmp141
+    tmp143 = tl.where(tmp6, tmp5, tmp141)
+    tmp144 = tl.where(tmp2, tmp1, tmp138)
+    tmp145 = tl.where(tmp4, tmp3, tmp144)
+    tmp146 = tl.where(tmp6, tmp5, tmp145)
+    tmp147 = tmp143 > tmp146
+    tmp148 = tl.where(tmp6, tmp5, tmp146)
+    tmp149 = tl.where(tmp2, tmp1, tmp143)
+    tmp150 = tl.where(tmp4, tmp3, tmp149)
+    tmp151 = tl.where(tmp6, tmp5, tmp150)
+    tmp152 = tmp148 > tmp151
+    tmp153 = tl.where(tmp6, tmp5, tmp151)
+    tmp154 = tl.where(tmp2, tmp1, tmp148)
+    tmp155 = tl.where(tmp4, tmp3, tmp154)
+    tmp156 = tl.where(tmp6, tmp5, tmp155)
+    tmp157 = tmp153 > tmp156
+    tmp158 = tl.where(tmp6, tmp5, tmp156)
+    tmp159 = tl.where(tmp2, tmp1, tmp153)
+    tmp160 = tl.where(tmp4, tmp3, tmp159)
+    tmp161 = tl.where(tmp6, tmp5, tmp160)
+    tmp162 = tmp158 > tmp161
+    tmp163 = tl.where(tmp6, tmp5, tmp161)
+    tmp164 = tl.where(tmp2, tmp1, tmp158)
+    tmp165 = tl.where(tmp4, tmp3, tmp164)
+    tmp166 = tl.where(tmp6, tmp5, tmp165)
+    tmp167 = tmp163 > tmp166
+    tmp168 = tl.where(tmp6, tmp5, tmp166)
+    tmp169 = tl.where(tmp2, tmp1, tmp163)
+    tmp170 = tl.where(tmp4, tmp3, tmp169)
+    tmp171 = tl.where(tmp6, tmp5, tmp170)
+    tmp172 = tmp168 > tmp171
+    tmp173 = tl.where(tmp6, tmp5, tmp171)
+    tmp174 = tl.where(tmp2, tmp1, tmp168)
+    tmp175 = tl.where(tmp4, tmp3, tmp174)
+    tmp176 = tl.where(tmp6, tmp5, tmp175)
+    tmp177 = tmp173 > tmp176
+    tmp178 = tl.where(tmp6, tmp5, tmp176)
+    tmp179 = tl.where(tmp2, tmp1, tmp173)
+    tmp180 = tl.where(tmp4, tmp3, tmp179)
+    tmp181 = tl.where(tmp6, tmp5, tmp180)
+    tmp182 = tmp178 > tmp181
+    tmp183 = tl.where(tmp6, tmp5, tmp181)
+    tmp184 = tl.where(tmp2, tmp1, tmp178)
+    tmp185 = tl.where(tmp4, tmp3, tmp184)
+    tmp186 = tl.where(tmp6, tmp5, tmp185)
+    tmp187 = tmp183 > tmp186
+    tmp188 = tl.where(tmp6, tmp5, tmp186)
+    tmp189 = tl.where(tmp2, tmp1, tmp183)
+    tmp190 = tl.where(tmp4, tmp3, tmp189)
+    tmp191 = tl.where(tmp6, tmp5, tmp190)
+    tmp192 = tmp188 > tmp191
+    tmp193 = tl.where(tmp6, tmp5, tmp191)
+    tmp194 = tl.where(tmp2, tmp1, tmp188)
+    tmp195 = tl.where(tmp4, tmp3, tmp194)
+    tmp196 = tl.where(tmp6, tmp5, tmp195)
+    tmp197 = tmp193 > tmp196
+    tmp198 = tl.where(tmp6, tmp5, tmp196)
+    tmp199 = tl.where(tmp2, tmp1, tmp193)
+    tmp200 = tl.where(tmp4, tmp3, tmp199)
+    tmp201 = tl.where(tmp6, tmp5, tmp200)
+    tmp202 = tmp198 > tmp201
+    tmp203 = tl.where(tmp6, tmp5, tmp201)
+    tmp204 = tl.where(tmp2, tmp1, tmp198)
+    tmp205 = tl.where(tmp4, tmp3, tmp204)
+    tmp206 = tl.where(tmp6, tmp5, tmp205)
+    tmp207 = tmp203 > tmp206
+    tmp208 = tl.where(tmp6, tmp5, tmp206)
+    tmp209 = tl.where(tmp2, tmp1, tmp203)
+    tmp210 = tl.where(tmp4, tmp3, tmp209)
+    tmp211 = tl.where(tmp6, tmp5, tmp210)
+    tmp212 = tmp208 > tmp211
+    tmp213 = tl.where(tmp6, tmp5, tmp211)
+    tmp214 = tl.where(tmp2, tmp1, tmp208)
+    tmp215 = tl.where(tmp4, tmp3, tmp214)
+    tmp216 = tl.where(tmp6, tmp5, tmp215)
+    tmp217 = tmp213 > tmp216
+    tmp218 = tl.where(tmp6, tmp5, tmp216)
+    tmp219 = tl.where(tmp2, tmp1, tmp213)
+    tmp220 = tl.where(tmp4, tmp3, tmp219)
+    tmp221 = tl.where(tmp6, tmp5, tmp220)
+    tmp222 = tmp218 > tmp221
+    tmp223 = tl.where(tmp6, tmp5, tmp221)
+    tmp224 = tl.where(tmp2, tmp1, tmp218)
+    tmp225 = tl.where(tmp4, tmp3, tmp224)
+    tmp226 = tl.where(tmp6, tmp5, tmp225)
+    tmp227 = tmp223 > tmp226
+    tmp228 = tl.where(tmp6, tmp5, tmp226)
+    tmp229 = tl.where(tmp2, tmp1, tmp223)
+    tmp230 = tl.where(tmp4, tmp3, tmp229)
+    tmp231 = tl.where(tmp6, tmp5, tmp230)
+    tmp232 = tmp228 > tmp231
+    tmp233 = tl.where(tmp6, tmp5, tmp231)
+    tmp234 = tl.where(tmp2, tmp1, tmp228)
+    tmp235 = tl.where(tmp4, tmp3, tmp234)
+    tmp236 = tl.where(tmp6, tmp5, tmp235)
+    tmp237 = tmp233 > tmp236
+    tmp238 = tl.where(tmp6, tmp5, tmp236)
+    tmp239 = tl.where(tmp2, tmp1, tmp233)
+    tmp240 = tl.where(tmp4, tmp3, tmp239)
+    tmp241 = tl.where(tmp6, tmp5, tmp240)
+    tmp242 = tmp238 > tmp241
+    tmp243 = tl.where(tmp6, tmp5, tmp241)
+    tmp244 = tl.where(tmp2, tmp1, tmp238)
+    tmp245 = tl.where(tmp4, tmp3, tmp244)
+    tmp246 = tl.where(tmp6, tmp5, tmp245)
+    tmp247 = tmp243 > tmp246
+    tmp248 = tl.where(tmp6, tmp5, tmp246)
+    tmp249 = tl.where(tmp2, tmp1, tmp243)
+    tmp250 = tl.where(tmp4, tmp3, tmp249)
+    tmp251 = tl.where(tmp6, tmp5, tmp250)
+    tmp252 = tmp248 > tmp251
+    tmp253 = tl.where(tmp6, tmp5, tmp251)
+    tmp254 = tl.where(tmp2, tmp1, tmp248)
+    tmp255 = tl.where(tmp4, tmp3, tmp254)
+    tmp256 = tl.where(tmp6, tmp5, tmp255)
+    tmp257 = tmp253 > tmp256
+    tmp258 = tl.where(tmp6, tmp5, tmp256)
+    tmp259 = tl.where(tmp2, tmp1, tmp253)
+    tmp260 = tl.where(tmp4, tmp3, tmp259)
+    tmp261 = tl.where(tmp6, tmp5, tmp260)
+    tmp262 = tmp258 > tmp261
+    tmp263 = tl.where(tmp6, tmp5, tmp261)
+    tmp264 = tl.where(tmp2, tmp1, tmp258)
+    tmp265 = tl.where(tmp4, tmp3, tmp264)
+    tmp266 = tl.where(tmp6, tmp5, tmp265)
+    tmp267 = tmp263 > tmp266
+    tmp268 = tl.where(tmp6, tmp5, tmp266)
+    tmp269 = tl.where(tmp2, tmp1, tmp263)
+    tmp270 = tl.where(tmp4, tmp3, tmp269)
+    tmp271 = tl.where(tmp6, tmp5, tmp270)
+    tmp272 = tmp268 > tmp271
+    tmp273 = tl.where(tmp6, tmp5, tmp271)
+    tmp274 = tl.where(tmp2, tmp1, tmp268)
+    tmp275 = tl.where(tmp4, tmp3, tmp274)
+    tmp276 = tl.where(tmp6, tmp5, tmp275)
+    tmp277 = tmp273 > tmp276
+    tmp278 = tl.where(tmp6, tmp5, tmp276)
+    tmp279 = tl.where(tmp2, tmp1, tmp273)
+    tmp280 = tl.where(tmp4, tmp3, tmp279)
+    tmp281 = tl.where(tmp6, tmp5, tmp280)
+    tmp282 = tmp278 > tmp281
+    tmp283 = tl.where(tmp6, tmp5, tmp281)
+    tmp284 = tl.where(tmp2, tmp1, tmp278)
+    tmp285 = tl.where(tmp4, tmp3, tmp284)
+    tmp286 = tl.where(tmp6, tmp5, tmp285)
+    tmp287 = tmp283 > tmp286
+    tmp288 = tl.where(tmp6, tmp5, tmp286)
+    tmp289 = tl.where(tmp2, tmp1, tmp283)
+    tmp290 = tl.where(tmp4, tmp3, tmp289)
+    tmp291 = tl.where(tmp6, tmp5, tmp290)
+    tmp292 = tmp288 > tmp291
+    tmp293 = tl.where(tmp6, tmp5, tmp291)
+    tmp294 = tl.where(tmp2, tmp1, tmp288)
+    tmp295 = tl.where(tmp4, tmp3, tmp294)
+    tmp296 = tl.where(tmp6, tmp5, tmp295)
+    tmp297 = tmp293 > tmp296
+    tmp298 = tl.where(tmp6, tmp5, tmp296)
+    tmp299 = tl.where(tmp2, tmp1, tmp293)
+    tmp300 = tl.where(tmp4, tmp3, tmp299)
+    tmp301 = tl.where(tmp6, tmp5, tmp300)
+    tmp302 = tmp298 > tmp301
+    tmp303 = tl.where(tmp6, tmp5, tmp301)
+    tmp304 = tl.where(tmp2, tmp1, tmp298)
+    tmp305 = tl.where(tmp4, tmp3, tmp304)
+    tmp306 = tl.where(tmp6, tmp5, tmp305)
+    tmp307 = tmp303 > tmp306
+    tmp308 = tl.where(tmp6, tmp5, tmp306)
+    tmp309 = tl.where(tmp2, tmp1, tmp303)
+    tmp310 = tl.where(tmp4, tmp3, tmp309)
+    tmp311 = tl.where(tmp6, tmp5, tmp310)
+    tmp312 = tmp308 > tmp311
+    tmp313 = tl.where(tmp6, tmp5, tmp311)
+    tmp314 = tl.where(tmp2, tmp1, tmp308)
+    tmp315 = tl.where(tmp4, tmp3, tmp314)
+    tmp316 = tl.where(tmp6, tmp5, tmp315)
+    tmp317 = tmp313 > tmp316
+    tmp318 = tl.where(tmp6, tmp5, tmp316)
+    tmp319 = tl.where(tmp2, tmp1, tmp313)
+    tmp320 = tl.where(tmp4, tmp3, tmp319)
+    tmp321 = tl.where(tmp6, tmp5, tmp320)
+    tmp322 = tmp318 > tmp321
+    tmp323 = tl.where(tmp6, tmp5, tmp321)
+    tmp324 = tl.where(tmp2, tmp1, tmp318)
+    tmp325 = tl.where(tmp4, tmp3, tmp324)
+    tmp326 = tl.where(tmp6, tmp5, tmp325)
+    tmp327 = tmp323 > tmp326
+    tmp328 = tl.where(tmp6, tmp5, tmp326)
+    tmp329 = tl.where(tmp2, tmp1, tmp323)
+    tmp330 = tl.where(tmp4, tmp3, tmp329)
+    tmp331 = tl.where(tmp6, tmp5, tmp330)
+    tmp332 = tmp328 > tmp331
+    tmp333 = tl.where(tmp6, tmp5, tmp331)
+    tmp334 = tl.where(tmp2, tmp1, tmp328)
+    tmp335 = tl.where(tmp4, tmp3, tmp334)
+    tmp336 = tl.where(tmp6, tmp5, tmp335)
+    tmp337 = tmp333 > tmp336
+    tmp338 = tl.where(tmp6, tmp5, tmp336)
+    tmp339 = tl.where(tmp2, tmp1, tmp333)
+    tmp340 = tl.where(tmp4, tmp3, tmp339)
+    tmp341 = tl.where(tmp6, tmp5, tmp340)
+    tmp342 = tmp338 > tmp341
+    tmp343 = tl.where(tmp6, tmp5, tmp341)
+    tmp344 = tl.where(tmp2, tmp1, tmp338)
+    tmp345 = tl.where(tmp4, tmp3, tmp344)
+    tmp346 = tl.where(tmp6, tmp5, tmp345)
+    tmp347 = tmp343 > tmp346
+    tmp348 = tl.where(tmp6, tmp5, tmp346)
+    tmp349 = tl.where(tmp2, tmp1, tmp343)
+    tmp350 = tl.where(tmp4, tmp3, tmp349)
+    tmp351 = tl.where(tmp6, tmp5, tmp350)
+    tmp352 = tmp348 > tmp351
+    tmp353 = tl.where(tmp6, tmp5, tmp351)
+    tmp354 = tl.where(tmp2, tmp1, tmp348)
+    tmp355 = tl.where(tmp4, tmp3, tmp354)
+    tmp356 = tl.where(tmp6, tmp5, tmp355)
+    tmp357 = tmp353 > tmp356
+    tmp358 = tl.where(tmp6, tmp5, tmp356)
+    tmp359 = tl.where(tmp2, tmp1, tmp353)
+    tmp360 = tl.where(tmp4, tmp3, tmp359)
+    tmp361 = tl.where(tmp6, tmp5, tmp360)
+    tmp362 = tmp358 > tmp361
+    tmp363 = tl.where(tmp6, tmp5, tmp361)
+    tmp364 = tl.where(tmp2, tmp1, tmp358)
+    tmp365 = tl.where(tmp4, tmp3, tmp364)
+    tmp366 = tl.where(tmp6, tmp5, tmp365)
+    tmp367 = tmp363 > tmp366
+    tmp368 = tl.where(tmp6, tmp5, tmp366)
+    tmp369 = tl.where(tmp2, tmp1, tmp363)
+    tmp370 = tl.where(tmp4, tmp3, tmp369)
+    tmp371 = tl.where(tmp6, tmp5, tmp370)
+    tmp372 = tmp368 > tmp371
+    tmp373 = tl.where(tmp6, tmp5, tmp371)
+    tmp374 = tl.where(tmp2, tmp1, tmp368)
+    tmp375 = tl.where(tmp4, tmp3, tmp374)
+    tmp376 = tl.where(tmp6, tmp5, tmp375)
+    tmp377 = tmp373 > tmp376
+    tmp378 = tl.where(tmp6, tmp5, tmp376)
+    tmp379 = tl.where(tmp2, tmp1, tmp373)
+    tmp380 = tl.where(tmp4, tmp3, tmp379)
+    tmp381 = tl.where(tmp6, tmp5, tmp380)
+    tmp382 = tmp378 > tmp381
+    tmp383 = tl.where(tmp6, tmp5, tmp381)
+    tmp384 = tl.where(tmp2, tmp1, tmp378)
+    tmp385 = tl.where(tmp4, tmp3, tmp384)
+    tmp386 = tl.where(tmp6, tmp5, tmp385)
+    tmp387 = tmp383 > tmp386
+    tmp388 = tl.where(tmp6, tmp5, tmp386)
+    tmp389 = tl.where(tmp2, tmp1, tmp383)
+    tmp390 = tl.where(tmp4, tmp3, tmp389)
+    tmp391 = tl.where(tmp6, tmp5, tmp390)
+    tmp392 = tmp388 > tmp391
+    tmp393 = tl.where(tmp6, tmp5, tmp391)
+    tmp394 = tl.where(tmp2, tmp1, tmp388)
+    tmp395 = tl.where(tmp4, tmp3, tmp394)
+    tmp396 = tl.where(tmp6, tmp5, tmp395)
+    tmp397 = tmp393 > tmp396
+    tmp398 = tl.where(tmp6, tmp5, tmp396)
+    tmp399 = tl.where(tmp2, tmp1, tmp393)
+    tmp400 = tl.where(tmp4, tmp3, tmp399)
+    tmp401 = tl.where(tmp6, tmp5, tmp400)
+    tmp402 = tmp398 > tmp401
+    tmp403 = tl.where(tmp6, tmp5, tmp401)
+    tmp404 = tl.where(tmp2, tmp1, tmp398)
+    tmp405 = tl.where(tmp4, tmp3, tmp404)
+    tmp406 = tl.where(tmp6, tmp5, tmp405)
+    tmp407 = tmp403 > tmp406
+    tmp408 = tl.where(tmp6, tmp5, tmp406)
+    tmp409 = tl.where(tmp2, tmp1, tmp403)
+    tmp410 = tl.where(tmp4, tmp3, tmp409)
+    tmp411 = tl.where(tmp6, tmp5, tmp410)
+    tmp412 = tmp408 > tmp411
+    tmp413 = tl.where(tmp6, tmp5, tmp411)
+    tmp414 = tl.where(tmp2, tmp1, tmp408)
+    tmp415 = tl.where(tmp4, tmp3, tmp414)
+    tmp416 = tl.where(tmp6, tmp5, tmp415)
+    tmp417 = tmp413 > tmp416
+    tmp418 = tl.where(tmp6, tmp5, tmp416)
+    tmp419 = tl.where(tmp2, tmp1, tmp413)
+    tmp420 = tl.where(tmp4, tmp3, tmp419)
+    tmp421 = tl.where(tmp6, tmp5, tmp420)
+    tmp422 = tmp418 > tmp421
+    tmp423 = tl.where(tmp6, tmp5, tmp421)
+    tmp424 = tl.where(tmp2, tmp1, tmp418)
+    tmp425 = tl.where(tmp4, tmp3, tmp424)
+    tmp426 = tl.where(tmp6, tmp5, tmp425)
+    tmp427 = tmp423 > tmp426
+    tmp428 = tl.where(tmp6, tmp5, tmp426)
+    tmp429 = tl.where(tmp2, tmp1, tmp423)
+    tmp430 = tl.where(tmp4, tmp3, tmp429)
+    tmp431

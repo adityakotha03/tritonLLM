@@ -1,33 +1,26 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_per_fused_relu_threshold_backward_0(in_out_ptr0, in_ptr0,
-    out_ptr0, xnumel, rnumel):
-    XBLOCK: tl.constexpr = 1
-    RBLOCK: tl.constexpr = 256
+def triton_poi_fused_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 158687808
     xoffset = tl.program_id(0) * XBLOCK
-    tl.full([1], xoffset, tl.int32)
-    tl.full([RBLOCK], True, tl.int1)
-    rindex = tl.arange(0, RBLOCK)[:]
-    tl.full([RBLOCK], True, tl.int1)
-    r0 = rindex
-    tmp0 = tl.load(in_ptr0 + r0, None)
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
     tmp1 = tl.full([1], 0, tl.int32)
     tmp2 = tmp0 >= tmp1
     tmp3 = 0.0
-    tmp4 = tl.where(tmp2, tmp0, tmp3)
-    tmp5 = tl.full(tmp4.shape, 0.0, tmp4.dtype)
-    tmp6 = tl.where(tmp2, tmp4, tmp5)
-    tl.store(in_out_ptr0 + tl.broadcast_to(r0, [RBLOCK]), tmp6, None)
-    tl.store(out_ptr0 + tl.broadcast_to(r0, [RBLOCK]), tmp2, None)
+    tmp4 = tl.where(xmask, tmp2, tmp3)
+    tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
 def call(args):
@@ -36,13 +29,12 @@ def call(args):
     assert_size_stride(arg0_1, (4096, 393216), (393216, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = arg0_1
-        buf1 = empty_strided_cuda((4096, 393216), (393216, 1), torch.bool)
+        buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
         get_raw_stream(0)
-        triton_per_fused_relu_threshold_backward_0[grid(256)](buf0, arg0_1,
-            buf1, 256, 256, num_warps=2, num_stages=1)
+        triton_poi_fused_relu_0[grid(158687808)](arg0_1, buf0, 158687808,
+            XBLOCK=512, num_warps=16, num_stages=1)
         del arg0_1
-    return buf0, buf1,
+    return buf0,
 
 
 class ModelNew(nn.Module):

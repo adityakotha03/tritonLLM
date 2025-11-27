@@ -1,516 +1,354 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_native_batch_norm_0(in_ptr0, out_ptr0, out_ptr1,
-    out_ptr2, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 8192
+def triton_poi_fused_add_mul_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1048576
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + 4096 + x0, xmask)
-    tmp1 = tl.load(in_ptr0 + (1 + 4096) + x0, xmask)
-    tmp3 = tl.load(in_ptr0 + (2 + 4096) + x0, xmask)
-    tmp5 = tl.load(in_ptr0 + (3 + 4096) + x0, xmask)
-    tmp7 = tl.load(in_ptr0 + (4096 + x0), xmask)
-    tmp9 = tl.load(in_ptr0 + (1 + 4096 + x0), xmask)
-    tmp11 = tl.load(in_ptr0 + (2 + 4096 + x0), xmask)
-    tmp13 = tl.load(in_ptr0 + (3 + 4096 + x0), xmask)
-    tmp15 = tl.load(in_ptr0 + (4096 + 4096 + x0), xmask)
-    tmp17 = tl.load(in_ptr0 + (1 + 4096 + 4096 + x0), xmask)
-    tmp19 = tl.load(in_ptr0 + (2 + 4096 + 4096 + x0), xmask)
-    tmp21 = tl.load(in_ptr0 + (3 + 4096 + 4096 + x0), xmask)
-    tmp23 = tl.load(in_ptr0 + (8192 + x0), xmask)
-    tmp25 = tl.load(in_ptr0 + (1 + 8192 + x0), xmask)
-    tmp27 = tl.load(in_ptr0 + (2 + 8192 + x0), xmask)
-    tmp29 = tl.load(in_ptr0 + (3 + 8192 + x0), xmask)
-    tmp31 = tl.load(in_ptr0 + (8192 + 4096 + x0), xmask)
-    tmp33 = tl.load(in_ptr0 + (1 + 8192 + 4096 + x0), xmask)
-    tmp35 = tl.load(in_ptr0 + (2 + 8192 + 4096 + x0), xmask)
-    tmp37 = tl.load(in_ptr0 + (3 + 8192 + 4096 + x0), xmask)
-    tmp40 = tmp0 + tmp1
-    tmp41 = tmp3 + tmp5
-    tmp42 = tmp40 + tmp41
-    tmp43 = tmp7 + tmp9
-    tmp44 = tmp11 + tmp13
-    tmp45 = tmp43 + tmp44
-    tmp46 = tmp15 + tmp17
-    tmp47 = tmp21 + tmp23
-    tmp48 = tmp46 + tmp47
-    tmp49 = tmp31 + tmp33
-    tmp50 = tmp35 + tmp37
-    tmp51 = tmp49 + tmp50
-    tmp52 = tmp42 + tmp45
-    tmp53 = tmp48 + tmp51
-    tmp54 = tmp52 + tmp53
-    tmp55 = tmp54 * tmp54
-    tmp56 = tmp43 + tmp44
-    tmp57 = tmp46 + tmp47
-    tmp58 = tmp49 + tmp50
-    tmp59 = tmp57 + tmp58
-    tmp60 = tmp56 + tmp59
-    tmp61 = 0.010000000000000002
-    tmp62 = 1.0 - tmp61
-    tmp63 = tmp60 * tmp62
-    tmp64 = tmp52 + tmp53
-    tmp65 = 0.010000000000000002
-    tmp66 = tmp54 * tmp65
-    tmp67 = tmp56 * tmp65
-    tmp68 = tmp67 * tmp67
-    tmp69 = tmp59 * tmp65
-    tmp70 = tmp69 * tmp69
-    tmp71 = tmp7 + tmp13
-    tmp72 = tmp9 + tmp11
-    tmp73 = tmp71 + tmp72
-    tmp74 = tmp7 + tmp9
-    tmp75 = tmp11 + tmp13
-    tmp76 = tmp74 + tmp75
-    tmp77 = tmp7 + tmp11
-    tmp78 = tmp9 + tmp13
-    tmp79 = tmp77 + tmp78
-    tmp80 = tmp7 + tmp13
-    tmp81 = tmp9 + tmp11
-    tmp82 = tmp79 + tmp80
-    tmp83 = tmp40 + tmp43
-    tmp84 = tmp40 + tmp44
-    tmp85 = tmp83 + tmp84
-    tmp86 = tmp42 + tmp45
-    tmp87 = tmp42 + tmp48
-    tmp88 = tmp86 + tmp87
-    tmp89 = tmp42 + tmp51
-    tmp90 = tmp88 + tmp89
-    tmp91 = tmp86 + tmp90
-    tmp92 = tmp45 + tmp48
-    tmp93 = tmp45 + tmp51
-    tmp94 = tmp92 + tmp93
-    tmp95 = tmp89 + tmp94
-    tmp96 = tmp91 + tmp95
-    tmp97 = tmp67 + tmp70
-    tmp98 = tmp67 + tmp70
-    tmp99 = tmp97 * tmp98
-    tmp100 = tmp99 * tmp64
-    tmp101 = tmp81 + tmp82
-    tmp102 = tmp81 + tmp80
-    tmp103 = tmp102 + tmp101
-    tmp104 = tmp101 + tmp103
-    tmp105 = tmp103 + tmp104
-    tmp106 = tmp67 + tmp70
-    tmp107 = tmp106 * tmp64
-    tmp108 = tmp105 + tmp107
-    tmp109 = tmp42 + tmp46
-    tmp110 = tmp42 + tmp49
-    tmp111 = tmp109 + tmp110
-    tmp112 = tmp45 + tmp49
-    tmp113 = tmp45 + tmp52
-    tmp114 = tmp112 + tmp113
-    tmp115 = tmp48 + tmp52
-    tmp116 = tmp48 + tmp55
-    tmp117 = tmp115 + tmp116
-    tmp118 = tmp113 + tmp117
-    tmp119 = tmp111 + tmp118
-    tmp120 = tmp117 + tmp119
-    tmp121 = tmp116 + tmp120
-    tmp122 = tmp120 + tmp121
-    tmp123 = tmp119 + tmp122
-    tmp124 = tmp121 + tmp123
-    tmp125 = tmp122 + tmp124
-    tmp126 = tmp114 + tmp125
-    tmp127 = tmp116 + tmp126
-    tmp128 = tmp125 + tmp127
-    tmp129 = tmp124 + tmp128
-    tmp130 = tmp127 + tmp129
-    tmp131 = tmp128 + tmp130
-    tmp132 = tmp129 + tmp131
-    tmp133 = tmp130 + tmp132
-    tmp134 = tmp131 + tmp133
-    tmp135 = tmp132 + tmp134
-    tmp136 = tmp133 + tmp135
-    tmp137 = tmp134 + tmp136
-    tmp138 = tmp135 + tmp137
-    tmp139 = tmp136 + tmp138
-    tmp140 = tmp137 + tmp139
-    tmp141 = tmp138 + tmp140
-    tmp142 = tmp139 + tmp141
-    tmp143 = tmp140 + tmp142
-    tmp144 = tmp141 + tmp143
-    tmp145 = tmp142 + tmp144
-    tmp146 = tmp143 + tmp145
-    tmp147 = tmp144 + tmp146
-    tmp148 = tmp145 + tmp147
-    tmp149 = tmp146 + tmp148
-    tmp150 = tmp147 + tmp149
-    tmp151 = tmp148 + tmp150
-    tmp152 = tmp149 + tmp151
-    tmp153 = tmp150 + tmp152
-    tmp154 = tmp151 + tmp153
-    tmp155 = tmp152 + tmp154
-    tmp156 = tmp153 + tmp155
-    tmp157 = tmp154 + tmp156
-    tmp158 = tmp155 + tmp157
-    tmp159 = tmp156 + tmp158
-    tmp160 = tmp157 + tmp159
-    tmp161 = tmp158 + tmp160
-    tmp162 = tmp159 + tmp161
-    tmp163 = tmp160 + tmp162
-    tmp164 = tmp161 + tmp163
-    tmp165 = tmp162 + tmp164
-    tmp166 = tmp163 + tmp165
-    tmp167 = tmp164 + tmp166
-    tmp168 = tmp165 + tmp167
-    tmp169 = tmp166 + tmp168
-    tmp170 = tmp167 + tmp169
-    tmp171 = tmp168 + tmp170
-    tmp172 = tmp169 + tmp171
-    tmp173 = tmp170 + tmp172
-    tmp174 = tmp171 + tmp173
-    tmp175 = tmp172 + tmp174
-    tmp176 = tmp173 + tmp175
-    tmp177 = tmp174 + tmp176
-    tmp178 = tmp175 + tmp177
-    tmp179 = tmp176 + tmp178
-    tmp180 = tmp177 + tmp179
-    tmp181 = tmp178 + tmp180
-    tmp182 = tmp179 + tmp181
-    tmp183 = tmp180 + tmp182
-    tmp184 = tmp181 + tmp183
-    tmp185 = tmp182 + tmp184
-    tmp186 = tmp183 + tmp185
-    tmp187 = tmp184 + tmp186
-    tmp188 = tmp185 + tmp187
-    tmp189 = tmp186 + tmp188
-    tmp190 = tmp187 + tmp189
-    tmp191 = tmp188 + tmp190
-    tmp192 = tmp189 + tmp191
-    tmp193 = tmp190 + tmp192
-    tmp194 = tmp191 + tmp193
-    tmp195 = tmp192 + tmp194
-    tmp196 = tmp193 + tmp195
-    tmp197 = tmp194 + tmp196
-    tmp198 = tmp195 + tmp197
-    tmp199 = tmp196 + tmp198
-    tmp200 = tmp197 + tmp199
-    tmp201 = tmp198 + tmp200
-    tmp202 = tmp199 + tmp201
-    tmp203 = tmp200 + tmp202
-    tmp204 = tmp201 + tmp203
-    tmp205 = tmp202 + tmp204
-    tmp206 = tmp203 + tmp205
-    tmp207 = tmp204 + tmp206
-    tmp208 = tmp205 + tmp207
-    tmp209 = tmp206 + tmp208
-    tmp210 = tmp207 + tmp209
-    tmp211 = tmp208 + tmp210
-    tmp212 = tmp209 + tmp211
-    tmp213 = tmp210 + tmp212
-    tmp214 = tmp211 + tmp213
-    tmp215 = tmp212 + tmp214
-    tmp216 = tmp213 + tmp215
-    tmp217 = tmp214 + tmp216
-    tmp218 = tmp215 + tmp217
-    tmp219 = tmp216 + tmp218
-    tmp220 = tmp217 + tmp219
-    tmp221 = tmp218 + tmp220
-    tmp222 = tmp219 + tmp221
-    tmp223 = tmp220 + tmp222
-    tmp224 = tmp221 + tmp223
-    tmp225 = tmp222 + tmp224
-    tmp226 = tmp223 + tmp225
-    tmp227 = tmp224 + tmp226
-    tmp228 = tmp225 + tmp227
-    tmp229 = tmp226 + tmp228
-    tmp230 = tmp227 + tmp229
-    tmp231 = tmp228 + tmp230
-    tmp232 = tmp229 + tmp231
-    tmp233 = tmp230 + tmp232
-    tmp234 = tmp231 + tmp233
-    tmp235 = tmp232 + tmp234
-    tmp236 = tmp233 + tmp235
-    tmp237 = tmp234 + tmp236
-    tmp238 = tmp235 + tmp237
-    tmp239 = tmp236 + tmp238
-    tmp240 = tmp237 + tmp239
-    tmp241 = tmp238 + tmp240
-    tmp242 = tmp239 + tmp241
-    tmp243 = tmp240 + tmp242
-    tmp244 = tmp241 + tmp243
-    tmp245 = tmp242 + tmp244
-    tmp246 = tmp243 + tmp245
-    tmp247 = tmp244 + tmp246
-    tmp248 = tmp245 + tmp247
-    tmp249 = tmp246 + tmp248
-    tmp250 = tmp247 + tmp249
-    tmp251 = tmp248 + tmp250
-    tmp252 = tmp249 + tmp251
-    tmp253 = tmp250 + tmp252
-    tmp254 = tmp251 + tmp253
-    tmp255 = tmp252 + tmp254
-    tmp256 = tmp253 + tmp255
-    tmp257 = tmp254 + tmp256
-    tmp258 = tmp255 + tmp257
-    tmp259 = tmp256 + tmp258
-    tmp260 = tmp257 + tmp259
-    tmp261 = tmp258 + tmp260
-    tmp262 = tmp259 + tmp261
-    tmp263 = tmp260 + tmp262
-    tmp264 = tmp261 + tmp263
-    tmp265 = tmp262 + tmp264
-    tmp266 = tmp263 + tmp265
-    tmp267 = tmp264 + tmp266
-    tmp268 = tmp265 + tmp267
-    tmp269 = tmp266 + tmp268
-    tmp270 = tmp267 + tmp269
-    tmp271 = tmp268 + tmp270
-    tmp272 = tmp269 + tmp271
-    tmp273 = tmp270 + tmp272
-    tmp274 = tmp271 + tmp273
-    tmp275 = tmp272 + tmp274
-    tmp276 = tmp273 + tmp275
-    tmp277 = tmp274 + tmp276
-    tmp278 = tmp275 + tmp277
-    tmp279 = tmp276 + tmp278
-    tmp280 = tmp277 + tmp279
-    tmp281 = tmp278 + tmp280
-    tmp282 = tmp279 + tmp281
-    tmp283 = tmp280 + tmp282
-    tmp284 = tmp281 + tmp283
-    tmp285 = tmp282 + tmp284
-    tmp286 = tmp283 + tmp285
-    tmp287 = tmp284 + tmp286
-    tmp288 = tmp285 + tmp287
-    tmp289 = tmp286 + tmp288
-    tmp290 = tmp287 + tmp289
-    tmp291 = tmp288 + tmp290
-    tmp292 = tmp289 + tmp291
-    tmp293 = tmp290 + tmp292
-    tmp294 = tmp291 + tmp293
-    tmp295 = tmp292 + tmp294
-    tmp296 = tmp293 + tmp295
-    tmp297 = tmp294 + tmp296
-    tmp298 = tmp295 + tmp297
-    tmp299 = tmp296 + tmp298
-    tmp300 = tmp297 + tmp299
-    tmp301 = tmp298 + tmp300
-    tmp302 = tmp299 + tmp301
-    tmp303 = tmp300 + tmp302
-    tmp304 = tmp301 + tmp303
-    tmp305 = tmp302 + tmp304
-    tmp306 = tmp303 + tmp305
-    tmp307 = tmp304 + tmp306
-    tmp308 = tmp305 + tmp307
-    tmp309 = tmp306 + tmp308
-    tmp310 = tmp307 + tmp309
-    tmp311 = tmp308 + tmp310
-    tmp312 = tmp309 + tmp311
-    tmp313 = tmp310 + tmp312
-    tmp314 = tmp311 + tmp313
-    tmp315 = tmp312 + tmp314
-    tmp316 = tmp313 + tmp315
-    tmp317 = tmp314 + tmp316
-    tmp318 = tmp315 + tmp317
-    tmp319 = tmp316 + tmp318
-    tmp320 = tmp317 + tmp319
-    tmp321 = tmp318 + tmp320
-    tmp322 = tmp319 + tmp321
-    tmp323 = tmp320 + tmp322
-    tmp324 = tmp321 + tmp323
-    tmp325 = tmp322 + tmp324
-    tmp326 = tmp323 + tmp325
-    tmp327 = tmp324 + tmp326
-    tmp328 = tmp325 + tmp327
-    tmp329 = tmp326 + tmp328
-    tmp330 = tmp327 + tmp329
-    tmp331 = tmp328 + tmp330
-    tmp332 = tmp329 + tmp331
-    tmp333 = tmp330 + tmp332
-    tmp334 = tmp331 + tmp333
-    tmp335 = tmp332 + tmp334
-    tmp336 = tmp333 + tmp335
-    tmp337 = tmp334 + tmp336
-    tmp338 = tmp335 + tmp337
-    tmp339 = tmp336 + tmp338
-    tmp340 = tmp337 + tmp339
-    tmp341 = tmp338 + tmp340
-    tmp342 = tmp339 + tmp341
-    tmp343 = tmp340 + tmp342
-    tmp344 = tmp341 + tmp343
-    tmp345 = tmp342 + tmp344
-    tmp346 = tmp343 + tmp345
-    tmp347 = tmp344 + tmp346
-    tmp348 = tmp345 + tmp347
-    tmp349 = tmp346 + tmp348
-    tmp350 = tmp347 + tmp349
-    tmp351 = tmp348 + tmp350
-    tmp352 = tmp349 + tmp351
-    tmp353 = tmp350 + tmp352
-    tmp354 = tmp351 + tmp353
-    tmp355 = tmp352 + tmp354
-    tmp356 = tmp353 + tmp355
-    tmp357 = tmp354 + tmp356
-    tmp358 = tmp355 + tmp357
-    tmp359 = tmp356 + tmp358
-    tmp360 = tmp357 + tmp359
-    tmp361 = tmp358 + tmp360
-    tmp362 = tmp359 + tmp361
-    tmp363 = tmp360 + tmp362
-    tmp364 = tmp361 + tmp363
-    tmp365 = tmp362 + tmp364
-    tmp366 = tmp363 + tmp365
-    tmp367 = tmp364 + tmp366
-    tmp368 = tmp365 + tmp367
-    tmp369 = tmp366 + tmp368
-    tmp370 = tmp367 + tmp369
-    tmp371 = tmp368 + tmp370
-    tmp372 = tmp369 + tmp371
-    tmp373 = tmp370 + tmp372
-    tmp374 = tmp371 + tmp373
-    tmp375 = tmp372 + tmp374
-    tmp376 = tmp373 + tmp375
-    tmp377 = tmp374 + tmp376
-    tmp378 = tmp375 + tmp377
-    tmp379 = tmp376 + tmp378
-    tmp380 = tmp377 + tmp379
-    tmp381 = tmp378 + tmp380
-    tmp382 = tmp379 + tmp381
-    tmp383 = tmp380 + tmp382
-    tmp384 = tmp381 + tmp383
-    tmp385 = tmp382 + tmp384
-    tmp386 = tmp383 + tmp385
-    tmp387 = tmp384 + tmp386
-    tmp388 = tmp385 + tmp387
-    tmp389 = tmp386 + tmp388
-    tmp390 = tmp387 + tmp389
-    tmp391 = tmp388 + tmp390
-    tmp392 = tmp389 + tmp391
-    tmp393 = tmp390 + tmp392
-    tmp394 = tmp391 + tmp393
-    tmp395 = tmp392 + tmp394
-    tmp396 = tmp393 + tmp395
-    tmp397 = tmp394 + tmp396
-    tmp398 = tmp395 + tmp397
-    tmp399 = tmp396 + tmp398
-    tmp400 = tmp397 + tmp399
-    tmp401 = tmp398 + tmp400
-    tmp402 = tmp399 + tmp401
-    tmp403 = tmp400 + tmp402
-    tmp404 = tmp401 + tmp403
-    tmp405 = tmp402 + tmp404
-    tmp406 = tmp403 + tmp405
-    tmp407 = tmp404 + tmp406
-    tmp408 = tmp405 + tmp407
-    tmp409 = tmp406 + tmp408
-    tmp410 = tmp407 + tmp409
-    tmp411 = tmp408 + tmp410
-    tmp412 = tmp409 + tmp411
-    tmp413 = tmp410 + tmp412
-    tmp414 = tmp411 + tmp413
-    tmp415 = tmp412 + tmp414
-    tmp416 = tmp413 + tmp415
-    tmp417 = tmp414 + tmp416
-    tmp418 = tmp415 + tmp417
-    tmp419 = tmp416 + tmp418
-    tmp420 = tmp417 + tmp419
-    tmp421 = tmp418 + tmp420
-    tmp422 = tmp419 + tmp421
-    tmp423 = tmp420 + tmp422
-    tmp424 = tmp421 + tmp423
-    tmp425 = tmp422 + tmp424
-    tmp426 = tmp423 + tmp425
-    tmp427 = tmp424 + tmp426
-    tmp428 = tmp425 + tmp427
-    tmp429 = tmp426 + tmp428
-    tmp430 = tmp427 + tmp429
-    tmp431 = tmp428 + tmp430
-    tmp432 = tmp429 + tmp431
-    tmp433 = tmp430 + tmp432
-    tmp434 = tmp431 + tmp433
-    tmp435 = tmp432 + tmp434
-    tmp436 = tmp433 + tmp435
-    tmp437 = tmp434 + tmp436
-    tmp438 = tmp435 + tmp437
-    tmp439 = tmp436 + tmp438
-    tmp440 = tmp437 + tmp439
-    tmp441 = tmp438 + tmp440
-    tmp442 = tmp439 + tmp441
-    tmp443 = tmp440 + tmp442
-    tmp444 = tmp441 + tmp443
-    tmp445 = tmp442 + tmp444
-    tmp446 = tmp443 + tmp445
-    tmp447 = tmp444 + tmp446
-    tmp448 = tmp445 + tmp447
-    tmp449 = tmp446 + tmp448
-    tmp450 = tmp447 + tmp449
-    tmp451 = tmp448 + tmp450
-    tmp452 = tmp449 + tmp451
-    tmp453 = tmp450 + tmp452
-    tmp454 = tmp451 + tmp453
-    tmp455 = tmp452 + tmp454
-    tmp456 = tmp453 + tmp455
-    tmp457 = tmp454 + tmp456
-    tmp458 = tmp455 + tmp457
-    tmp459 = tmp456 + tmp458
-    tmp460 = tmp457 + tmp459
-    tmp461 = tmp458 + tmp460
-    tmp462 = tmp459 + tmp461
-    tmp463 = tmp460 + tmp462
-    tmp464 = tmp461 + tmp463
-    tmp465 = tmp462 + tmp464
-    tmp466 = tmp463 + tmp465
-    tmp467 = tmp464 + tmp466
-    tmp468 = tmp465 + tmp467
-    tmp469 = tmp466 + tmp468
-    tmp470 = tmp467 + tmp469
-    tmp471 = tmp468 + tmp470
-    tmp472 = tmp469 + tmp471
-    tmp473 = tmp470 + tmp472
-    tmp474 = tmp471 + tmp473
-    tmp475 = tmp472 + tmp474
-    tmp476 = tmp473 + tmp475
-    tmp477 = tmp474 + tmp476
-    tmp478 = tmp475 + tmp477
-    tmp479 = tmp476 + tmp478
-    tmp480 = tmp477 + tmp479
-    tmp481 = tmp478 + tmp480
-    tmp482 = tmp479 + tmp481
-    tmp483 = tmp480 + tmp482
-    tmp484 = tmp481 + tmp483
-    tmp485 = tmp482 + tmp484
-    tmp486 = tmp483 + tmp485
-    tmp487 = tmp484 + tmp486
-    tmp488 = tmp485 + tmp487
-    tmp489 = tmp486 + tmp488
-    tmp490 = tmp487 + tmp489
-    tmp491 = tmp488 + tmp490
-    tmp492 = tmp489 + tmp491
-    tmp493 = tmp490 + tmp492
-    tmp494 = tmp491 + tmp493
-    tmp495 = tmp492 + tmp494
-    tmp496 = tmp493 + tmp495
-    tmp497 = tmp494 + tmp496
-    tmp498 = tmp495 + tmp497
-    tmp499 = tmp496 + tmp498
-    tmp500 = tmp497 + tmp499
-    tmp501 = tmp498 + tmp500
-    tmp502 = tmp499 + tmp501
-    tmp503 = tmp500 + tmp502
-    tmp504 = tmp501 + tmp503
-    tmp505 = tmp502 + tmp504
-    tmp506 = tmp503 + tmp505
-    tmp507 = tmp504 + tmp506
-    tmp508 = tmp505 + tmp507
-    tmp509 = tmp506 + tmp508
-    tmp510 = tmp507 + tmp509
-    tmp511 = tmp508 + tmp510
-    tmp512 = tmp509 + tmp511
-    tmp513 = tmp510 +
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + 0)
+    tmp2 = tl.broadcast_to(tmp1, [XBLOCK])
+    tmp3 = tmp0 + tmp2
+    tmp4 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tmp4 + tmp2
+    tmp6 = tl.broadcast_to(tmp5, [XBLOCK])
+    tmp7 = tmp3 * tmp6
+    tl.store(out_ptr0 + x0, tmp7, xmask)
+
+
+@triton.jit
+def triton_poi_fused__softmax_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 1048576
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp4 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp7 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp9 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp11 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp12 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp16 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp17 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp18 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp19 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp20 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp21 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp22 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp23 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp24 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp25 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp26 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp27 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp28 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp29 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp30 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp31 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp32 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp33 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp34 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp35 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp36 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp37 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp38 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp39 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp40 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp41 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp42 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp43 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp44 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp45 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp46 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp47 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp48 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp49 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp50 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp51 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp52 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp53 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp54 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp55 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp56 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp57 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp58 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp59 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp60 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp61 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp62 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp63 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp64 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp65 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp66 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp67 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp68 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp69 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp70 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp71 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp72 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp73 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp74 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp75 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp76 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp77 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp78 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp79 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp80 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp81 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp82 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp83 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp84 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp85 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp86 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp87 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp88 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp89 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp90 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp91 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp92 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp93 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp94 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp95 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp96 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp97 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp98 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp99 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp100 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp101 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp102 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp103 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp104 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp105 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp106 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp107 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp108 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp109 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp110 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp111 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp112 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp113 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp114 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp115 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp116 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp117 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp118 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp119 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp120 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp121 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp122 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp123 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp124 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp125 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp126 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp127 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp128 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp129 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp130 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp131 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp132 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp133 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp134 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp135 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp136 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp137 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp138 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp139 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp140 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp141 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp142 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp143 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp144 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp145 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp146 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp147 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp148 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp149 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp150 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp151 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp152 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp153 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp154 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp155 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp156 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp157 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp158 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp159 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp160 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp161 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp162 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp163 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp164 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp165 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp166 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp167 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp168 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp169 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp170 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp171 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp172 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp173 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp174 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp175 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp176 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp177 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp178 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp179 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp180 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp181 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp182 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp183 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp184 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp185 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp186 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp187 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp188 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp189 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp190 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp191 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp192 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp193 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp194 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp195 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp196 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp197 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp198 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp199 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp200 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp201 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp202 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp203 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp204 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp205 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp206 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp207 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp208 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp209 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp210 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp211 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp212 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp213 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp214 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp215 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp216 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp217 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp218 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp219 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp220 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp221 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp222 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp223 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp224 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp225 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp226 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp227 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp228 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp229 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp230 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp231 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp232 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp233 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp234 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp235 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp236 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp237 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp238 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp239 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp240 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp241 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp242 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp243 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp244 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp245 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp246 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp247 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp248 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp249 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp250 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp251 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp252 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp253 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp254 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp255 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp256 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp257 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp258 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp259 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp260 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp261 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp262 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp263 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp264 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp265 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp266 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp267 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp268 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp269 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp270 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp271 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp272 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp273 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp274 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp275 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp276 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp277 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp278 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp279 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp280 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp281 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp282 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp283 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp284 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp285 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp286 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp287 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp288 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp289 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp290 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp291 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp292 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp293 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp294 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp295 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp296 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp297 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp298 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp299 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp300 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp301 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp302 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp303 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp304 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp305 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp306 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp307 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp308 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp309 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp310 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp311 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp312 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp313 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp314 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp315 = tl.load(in_ptr

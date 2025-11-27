@@ -1,516 +1,141 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_hardswish_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 8192
+def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    constexpr):
+    xnumel = 1966080
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 3.0
-    tmp2 = tmp0 * tmp1
-    tmp3 = 3.0
-    tmp4 = tmp2 * tmp3
-    tmp5 = 0.5
-    tmp6 = tmp4 * tmp5
-    tmp7 = 0.0
-    tmp8 = triton_helpers.maximum(tmp6, tmp7)
-    tmp9 = triton_helpers.minimum(tmp8, tmp4)
-    tl.store(out_ptr0 + x0, tmp9, xmask)
+    x3 = xindex
+    x1 = xindex // 16384 % 128
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
 
 
 @triton.jit
-def triton_poi_fused_max_pool2d_with_indices_1(in_ptr0, out_ptr0, out_ptr1,
-    xnumel, XBLOCK: tl.constexpr):
-    xnumel = 16384
+def triton_poi_fused_hardswish_max_pool2d_with_indices_mish_1(in_ptr0,
+    out_ptr0, out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1966080
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x1 = xindex // 16 % 128
-    x0 = xindex % 16
-    x3 = xindex // 256
-    x5 = xindex
-    tmp0 = tl.load(in_ptr0 + (2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp1 = tl.load(in_ptr0 + (2 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp3 = tl.load(in_ptr0 + (64 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp5 = tl.load(in_ptr0 + (66 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp7 = tl.load(in_ptr0 + (128 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp9 = tl.load(in_ptr0 + (130 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp11 = tl.load(in_ptr0 + (256 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp13 = tl.load(in_ptr0 + (258 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp15 = tl.load(in_ptr0 + (320 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp17 = tl.load(in_ptr0 + (322 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp19 = tl.load(in_ptr0 + (512 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp21 = tl.load(in_ptr0 + (514 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp23 = tl.load(in_ptr0 + (576 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp25 = tl.load(in_ptr0 + (578 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp27 = tl.load(in_ptr0 + (640 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp29 = tl.load(in_ptr0 + (642 + 2 * x1 + 16 * x0 + 2048 * x3), xmask)
-    tmp2 = tmp0 > tmp1
-    tmp4 = tmp3 > tmp5
-    tmp6 = tmp7 > tmp9
-    tmp8 = tmp0 > tmp3
-    tmp10 = tmp1 > tmp5
-    tmp12 = tmp7 > tmp9
-    tmp14 = tmp0 > tmp7
-    tmp16 = tmp1 > tmp9
-    tmp18 = tmp7 > tmp11
-    tmp20 = tmp9 > tmp13
-    tmp22 = tmp11 > tmp15
-    tmp24 = tmp13 > tmp17
-    tmp26 = tmp15 > tmp19
-    tmp28 = tmp17 > tmp21
-    tmp30 = tmp19 > tmp23
-    tmp32 = tmp21 > tmp25
-    tmp34 = tmp23 > tmp27
-    tmp36 = tmp25 > tmp29
-    tmp38 = tmp27 > tmp31
-    tmp39 = tmp4 > tmp6
-    tmp41 = tmp6 > tmp8
-    tmp43 = tmp8 > tmp10
-    tmp45 = tmp10 > tmp12
-    tmp47 = tmp12 > tmp14
-    tmp49 = tmp14 > tmp16
-    tmp51 = tmp16 > tmp18
-    tmp53 = tmp18 > tmp20
-    tmp55 = tmp20 > tmp22
-    tmp57 = tmp22 > tmp24
-    tmp59 = tmp24 > tmp26
-    tmp61 = tmp26 > tmp28
-    tmp63 = tmp28 > tmp30
-    tmp65 = tmp30 > tmp32
-    tmp67 = tmp32 > tmp34
-    tmp69 = tmp34 > tmp36
-    tmp71 = tmp36 > tmp38
-    tmp72 = tmp39 > tmp41
-    tmp74 = tmp41 > tmp43
-    tmp76 = tmp43 > tmp45
-    tmp78 = tmp45 > tmp47
-    tmp80 = tmp47 > tmp49
-    tmp82 = tmp49 > tmp51
-    tmp84 = tmp51 > tmp53
-    tmp86 = tmp53 > tmp55
-    tmp88 = tmp55 > tmp57
-    tmp90 = tmp57 > tmp59
-    tmp92 = tmp59 > tmp61
-    tmp94 = tmp61 > tmp63
-    tmp96 = tmp63 > tmp65
-    tmp98 = tmp65 > tmp67
-    tmp100 = tmp67 > tmp69
-    tmp102 = tmp69 > tmp71
-    tmp104 = tmp71 > tmp72
-    tmp105 = tmp72 > tmp74
-    tmp107 = tmp74 > tmp76
-    tmp109 = tmp76 > tmp78
-    tmp111 = tmp78 > tmp80
-    tmp113 = tmp80 > tmp82
-    tmp115 = tmp82 > tmp84
-    tmp117 = tmp84 > tmp86
-    tmp119 = tmp86 > tmp88
-    tmp121 = tmp88 > tmp90
-    tmp123 = tmp90 > tmp92
-    tmp125 = tmp92 > tmp94
-    tmp127 = tmp94 > tmp96
-    tmp129 = tmp96 > tmp98
-    tmp131 = tmp98 > tmp100
-    tmp133 = tmp100 > tmp102
-    tmp135 = tmp102 > tmp104
-    tmp137 = tmp104 > tmp105
-    tmp138 = tmp105 > tmp107
-    tmp140 = tmp107 > tmp109
-    tmp142 = tmp109 > tmp111
-    tmp144 = tmp111 > tmp113
-    tmp146 = tmp113 > tmp115
-    tmp148 = tmp115 > tmp117
-    tmp150 = tmp117 > tmp119
-    tmp152 = tmp119 > tmp121
-    tmp154 = tmp121 > tmp123
-    tmp156 = tmp123 > tmp125
-    tmp158 = tmp125 > tmp127
-    tmp160 = tmp127 > tmp129
-    tmp162 = tmp129 > tmp131
-    tmp164 = tmp131 > tmp133
-    tmp166 = tmp133 > tmp135
-    tmp168 = tmp135 > tmp137
-    tmp169 = tmp137 > tmp138
-    tmp171 = tmp138 > tmp140
-    tmp173 = tmp140 > tmp142
-    tmp175 = tmp142 > tmp144
-    tmp177 = tmp144 > tmp146
-    tmp179 = tmp146 > tmp148
-    tmp181 = tmp148 > tmp150
-    tmp183 = tmp150 > tmp152
-    tmp185 = tmp152 > tmp154
-    tmp187 = tmp154 > tmp156
-    tmp189 = tmp156 > tmp158
-    tmp191 = tmp158 > tmp160
-    tmp193 = tmp160 > tmp162
-    tmp195 = tmp162 > tmp164
-    tmp197 = tmp164 > tmp166
-    tmp199 = tmp166 > tmp168
-    tmp201 = tmp168 > tmp169
-    tmp203 = tmp169 > tmp171
-    tmp205 = tmp171 > tmp173
-    tmp207 = tmp173 > tmp175
-    tmp209 = tmp175 > tmp177
-    tmp211 = tmp177 > tmp179
-    tmp213 = tmp179 > tmp181
-    tmp215 = tmp181 > tmp183
-    tmp217 = tmp183 > tmp185
-    tmp219 = tmp185 > tmp187
-    tmp221 = tmp187 > tmp189
-    tmp223 = tmp189 > tmp191
-    tmp225 = tmp191 > tmp193
-    tmp227 = tmp193 > tmp195
-    tmp229 = tmp195 > tmp197
-    tmp231 = tmp197 > tmp199
-    tmp233 = tmp199 > tmp201
-    tmp235 = tmp201 > tmp203
-    tmp237 = tmp203 > tmp205
-    tmp239 = tmp205 > tmp207
-    tmp241 = tmp207 > tmp209
-    tmp243 = tmp209 > tmp211
-    tmp245 = tmp211 > tmp213
-    tmp247 = tmp213 > tmp215
-    tmp249 = tmp215 > tmp217
-    tmp251 = tmp217 > tmp219
-    tmp253 = tmp219 > tmp221
-    tmp255 = tmp221 > tmp223
-    tmp257 = tmp223 > tmp225
-    tmp259 = tmp225 > tmp227
-    tmp261 = tmp227 > tmp229
-    tmp263 = tmp229 > tmp231
-    tmp265 = tmp231 > tmp233
-    tmp267 = tmp233 > tmp235
-    tmp269 = tmp235 > tmp237
-    tmp271 = tmp237 > tmp239
-    tmp273 = tmp239 > tmp241
-    tmp275 = tmp241 > tmp243
-    tmp277 = tmp243 > tmp245
-    tmp279 = tmp245 > tmp247
-    tmp281 = tmp247 > tmp249
-    tmp283 = tmp249 > tmp251
-    tmp285 = tmp251 > tmp253
-    tmp287 = tmp253 > tmp255
-    tmp289 = tmp255 > tmp257
-    tmp291 = tmp257 > tmp259
-    tmp293 = tmp259 > tmp261
-    tmp295 = tmp261 > tmp263
-    tmp297 = tmp263 > tmp265
-    tmp299 = tmp265 > tmp267
-    tmp301 = tmp267 > tmp269
-    tmp303 = tmp269 > tmp271
-    tmp305 = tmp271 > tmp273
-    tmp307 = tmp273 > tmp275
-    tmp309 = tmp275 > tmp277
-    tmp311 = tmp277 > tmp279
-    tmp313 = tmp279 > tmp281
-    tmp315 = tmp281 > tmp283
-    tmp317 = tmp283 > tmp285
-    tmp319 = tmp285 > tmp287
-    tmp321 = tmp287 > tmp289
-    tmp323 = tmp289 > tmp291
-    tmp325 = tmp291 > tmp293
-    tmp327 = tmp293 > tmp295
-    tmp329 = tmp295 > tmp297
-    tmp331 = tmp297 > tmp299
-    tmp333 = tmp299 > tmp301
-    tmp335 = tmp301 > tmp303
-    tmp337 = tmp303 > tmp305
-    tmp339 = tmp305 > tmp307
-    tmp341 = tmp307 > tmp309
-    tmp343 = tmp309 > tmp311
-    tmp345 = tmp311 > tmp313
-    tmp347 = tmp313 > tmp315
-    tmp349 = tmp315 > tmp317
-    tmp351 = tmp317 > tmp319
-    tmp353 = tmp319 > tmp321
-    tmp355 = tmp321 > tmp323
-    tmp357 = tmp323 > tmp325
-    tmp359 = tmp325 > tmp327
-    tmp361 = tmp327 > tmp329
-    tmp363 = tmp329 > tmp331
-    tmp365 = tmp331 > tmp333
-    tmp367 = tmp333 > tmp335
-    tmp369 = tmp335 > tmp337
-    tmp371 = tmp337 > tmp339
-    tmp373 = tmp339 > tmp341
-    tmp375 = tmp341 > tmp343
-    tmp377 = tmp343 > tmp345
-    tmp379 = tmp345 > tmp347
-    tmp381 = tmp347 > tmp349
-    tmp383 = tmp349 > tmp351
-    tmp385 = tmp351 > tmp353
-    tmp387 = tmp353 > tmp355
-    tmp389 = tmp355 > tmp357
-    tmp391 = tmp357 > tmp359
-    tmp393 = tmp359 > tmp361
-    tmp395 = tmp361 > tmp363
-    tmp397 = tmp363 > tmp365
-    tmp399 = tmp365 > tmp367
-    tmp401 = tmp367 > tmp369
-    tmp403 = tmp369 > tmp371
-    tmp405 = tmp371 > tmp373
-    tmp407 = tmp373 > tmp375
-    tmp409 = tmp375 > tmp377
-    tmp411 = tmp377 > tmp379
-    tmp413 = tmp379 > tmp381
-    tmp415 = tmp381 > tmp383
-    tmp417 = tmp383 > tmp385
-    tmp419 = tmp385 > tmp387
-    tmp421 = tmp387 > tmp389
-    tmp423 = tmp389 > tmp391
-    tmp425 = tmp391 > tmp393
-    tmp427 = tmp393 > tmp395
-    tmp429 = tmp395 > tmp397
-    tmp431 = tmp397 > tmp399
-    tmp433 = tmp399 > tmp401
-    tmp435 = tmp401 > tmp403
-    tmp437 = tmp403 > tmp405
-    tmp439 = tmp405 > tmp407
-    tmp441 = tmp407 > tmp409
-    tmp443 = tmp409 > tmp411
-    tmp445 = tmp411 > tmp413
-    tmp447 = tmp413 > tmp415
-    tmp449 = tmp415 > tmp417
-    tmp451 = tmp417 > tmp419
-    tmp453 = tmp419 > tmp421
-    tmp455 = tmp421 > tmp423
-    tmp457 = tmp423 > tmp425
-    tmp459 = tmp425 > tmp427
-    tmp461 = tmp427 > tmp429
-    tmp463 = tmp429 > tmp431
-    tmp465 = tmp431 > tmp433
-    tmp467 = tmp433 > tmp435
-    tmp469 = tmp435 > tmp437
-    tmp471 = tmp437 > tmp439
-    tmp473 = tmp439 > tmp441
-    tmp475 = tmp441 > tmp443
-    tmp477 = tmp443 > tmp445
-    tmp479 = tmp445 > tmp447
-    tmp481 = tmp447 > tmp449
-    tmp483 = tmp449 > tmp451
-    tmp485 = tmp451 > tmp453
-    tmp487 = tmp453 > tmp455
-    tmp489 = tmp455 > tmp457
-    tmp491 = tmp457 > tmp459
-    tmp493 = tmp459 > tmp461
-    tmp495 = tmp461 > tmp463
-    tmp497 = tmp463 > tmp465
-    tmp499 = tmp465 > tmp467
-    tmp501 = tmp467 > tmp469
-    tmp503 = tmp469 > tmp471
-    tmp505 = tmp471 > tmp473
-    tmp507 = tmp473 > tmp475
-    tmp509 = tmp475 > tmp477
-    tmp511 = tmp477 > tmp479
-    tmp513 = tmp479 > tmp481
-    tmp515 = tmp481 > tmp483
-    tmp517 = tmp483 > tmp485
-    tmp519 = tmp485 > tmp487
-    tmp521 = tmp487 > tmp489
-    tmp523 = tmp489 > tmp491
-    tmp525 = tmp491 > tmp493
-    tmp527 = tmp493 > tmp495
-    tmp529 = tmp495 > tmp497
-    tmp531 = tmp497 > tmp499
-    tmp533 = tmp499 > tmp501
-    tmp535 = tmp501 > tmp503
-    tmp537 = tmp503 > tmp505
-    tmp539 = tmp505 > tmp507
-    tmp541 = tmp507 > tmp509
-    tmp543 = tmp509 > tmp511
-    tmp545 = tmp511 > tmp513
-    tmp547 = tmp513 > tmp515
-    tmp549 = tmp515 > tmp517
-    tmp551 = tmp517 > tmp519
-    tmp553 = tmp519 > tmp521
-    tmp555 = tmp521 > tmp523
-    tmp557 = tmp523 > tmp525
-    tmp559 = tmp525 > tmp527
-    tmp561 = tmp527 > tmp529
-    tmp563 = tmp529 > tmp531
-    tmp565 = tmp531 > tmp533
-    tmp567 = tmp533 > tmp535
-    tmp569 = tmp535 > tmp537
-    tmp571 = tmp537 > tmp539
-    tmp573 = tmp539 > tmp541
-    tmp575 = tmp541 > tmp543
-    tmp577 = tmp543 > tmp545
-    tmp579 = tmp545 > tmp547
-    tmp581 = tmp547 > tmp549
-    tmp583 = tmp549 > tmp551
-    tmp585 = tmp551 > tmp553
-    tmp587 = tmp553 > tmp555
-    tmp589 = tmp555 > tmp557
-    tmp591 = tmp557 > tmp559
-    tmp593 = tmp559 > tmp561
-    tmp595 = tmp561 > tmp563
-    tmp597 = tmp563 > tmp565
-    tmp599 = tmp565 > tmp567
-    tmp601 = tmp567 > tmp569
-    tmp603 = tmp569 > tmp571
-    tmp605 = tmp571 > tmp573
-    tmp607 = tmp573 > tmp575
-    tmp609 = tmp575 > tmp577
-    tmp611 = tmp577 > tmp579
-    tmp613 = tmp579 > tmp581
-    tmp615 = tmp581 > tmp583
-    tmp617 = tmp583 > tmp585
-    tmp619 = tmp585 > tmp587
-    tmp621 = tmp587 > tmp589
-    tmp623 = tmp589 > tmp591
-    tmp625 = tmp591 > tmp593
-    tmp627 = tmp593 > tmp595
-    tmp629 = tmp595 > tmp597
-    tmp631 = tmp597 > tmp599
-    tmp633 = tmp599 > tmp601
-    tmp635 = tmp601 > tmp603
-    tmp637 = tmp603 > tmp605
-    tmp639 = tmp605 > tmp607
-    tmp641 = tmp607 > tmp609
-    tmp643 = tmp609 > tmp611
-    tmp645 = tmp611 > tmp613
-    tmp647 = tmp613 > tmp615
-    tmp649 = tmp615 > tmp617
-    tmp651 = tmp617 > tmp619
-    tmp653 = tmp619 > tmp621
-    tmp655 = tmp621 > tmp623
-    tmp657 = tmp623 > tmp625
-    tmp659 = tmp625 > tmp627
-    tmp661 = tmp627 > tmp629
-    tmp663 = tmp629 > tmp631
-    tmp665 = tmp631 > tmp633
-    tmp667 = tmp633 > tmp635
-    tmp669 = tmp635 > tmp637
-    tmp671 = tmp637 > tmp639
-    tmp673 = tmp639 > tmp641
-    tmp675 = tmp641 > tmp643
-    tmp677 = tmp643 > tmp645
-    tmp679 = tmp645 > tmp647
-    tmp681 = tmp647 > tmp649
-    tmp683 = tmp649 > tmp651
-    tmp685 = tmp651 > tmp653
-    tmp687 = tmp653 > tmp655
-    tmp689 = tmp655 > tmp657
-    tmp691 = tmp657 > tmp659
-    tmp693 = tmp659 > tmp661
-    tmp695 = tmp661 > tmp663
-    tmp697 = tmp663 > tmp665
-    tmp699 = tmp665 > tmp667
-    tmp701 = tmp667 > tmp669
-    tmp703 = tmp669 > tmp701
-    tmp705 = tmp701 > tmp703
-    tmp707 = tmp703 > tmp705
-    tmp709 = tmp705 > tmp707
-    tmp711 = tmp707 > tmp709
-    tmp713 = tmp709 > tmp711
-    tmp715 = tmp711 > tmp713
-    tmp717 = tmp713 > tmp715
-    tmp719 = tmp715 > tmp717
-    tmp721 = tmp717 > tmp719
-    tmp723 = tmp719 > tmp721
-    tmp725 = tmp721 > tmp723
-    tmp727 = tmp723 > tmp725
-    tmp729 = tmp725 > tmp727
-    tmp731 = tmp727 > tmp729
-    tmp733 = tmp729 > tmp731
-    tmp735 = tmp731 > tmp733
-    tmp737 = tmp733 > tmp735
-    tmp739 = tmp735 > tmp737
-    tmp741 = tmp737 > tmp739
-    tmp743 = tmp739 > tmp741
-    tmp745 = tmp741 > tmp743
-    tmp747 = tmp743 > tmp745
-    tmp749 = tmp745 > tmp747
-    tmp751 = tmp747 > tmp749
-    tmp753 = tmp749 > tmp751
-    tmp755 = tmp751 > tmp753
-    tmp757 = tmp753 > tmp755
-    tmp759 = tmp755 > tmp757
-    tmp761 = tmp757 > tmp759
-    tmp763 = tmp759 > tmp761
-    tmp765 = tmp761 > tmp763
-    tmp767 = tmp763 > tmp765
-    tmp769 = tmp765 > tmp767
-    tmp771 = tmp767 > tmp769
-    tmp773 = tmp769 > tmp771
-    tmp775 = tmp771 > tmp773
-    tmp777 = tmp773 > tmp775
-    tmp779 = tmp775 > tmp777
-    tmp781 = tmp777 > tmp779
-    tmp783 = tmp779 > tmp781
-    tmp785 = tmp781 > tmp783
-    tmp787 = tmp783 > tmp785
-    tmp789 = tmp785 > tmp787
-    tmp791 = tmp787 > tmp789
-    tmp793 = tmp789 > tmp791
-    tmp795 = tmp791 > tmp793
-    tmp797 = tmp793 > tmp795
-    tmp799 = tmp795 > tmp797
-    tmp801 = tmp797 > tmp799
-    tmp803 = tmp799 > tmp801
-    tmp805 = tmp801 > tmp803
-    tmp807 = tmp803 > tmp805
-    tmp809 = tmp805 > tmp807
-    tmp811 = tmp807 > tmp809
-    tmp813 = tmp809 > tmp811
-    tmp815 = tmp811 > tmp813
-    tmp817 = tmp813 > tmp815
-    tmp819 = tmp815 > tmp817
-    tmp821 = tmp817 > tmp819
-    tmp823 = tmp819 > tmp821
-    tmp825 = tmp821 > tmp823
-    tmp827 = tmp823 > tmp825
-    tmp829 = tmp825 > tmp827
-    tmp831 = tmp827 > tmp829
-    tmp833 = tmp829 > tmp831
-    tmp835 = tmp831 > tmp833
-    tmp837 = tmp833 > tmp835
-    tmp839 = tmp835 > tmp837
-    tmp841 = tmp837 > tmp839
-    tmp843 = tmp839 > tmp841
-    tmp845 = tmp841 > tmp843
-    tmp847 = tmp843 > tmp845
-    tmp849 = tmp845 > tmp847
-    tmp851 = tmp847 > tmp849
-    tmp853 = tmp849 > tmp851
-    tmp855 = tmp851 > tmp853
-    tmp857 = tmp853 > tmp855
-    tmp859 = tmp855 > tmp857
-    tmp861 = tmp857 > tmp859
-    tmp863 = tmp859 > tmp861
-    tmp865 = tmp861 > tmp863
-    tmp867 = tmp863 > tmp865
-    tmp869 = tmp865 > tmp867
-    tmp871 = tmp867 > tmp869
-    tmp873 = tmp869 > tmp871
-    tmp875 = tmp871 > tmp873
-    tmp877 = tmp873 > tmp875
-    tmp879 = tmp875 > tmp877
-    tmp881 = tmp877 > tmp879
-    tmp883 = tmp879 > tmp881
-    tmp885 = tmp881 > tmp883
-    tmp887 = tmp883 > tmp885
-    tmp889 = tmp885 > tmp887
-    tmp891 = tmp887 > tmp889
-    tmp893 = tmp889 > tmp891
-    tmp895 = tmp891 > tmp893
-    tmp897 = tmp893 > tmp895
-    tmp899 = tmp895 > tmp897
-    tmp901 = tmp897 > tmp899
-    tmp903 = tmp899 > tmp901
-    tmp9
+    x3 = xindex
+    x1 = xindex // 16384 % 128
+    x0 = xindex % 16384
+    x2 = xindex // 16384
+    tmp0 = tl.load(in_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + (x1 + 128 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp3 = tl.load(in_ptr0 + (128 + x1 + 128 * x0), xmask, eviction_policy
+        ='evict_last')
+    tmp6 = tl.load(in_ptr0 + (256 + x1 + 128 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp9 = tl.load(in_ptr0 + (x1 + 128 * (x0 // 4 + 4 * x2)), xmask,
+        eviction_policy='evict_last')
+    tmp11 = tl.load(in_ptr0 + (128 + x1 + 128 * (x0 // 4 + 4 * x2)), xmask,
+        eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr0 + (256 + x1 + 128 * (x0 // 4 + 4 * x2)), xmask,
+        eviction_policy='evict_last')
+    tmp17 = tl.load(in_ptr0 + (x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 * x2))),
+        xmask, eviction_policy='evict_last')
+    tmp20 = tl.load(in_ptr0 + (128 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp23 = tl.load(in_ptr0 + (256 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp26 = tl.load(in_ptr0 + (x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 * x2))),
+        xmask, eviction_policy='evict_last')
+    tmp29 = tl.load(in_ptr0 + (128 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp32 = tl.load(in_ptr0 + (256 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp27 = tl.load(in_ptr0 + (x1 + 128 * (x0 // 4 + 4 * (x0 // 4 + 4 * x2))),
+        xmask, eviction_policy='evict_last')
+    tmp30 = tl.load(in_ptr0 + (128 + x1 + 128 * (x0 // 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp33 = tl.load(in_ptr0 + (256 + x1 + 128 * (x0 // 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp28 = tl.load(in_ptr0 + (x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 * x2))),
+        xmask, eviction_policy='evict_last')
+    tmp31 = tl.load(in_ptr0 + (128 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp34 = tl.load(in_ptr0 + (256 + x1 + 128 * (x0 % 4 + 4 * (x0 // 4 + 4 *
+        x2))), xmask, eviction_policy='evict_last')
+    tmp4 = tmp0 - 0.5
+    tmp5 = 3.0
+    tmp7 = tmp5 * tmp4
+    tmp8 = tl.where(tmp1 <= tmp7, tmp1, tmp7)
+    tmp10 = tmp5 * tmp3
+    tmp12 = tmp5 * tmp6
+    tmp13 = tl.where(tmp8 <= tmp10, tmp8, tmp10)
+    tmp15 = tl.where(tmp13 <= tmp12, tmp13, tmp12)
+    tmp16 = tl.where(tmp15 <= tmp9, tmp15, tmp9)
+    tmp18 = tl.where(tmp16 <= tmp11, tmp16, tmp11)
+    tmp19 = tl.where(tmp18 <= tmp14, tmp18, tmp14)
+    tmp21 = tl.where(tmp19 <= tmp17, tmp19, tmp17)
+    tmp22 = tl.where(tmp21 <= tmp20, tmp21, tmp20)
+    tmp24 = tl.where(tmp22 <= tmp23, tmp22, tmp23)
+    tmp25 = tl.where(tmp24 <= tmp26, tmp24, tmp26)
+    tmp26 = tl.where(tmp25 <= tmp29, tmp25, tmp29)
+    tmp27 = tl.where(tmp26 <= tmp32, tmp26, tmp32)
+    tmp35 = tmp0 - 0.5
+    tmp36 = 3.0
+    tmp37 = tmp35 * tmp36
+    tmp38 = tl.where(tmp27 <= tmp37, tmp27, tmp37)
+    tmp39 = 0.0
+    tmp40 = tl.where(tmp38 <= tmp39, tmp38, tmp39)
+    tmp41 = 1.0
+    tmp42 = tl.where(tmp40 <= tmp41, tmp40, tmp41)
+    tl.store(out_ptr0 + x3, tmp38, xmask)
+    tl.store(out_ptr1 + x3, tmp42, xmask)
+
+
+def call(args):
+    arg0_1, arg1_1 = args
+    args.clear()
+    assert_size_stride(arg0_1, (128, 64, 128, 128), (1048576, 16384, 128, 
+        1))
+    assert_size_stride(arg1_1, (128, 64, 3, 3), (576, 9, 3, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((128, 128, 128, 128), (2097152, 16384, 
+            128, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_convolution_0[grid(1966080)](buf0, arg1_1, 1966080,
+            XBLOCK=512, num_warps=8, num_stages=1)
+        del arg1_1
+        buf1 = buf0
+        del buf0
+        buf2 = empty_strided_cuda((128, 128, 128, 128), (2097152, 16384, 
+            128, 1), torch.float32)
+        triton_poi_fused_hardswish_max_pool2d_with_indices_mish_1[grid(1966080)](
+            buf1, buf2, buf1, 1966080, XBLOCK=512, num_warps=8, num_stages=1)
+    return buf2, arg0_1, buf1
+
+
+class ModelNew(nn.Module):
+    """
+    Model that performs a convolution, subtracts a value, applies HardSwish, MaxPool, and Mish activation functions.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, subtract_value,
+        pool_kernel_size):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.subtract_value = subtract_value
+        self.pool = nn.MaxPool2d(pool_kernel_size)
+
+    def forward(self, input_0):
+        arg1_1 = self.conv.weight
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
+        return output[0]

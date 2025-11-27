@@ -1,84 +1,107 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
+def triton_poi_fused_convolution_relu_0(in_out_ptr0, in_ptr0, xnumel,
     XBLOCK: tl.constexpr):
-    xnumel = 134217728
+    xnumel = 16384
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 16777216 % 6
-    x0 = xindex % 16777216
-    x2 = xindex // 6
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    x1 = xindex // 16384 % 6
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
     tmp3 = tl.full([1], 0, tl.int32)
     tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tl.store(out_ptr0 + (x0 + 16777216 * x2), tmp4, xmask)
+    tl.store(in_out_ptr0 + x3, tmp4, xmask)
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_1(in_ptr0, in_ptr1, in_ptr2, out_ptr0,
-    xnumel, XBLOCK: tl.constexpr):
-    xnumel = 536870912
+def triton_poi_fused_cat_1(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 128
+    x1 = xindex // 128
+    x2 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 64, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (64 * x1 + x0), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tl.load(in_ptr1 + (64 * x1 + x0), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tl.full(tmp7.shape, 0.0, tmp7.dtype)
+    tmp9 = tl.where(tmp4, tmp7, tmp8)
+    tmp10 = tmp0 >= tmp3
+    tl.full([1], 128, tl.int64)
+    tmp13 = tl.load(in_ptr0 + (192 * x1 + (-64 + x0)), tmp10 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp14 = tl.load(in_ptr1 + (192 * x1 + (-64 + x0)), tmp10 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp15 = tmp13 + tmp14
+    tmp16 = tl.full(tmp15.shape, 0.0, tmp15.dtype)
+    tmp17 = tl.where(tmp10, tmp15, tmp16)
+    tmp18 = tl.where(tmp4, tmp9, tmp17)
+    tl.store(out_ptr0 + x2, tmp18, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_2(in_out_ptr0, in_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 16384
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 1073741824 % 64
-    x0 = xindex % 1073741824
-    x2 = xindex // 64
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
-    tmp3 = tl.load(in_ptr2 + x2, xmask, eviction_policy='evict_last')
+    x1 = xindex // 16384 % 6
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp4 = tmp2 + tmp3
-    tmp5 = tl.full([1], 0, tl.int32)
-    tmp6 = triton_helpers.maximum(tmp5, tmp4)
-    tl.store(out_ptr0 + (x0 + 1073741824 * x1), tmp6, xmask)
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(in_out_ptr0 + x3, tmp4, xmask)
 
 
 def call(args):
-    primals_1, primals_2, primals_3, primals_4, primals_5 = args
+    arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(primals_1, (6, 3, 1, 1), (3, 1, 1, 1))
-    assert_size_stride(primals_2, (6,), (1,))
-    assert_size_stride(primals_3, (64, 6, 1, 1), (6, 1, 1, 1))
-    assert_size_stride(primals_4, (64,), (1,))
-    assert_size_stride(primals_5, (64, 6, 3, 3), (54, 9, 3, 1))
-    assert_size_stride(primals_2, (6,), (1,))
+    assert_size_stride(arg0_1, (128, 3, 256, 256), (196608, 65536, 256, 1))
+    assert_size_stride(arg1_1, (6, 3, 1, 1), (3, 1, 1, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((128, 6, 256, 256), (393216, 65536, 16, 1),
-            torch.float32)
+        buf0 = empty_strided_cuda((128, 6, 256, 256), (393216, 65536, 256, 1
+            ), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_convolution_relu_0[grid(134217728)](primals_1,
-            primals_2, buf0, 134217728, XBLOCK=512, num_warps=4, num_stages=1)
-        del primals_2
-        buf1 = empty_strided_cuda((128, 64, 256, 256), (4194304, 65536, 16, 1
-            ), torch.float32)
-        triton_poi_fused_convolution_relu_1[grid(536870912)](buf0,
-            primals_3, primals_4, buf1, 536870912, XBLOCK=512, num_warps=8,
-            num_stages=1)
-        del primals_4
-        buf2 = empty_strided_cuda((128, 64, 256, 256), (4194304, 65536, 16, 1
-            ), torch.float32)
-        triton_poi_fused_convolution_relu_1[grid(536870912)](buf0,
-            primals_5, primals_2, buf2, 536870912, XBLOCK=512, num_warps=8,
-            num_stages=1)
-        del primals_5
-        del primals_2
-    return buf2, primals_1, primals_3, primals_5, buf0, buf1
+        triton_poi_fused_convolution_relu_0[grid(16384)](buf0, arg1_1, 16384,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del arg1_1
+        buf1 = empty_strided_cuda((128, 64, 256, 256), (4194304, 65536, 256,
+            1), torch.float32)
+        triton_poi_fused_convolution_relu_2[grid(16384)](buf1, arg0_1, 16384,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del arg0_1
+        buf2 = empty_strided_cuda((128, 128, 256, 256), (524288, 4096, 1, 1),
+            torch.float32)
+        triton_poi_fused_cat_1[grid(2097152)](buf1, buf0, buf2, 2097152,
+            XBLOCK=2048, num_warps=16, num_stages=1)
+        del buf0
+        del buf1
+    return buf2,
 
 
 class ModelNew(nn.Module):
@@ -101,12 +124,8 @@ class ModelNew(nn.Module):
         self.expand3x3_activation = nn.ReLU(inplace=True)
     
     def forward(self, input_0):
-        primals_1 = self.squeeze.weight
-        primals_2 = self.squeeze.bias
-        primals_3 = self.expand1x1.weight
-        primals_4 = self.expand1x1.bias
-        primals_5 = self.expand3x3.weight
-        primals_6 = self.expand3x3.bias
-        primals_7 = input_0
-        output = call([primals_1, primals_2, primals_3, primals_4, primals_5])
+        arg1_1 = self.squeeze.weight
+        arg1_1 = arg1_1
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
         return output[0]

@@ -66,7 +66,7 @@ def append_result_to_csv(csv_path, problem_name, level, result=None, error=None)
 def get_matching_files_for_level(level):
     """Get all matching files between KernelBench and generated code for a specific level"""
     kernelbench_dir = f"KernelBench/{level}"
-    generated_dir = f"output/zeroshot/qwen3_4b_base/{level}"
+    generated_dir = f"output/zeroshot/qwen3_4b_finetuned/{level}"
     
     if not os.path.exists(kernelbench_dir):
         print(f"Warning: KernelBench directory not found: {kernelbench_dir}")
@@ -188,7 +188,7 @@ except Exception as e:
 
 def run_benchmark():
     """Run benchmarks for all levels and save results to CSV"""
-    csv_path = 'results/zeroshot_qwen3_4b_base.csv'
+    csv_path = 'results/zeroshot_qwen3_4b_finetuned.csv'
     
     # Initialize CSV
     initialize_csv(csv_path)

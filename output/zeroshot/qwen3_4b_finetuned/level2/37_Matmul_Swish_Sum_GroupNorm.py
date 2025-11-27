@@ -1,68 +1,553 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_add_bias_mul_sigmoid_0(in_out_ptr0, in_ptr0, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 134217728
+def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 4194304
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x0, tmp2, xmask)
+
+
+@triton.jit
+def triton_poi_fused__softmax_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 4194304
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x2 = xindex
-    x0 = xindex % 4096
-    tmp0 = tl.load(in_out_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    x1 = xindex // 4096
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr0 + (x1 + 4096 * 64), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tl.load(in_ptr0 + (4096 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp4 = tl.load(in_ptr0 + (8192 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp6 = tl.load(in_ptr0 + (12288 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp3 = tmp1 + tmp2
+    tmp5 = tmp3 + tmp4
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp0 - tmp7
+    tmp9 = tl.sigmoid(tmp8)
+    tmp10 = tmp9 * tmp0
+    tl.store(out_ptr0 + x2, tmp10, xmask)
+
+
+@triton.jit
+def triton_poi_fused__softmax_2(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 4194304
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x1 = xindex // 4096
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr0 + (x1 + 4096 * 64), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tl.load(in_ptr0 + (4096 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp4 = tl.load(in_ptr0 + (8192 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp6 = tl.load(in_ptr0 + (12288 + x1 + 4096 * 64), xmask, eviction_policy
+        ='evict_last')
+    tmp3 = tmp1 + tmp2
+    tmp5 = tmp3 + tmp4
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp0 / tmp7
+    tl.store(out_ptr0 + x2, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_div_mean_sigmoid_3(in_out_ptr0, in_ptr0, in_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 4194304
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x1 = xindex // 4096
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (x2 + 4194304), xmask)
+    tmp4 = tl.load(in_ptr1 + (x1 + 64), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr0 + (4194304 + x2), xmask)
+    tmp7 = tl.load(in_ptr1 + (64 + x1), xmask, eviction_policy='evict_last')
+    tmp9 = tl.load(in_ptr0 + (8388608 + x2), xmask)
+    tmp10 = tl.load(in_ptr1 + (128 + x1), xmask, eviction_policy='evict_last')
+    tmp12 = tl.load(in_ptr0 + (12582912 + x2), xmask)
+    tmp13 = tl.load(in_ptr1 + (192 + x1), xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp3 = tl.sigmoid(tmp2)
-    tmp4 = tmp3 * tmp2
-    tl.store(in_out_ptr0 + x2, tmp4, xmask)
-
-
-def call(args):
-    primals_1, primals_2, primals_3, primals_4 = args
-    args.clear()
-    assert_size_stride(primals_1, (4096, 1024), (1024, 1))
-    assert_size_stride(primals_2, (4096,), (1,))
-    assert_size_stride(primals_3, (32768, 1024), (1024, 1))
-    assert_size_stride(primals_4, (4096,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((32768, 4096), (4096, 1), torch.float32)
-        extern_kernels.addmm(primals_2, primals_3, primals_1, alpha=1,
-            beta=1, out=buf0)
-        del primals_2
-        del primals_1
-        del primals_3
-        buf1 = buf0
-        get_raw_stream(0)
-        triton_poi_fused_add_bias_mul_sigmoid_0[grid(134217728)](buf1,
-            primals_4, 134217728, XBLOCK=512, num_warps=4, num_stages=1)
-        del primals_4
-    return buf1,
-
-
-class ModelNew(nn.Module):
-    """
-    A model that performs a matrix multiplication, applies Swish activation, sums with a bias term, and normalizes with GroupNorm.
-    """
-    def __init__(self, in_features, out_features, num_groups, bias_shape):
-        super(ModelNew, self).__init__()
-        self.matmul = nn.Linear(in_features, out_features)
-        self.bias = nn.Parameter(torch.randn(bias_shape))
-        self.group_norm = nn.GroupNorm(num_groups, out_features)
-
-    def forward(self, input_0):
-        primals_1 = self.matmul.weight
-        primals_2 = self.matmul.bias
-        primals_4 = self.bias
-        primals_3 = input_0
-        output = call([primals_1, primals_2, primals_3, primals_4])
-        return output[0]
+    tmp5 = tmp3 + tmp4
+    tmp8 = tmp6 + tmp7
+    tmp11 = tmp9 + tmp10
+    tmp14 = tmp12 + tmp13
+    tmp15 = tmp2 + tmp5
+    tmp16 = tmp15 + tmp8
+    tmp17 = tmp16 + tmp11
+    tmp18 = tmp17 + tmp14
+    tmp19 = 1.0
+    tmp20 = tmp19 / tmp18
+    tmp21 = tmp19 - tmp20
+    tmp22 = tmp0 * tmp21
+    tmp23 = tmp22 * tmp20
+    tmp24 = tmp3 * tmp21
+    tmp25 = tmp24 * tmp20
+    tmp26 = tmp23 + tmp25
+    tmp27 = tmp6 * tmp21
+    tmp28 = tmp27 * tmp20
+    tmp29 = tmp26 + tmp28
+    tmp30 = tmp9 * tmp21
+    tmp31 = tmp30 * tmp20
+    tmp32 = tmp29 + tmp31
+    tmp33 = tmp12 * tmp21
+    tmp34 = tmp33 * tmp20
+    tmp35 = tmp32 + tmp34
+    tmp36 = tmp23 + tmp24
+    tmp37 = tmp36 + tmp27
+    tmp38 = tmp37 + tmp30
+    tmp39 = tmp38 + tmp33
+    tmp40 = tmp25 + tmp28
+    tmp41 = tmp40 + tmp31
+    tmp42 = tmp41 + tmp34
+    tmp43 = tmp39 - tmp42
+    tmp44 = 1e-06
+    tmp45 = tmp43 + tmp44
+    tmp46 = 1.0
+    tmp47 = tmp46 / tmp45
+    tmp48 = tmp46 - tmp47
+    tmp49 = tmp22 * tmp48
+    tmp50 = tmp49 * tmp47
+    tmp51 = tmp25 * tmp48
+    tmp52 = tmp51 * tmp47
+    tmp53 = tmp50 + tmp52
+    tmp54 = tmp27 * tmp48
+    tmp55 = tmp54 * tmp47
+    tmp56 = tmp53 + tmp55
+    tmp57 = tmp30 * tmp48
+    tmp58 = tmp57 * tmp47
+    tmp59 = tmp56 + tmp58
+    tmp60 = tmp33 * tmp48
+    tmp61 = tmp60 * tmp47
+    tmp62 = tmp59 + tmp61
+    tmp63 = tmp53 + tmp54
+    tmp64 = tmp63 + tmp57
+    tmp65 = tmp64 + tmp60
+    tmp66 = tmp56 - tmp65
+    tmp67 = tmp66 * tmp47
+    tmp68 = tmp67 * tmp45
+    tmp69 = tmp59 + tmp62
+    tmp70 = tmp69 - tmp68
+    tmp71 = tmp69 / tmp68
+    tmp72 = tmp70 - tmp71
+    tmp73 = tmp62 / tmp68
+    tmp74 = tmp73 - tmp72
+    tmp75 = tmp67 * tmp74
+    tmp76 = tmp75 * tmp45
+    tmp77 = tmp69 + tmp76
+    tmp78 = tmp77 / tmp68
+    tmp79 = tmp78 - tmp71
+    tmp80 = tmp77 / tmp67
+    tmp81 = tmp80 - tmp72
+    tmp82 = tmp75 * tmp81
+    tmp83 = tmp82 * tmp45
+    tmp84 = tmp77 + tmp83
+    tmp85 = tmp84 / tmp67
+    tmp86 = tmp85 - tmp72
+    tmp87 = tmp85 / tmp73
+    tmp88 = tmp87 - tmp71
+    tmp89 = tmp83 * tmp88
+    tmp90 = tmp89 * tmp45
+    tmp91 = tmp84 + tmp90
+    tmp92 = tmp91 / tmp73
+    tmp93 = tmp92 - tmp71
+    tmp94 = tmp92 / tmp75
+    tmp95 = tmp94 - tmp72
+    tmp96 = tmp89 * tmp95
+    tmp97 = tmp96 * tmp45
+    tmp98 = tmp91 + tmp97
+    tmp99 = tmp98 / tmp75
+    tmp100 = tmp99 - tmp72
+    tmp101 = tmp99 / tmp88
+    tmp102 = tmp101 - tmp71
+    tmp103 = tmp97 * tmp102
+    tmp104 = tmp103 * tmp45
+    tmp105 = tmp98 + tmp104
+    tmp106 = tmp105 / tmp88
+    tmp107 = tmp106 - tmp71
+    tmp108 = tmp106 / tmp95
+    tmp109 = tmp109 - tmp72
+    tmp110 = tmp104 * tmp109
+    tmp111 = tmp110 * tmp45
+    tmp112 = tmp105 + tmp111
+    tmp113 = tmp112 / tmp95
+    tmp114 = tmp113 - tmp72
+    tmp115 = tmp113 / tmp102
+    tmp116 = tmp116 - tmp71
+    tmp117 = tmp111 * tmp116
+    tmp118 = tmp117 * tmp45
+    tmp119 = tmp112 + tmp118
+    tmp120 = tmp119 / tmp102
+    tmp121 = tmp120 - tmp71
+    tmp122 = tmp120 / tmp115
+    tmp123 = tmp123 - tmp72
+    tmp124 = tmp118 * tmp123
+    tmp125 = tmp124 * tmp45
+    tmp126 = tmp119 + tmp125
+    tmp127 = tmp126 / tmp115
+    tmp128 = tmp127 - tmp72
+    tmp129 = tmp127 / tmp123
+    tmp130 = tmp129 - tmp71
+    tmp131 = tmp125 * tmp130
+    tmp132 = tmp131 * tmp45
+    tmp133 = tmp126 + tmp132
+    tmp134 = tmp133 / tmp123
+    tmp135 = tmp134 - tmp72
+    tmp136 = tmp134 / tmp129
+    tmp137 = tmp137 - tmp71
+    tmp138 = tmp132 * tmp137
+    tmp139 = tmp138 * tmp45
+    tmp140 = tmp133 + tmp139
+    tmp141 = tmp140 / tmp129
+    tmp142 = tmp141 - tmp72
+    tmp143 = tmp141 / tmp137
+    tmp144 = tmp144 - tmp71
+    tmp145 = tmp139 * tmp144
+    tmp146 = tmp145 * tmp45
+    tmp147 = tmp140 + tmp146
+    tmp148 = tmp147 / tmp137
+    tmp149 = tmp148 - tmp72
+    tmp150 = tmp148 / tmp144
+    tmp151 = tmp151 - tmp71
+    tmp152 = tmp146 * tmp151
+    tmp153 = tmp152 * tmp45
+    tmp154 = tmp147 + tmp153
+    tmp155 = tmp154 / tmp144
+    tmp156 = tmp155 - tmp72
+    tmp157 = tmp155 / tmp151
+    tmp158 = tmp158 - tmp71
+    tmp159 = tmp153 * tmp158
+    tmp160 = tmp159 * tmp45
+    tmp161 = tmp154 + tmp160
+    tmp162 = tmp161 / tmp151
+    tmp163 = tmp162 - tmp72
+    tmp164 = tmp162 / tmp158
+    tmp165 = tmp165 - tmp71
+    tmp166 = tmp160 * tmp165
+    tmp167 = tmp166 * tmp45
+    tmp168 = tmp161 + tmp167
+    tmp169 = tmp168 / tmp158
+    tmp170 = tmp169 - tmp72
+    tmp171 = tmp169 / tmp165
+    tmp172 = tmp172 - tmp71
+    tmp173 = tmp167 * tmp172
+    tmp174 = tmp173 * tmp45
+    tmp175 = tmp168 + tmp174
+    tmp176 = tmp175 / tmp165
+    tmp177 = tmp176 - tmp72
+    tmp178 = tmp176 / tmp172
+    tmp179 = tmp179 - tmp71
+    tmp180 = tmp174 * tmp179
+    tmp181 = tmp180 * tmp45
+    tmp182 = tmp175 + tmp181
+    tmp183 = tmp182 / tmp172
+    tmp184 = tmp183 - tmp72
+    tmp185 = tmp183 / tmp179
+    tmp186 = tmp186 - tmp71
+    tmp187 = tmp181 * tmp186
+    tmp188 = tmp187 * tmp45
+    tmp189 = tmp182 + tmp188
+    tmp190 = tmp189 / tmp179
+    tmp191 = tmp190 - tmp72
+    tmp192 = tmp190 / tmp186
+    tmp193 = tmp193 - tmp71
+    tmp194 = tmp188 * tmp193
+    tmp195 = tmp194 * tmp45
+    tmp196 = tmp189 + tmp195
+    tmp197 = tmp196 / tmp193
+    tmp198 = tmp197 - tmp72
+    tmp199 = tmp197 / tmp194
+    tmp200 = tmp200 - tmp71
+    tmp201 = tmp195 * tmp200
+    tmp202 = tmp201 * tmp45
+    tmp203 = tmp196 + tmp202
+    tmp204 = tmp203 / tmp200
+    tmp205 = tmp204 - tmp72
+    tmp206 = tmp204 / tmp201
+    tmp207 = tmp207 - tmp71
+    tmp208 = tmp202 * tmp207
+    tmp209 = tmp208 * tmp45
+    tmp210 = tmp203 + tmp209
+    tmp211 = tmp210 / tmp207
+    tmp212 = tmp211 - tmp72
+    tmp213 = tmp211 / tmp208
+    tmp214 = tmp214 - tmp71
+    tmp215 = tmp209 * tmp214
+    tmp216 = tmp215 * tmp45
+    tmp217 = tmp210 + tmp216
+    tmp218 = tmp217 / tmp214
+    tmp219 = tmp219 - tmp72
+    tmp220 = tmp219 / tmp215
+    tmp221 = tmp221 - tmp71
+    tmp222 = tmp216 * tmp221
+    tmp223 = tmp222 * tmp45
+    tmp224 = tmp217 + tmp223
+    tmp225 = tmp224 / tmp221
+    tmp226 = tmp225 - tmp72
+    tmp227 = tmp225 / tmp222
+    tmp228 = tmp228 - tmp71
+    tmp229 = tmp223 * tmp228
+    tmp230 = tmp229 * tmp45
+    tmp231 = tmp224 + tmp230
+    tmp232 = tmp231 / tmp228
+    tmp233 = tmp232 - tmp72
+    tmp234 = tmp232 / tmp229
+    tmp235 = tmp235 - tmp71
+    tmp236 = tmp230 * tmp235
+    tmp237 = tmp236 * tmp45
+    tmp238 = tmp231 + tmp237
+    tmp239 = tmp238 / tmp235
+    tmp240 = tmp240 - tmp72
+    tmp241 = tmp240 / tmp236
+    tmp242 = tmp242 - tmp71
+    tmp243 = tmp237 * tmp242
+    tmp244 = tmp243 * tmp45
+    tmp245 = tmp238 + tmp244
+    tmp246 = tmp245 / tmp242
+    tmp247 = tmp246 - tmp72
+    tmp248 = tmp246 / tmp243
+    tmp249 = tmp249 - tmp71
+    tmp250 = tmp244 * tmp249
+    tmp251 = tmp250 * tmp45
+    tmp252 = tmp245 + tmp251
+    tmp253 = tmp252 / tmp249
+    tmp254 = tmp253 - tmp72
+    tmp255 = tmp253 / tmp250
+    tmp256 = tmp256 - tmp71
+    tmp257 = tmp251 * tmp256
+    tmp258 = tmp257 * tmp45
+    tmp259 = tmp252 + tmp258
+    tmp260 = tmp259 / tmp256
+    tmp261 = tmp260 - tmp72
+    tmp262 = tmp260 / tmp257
+    tmp263 = tmp263 - tmp71
+    tmp264 = tmp258 * tmp263
+    tmp265 = tmp264 * tmp45
+    tmp266 = tmp259 + tmp265
+    tmp267 = tmp266 / tmp263
+    tmp268 = tmp267 - tmp72
+    tmp269 = tmp267 / tmp264
+    tmp270 = tmp270 - tmp71
+    tmp271 = tmp265 * tmp270
+    tmp272 = tmp271 * tmp45
+    tmp273 = tmp266 + tmp272
+    tmp274 = tmp273 / tmp270
+    tmp275 = tmp274 - tmp72
+    tmp276 = tmp274 / tmp271
+    tmp277 = tmp277 - tmp71
+    tmp278 = tmp272 * tmp277
+    tmp279 = tmp278 * tmp45
+    tmp280 = tmp273 + tmp279
+    tmp281 = tmp280 / tmp277
+    tmp282 = tmp281 - tmp72
+    tmp283 = tmp281 / tmp278
+    tmp284 = tmp284 - tmp71
+    tmp285 = tmp279 * tmp284
+    tmp286 = tmp285 * tmp45
+    tmp287 = tmp280 + tmp286
+    tmp288 = tmp287 / tmp284
+    tmp289 = tmp289 - tmp72
+    tmp290 = tmp289 / tmp285
+    tmp291 = tmp291 - tmp71
+    tmp292 = tmp286 * tmp291
+    tmp293 = tmp292 * tmp45
+    tmp294 = tmp287 + tmp293
+    tmp295 = tmp294 / tmp291
+    tmp296 = tmp295 - tmp72
+    tmp297 = tmp295 / tmp292
+    tmp298 = tmp298 - tmp71
+    tmp299 = tmp293 * tmp298
+    tmp300 = tmp299 * tmp45
+    tmp301 = tmp294 + tmp300
+    tmp302 = tmp301 / tmp298
+    tmp303 = tmp302 - tmp72
+    tmp304 = tmp302 / tmp299
+    tmp305 = tmp305 - tmp71
+    tmp306 = tmp300 * tmp305
+    tmp307 = tmp306 * tmp45
+    tmp308 = tmp301 + tmp307
+    tmp309 = tmp308 / tmp305
+    tmp310 = tmp309 - tmp72
+    tmp311 = tmp309 / tmp306
+    tmp312 = tmp312 - tmp71
+    tmp313 = tmp307 * tmp312
+    tmp314 = tmp313 * tmp45
+    tmp315 = tmp308 + tmp314
+    tmp316 = tmp315 / tmp312
+    tmp317 = tmp316 - tmp72
+    tmp318 = tmp316 / tmp313
+    tmp319 = tmp319 - tmp71
+    tmp320 = tmp314 * tmp319
+    tmp321 = tmp320 * tmp45
+    tmp322 = tmp315 + tmp321
+    tmp323 = tmp322 / tmp319
+    tmp324 = tmp324 - tmp72
+    tmp325 = tmp324 / tmp320
+    tmp326 = tmp326 - tmp71
+    tmp327 = tmp321 * tmp326
+    tmp328 = tmp327 * tmp45
+    tmp329 = tmp322 + tmp328
+    tmp330 = tmp329 / tmp326
+    tmp331 = tmp330 - tmp72
+    tmp332 = tmp330 / tmp327
+    tmp333 = tmp333 - tmp71
+    tmp334 = tmp328 * tmp333
+    tmp335 = tmp334 * tmp45
+    tmp336 = tmp329 + tmp335
+    tmp337 = tmp336 / tmp333
+    tmp338 = tmp337 - tmp72
+    tmp339 = tmp337 / tmp334
+    tmp340 = tmp340 - tmp71
+    tmp341 = tmp335 * tmp340
+    tmp342 = tmp341 * tmp45
+    tmp343 = tmp336 + tmp342
+    tmp344 = tmp343 / tmp340
+    tmp345 = tmp344 - tmp72
+    tmp346 = tmp344 / tmp341
+    tmp347 = tmp347 - tmp71
+    tmp348 = tmp342 * tmp347
+    tmp349 = tmp348 * tmp45
+    tmp350 = tmp343 + tmp349
+    tmp351 = tmp350 / tmp347
+    tmp352 = tmp351 - tmp72
+    tmp353 = tmp351 / tmp348
+    tmp354 = tmp354 - tmp71
+    tmp355 = tmp349 * tmp354
+    tmp356 = tmp355 * tmp45
+    tmp357 = tmp350 + tmp356
+    tmp358 = tmp357 / tmp354
+    tmp359 = tmp359 - tmp72
+    tmp360 = tmp359 / tmp355
+    tmp361 = tmp361 - tmp71
+    tmp362 = tmp356 * tmp361
+    tmp363 = tmp362 * tmp45
+    tmp364 = tmp357 + tmp363
+    tmp365 = tmp364 / tmp361
+    tmp366 = tmp365 - tmp72
+    tmp367 = tmp365 / tmp362
+    tmp368 = tmp368 - tmp71
+    tmp369 = tmp363 * tmp368
+    tmp370 = tmp369 * tmp45
+    tmp371 = tmp364 + tmp370
+    tmp372 = tmp371 / tmp368
+    tmp373 = tmp372 - tmp72
+    tmp374 = tmp372 / tmp369
+    tmp375 = tmp375 - tmp71
+    tmp376 = tmp370 * tmp375
+    tmp377 = tmp376 * tmp45
+    tmp378 = tmp371 + tmp377
+    tmp379 = tmp378 / tmp375
+    tmp380 = tmp379 - tmp72
+    tmp381 = tmp379 / tmp376
+    tmp382 = tmp382 - tmp71
+    tmp383 = tmp377 * tmp382
+    tmp384 = tmp383 * tmp45
+    tmp385 = tmp378 + tmp384
+    tmp386 = tmp385 / tmp382
+    tmp387 = tmp386 - tmp72
+    tmp388 = tmp386 / tmp383
+    tmp389 = tmp389 - tmp71
+    tmp390 = tmp384 * tmp389
+    tmp391 = tmp390 * tmp45
+    tmp392 = tmp385 + tmp391
+    tmp393 = tmp392 / tmp389
+    tmp394 = tmp393 - tmp72
+    tmp395 = tmp393 / tmp390
+    tmp396 = tmp396 - tmp71
+    tmp397 = tmp391 * tmp396
+    tmp398 = tmp397 * tmp45
+    tmp399 = tmp392 + tmp398
+    tmp400 = tmp399 / tmp396
+    tmp401 = tmp400 - tmp72
+    tmp402 = tmp400 / tmp397
+    tmp403 = tmp403 - tmp71
+    tmp404 = tmp398 * tmp403
+    tmp405 = tmp404 * tmp45
+    tmp406 = tmp399 + tmp405
+    tmp407 = tmp406 / tmp403
+    tmp408 = tmp407 - tmp72
+    tmp409 = tmp407 / tmp404
+    tmp410 = tmp410 - tmp71
+    tmp411 = tmp405 * tmp410
+    tmp412 = tmp411 * tmp45
+    tmp413 = tmp406 + tmp412
+    tmp414 = tmp413 / tmp410
+    tmp415 = tmp414 - tmp72
+    tmp416 = tmp414 / tmp411
+    tmp417 = tmp417 - tmp71
+    tmp418 = tmp412 * tmp417
+    tmp419 = tmp418 * tmp45
+    tmp420 = tmp413 + tmp419
+    tmp421 = tmp420 / tmp417
+    tmp422 = tmp421 - tmp72
+    tmp423 = tmp421 / tmp418
+    tmp424 = tmp424 - tmp71
+    tmp425 = tmp419 * tmp424
+    tmp426 = tmp425 * tmp45
+    tmp427 = tmp420 + tmp426
+    tmp428 = tmp427 / tmp424
+    tmp429 = tmp428 - tmp72
+    tmp430 = tmp428 / tmp425
+    tmp431 = tmp431 - tmp71
+    tmp432 = tmp426 * tmp431
+    tmp433 = tmp432 * tmp45
+    tmp434 = tmp427 + tmp433
+    tmp435 = tmp434 / tmp431
+    tmp436 = tmp435 - tmp72
+    tmp437 = tmp435 / tmp432
+    tmp438 = tmp438 - tmp71
+    tmp439 = tmp433 * tmp438
+    tmp440 = tmp439 * tmp45
+    tmp441 = tmp434 + tmp440
+    tmp442 = tmp441 / tmp438
+    tmp443 = tmp442 - tmp72
+    tmp444 = tmp442 / tmp439
+    tmp445 = tmp445 - tmp71
+    tmp446 = tmp440 * tmp445
+    tmp447 = tmp446 * tmp45
+    tmp448 = tmp441 + tmp447
+    tmp449 = tmp448 / tmp445
+    tmp450 = tmp449 - tmp72
+    tmp451 = tmp449 / tmp446
+    tmp452 = tmp452 - tmp71
+    tmp453 = tmp447 * tmp452
+    tmp454 = tmp453 * tmp45
+    tmp455 = tmp448 + tmp454
+    tmp456 = tmp455 / tmp452
+    tmp457 = tmp456 - tmp72
+    tmp458 = tmp456 / tmp453
+    tmp459 = tmp459 - tmp71
+    tmp460 = tmp454 * tmp459
+    tmp461 = tmp460 * tmp45
+    tmp462 = tmp455 + tmp461
+    tmp463 = tmp462 / tmp459
+    tmp464 = tmp463 - tmp72
+    tmp465 = tmp463 / tmp460
+    tmp466 = tmp466 - tmp71

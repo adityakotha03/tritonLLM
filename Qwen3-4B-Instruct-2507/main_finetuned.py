@@ -11,6 +11,7 @@ import tinker
 from tinker_cookbook import model_info, renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from src.utils.common import read_file, clean_markdown_code_qwen
+from src.prompts import construct_prompt_zero_shot
 
 dotenv.load_dotenv()
 
@@ -56,6 +57,7 @@ def construct_messages(ref_arch_src: str):
     Construct messages in the format expected by the fine-tuned model.
     Uses the same format as in the training data (load_dataset.ipynb).
     """
+    prompt = construct_prompt_zero_shot(gpu_name="A100-80GB", ref_arch_src=ref_arch_src)
     messages = [
         {
             'role': 'system',
@@ -63,7 +65,7 @@ def construct_messages(ref_arch_src: str):
         },
         {
             'role': 'user',
-            'content': f'Convert the following PyTorch code to Triton:\n\n```python\n{ref_arch_src}\n```'
+            'content': prompt
         }
     ]
     

@@ -1,50 +1,57 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_sigmoid_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 4194304
+def triton_poi_fused_sigmoid_0(in_out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 16777216
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_out_ptr0 + x0, xmask)
+    tmp1 = 1.0
+    tmp2 = tmp1 - tmp0
+    tmp3 = tl.sigmoid(tmp2)
+    tmp4 = tmp0 * tmp3
+    tl.store(in_out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_mul_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 16777216
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
     tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tl.sigmoid(tmp0)
+    tmp1 = 2.0
     tmp2 = tmp0 * tmp1
     tl.store(out_ptr0 + x0, tmp2, xmask)
 
 
 def call(args):
-    primals_1, primals_2, primals_3 = args
+    arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(primals_1, (32768, 32768), (32768, 1))
-    assert_size_stride(primals_2, (32768,), (1,))
-    assert_size_stride(primals_3, (128, 32768), (32768, 1))
+    assert_size_stride(arg0_1, (128, 32768), (32768, 1))
+    assert_size_stride(arg1_1, (32768, 32768), (32768, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((128, 32768), (32768, 1), torch.float32)
-        extern_kernels.mm(reinterpret_tensor(primals_3, (128, 32768), (1, 
-            32768), 0), reinterpret_tensor(primals_1, (32768, 32768), (1, 
-            32768), 0), out=buf0)
-        del primals_1
-        buf1 = empty_strided_cuda((128, 32768), (32768, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_sigmoid_0[grid(4194304)](buf0, buf1, 4194304,
-            XBLOCK=256, num_warps=4, num_stages=1)
-        del buf0
-    return buf1, reinterpret_tensor(primals_3, (128, 32768), (1, 32768), 0
-        ), 2.0, buf1
+        triton_poi_fused_sigmoid_0[grid(16777216)](buf0, 16777216, XBLOCK=
+            1024, num_warps=4, num_stages=1)
+        buf1 = empty_strided_cuda((128, 32768), (32768, 1), torch.float32)
+        triton_poi_fused_mul_1[grid(16777216)](arg1_1, buf1, 16777216,
+            XBLOCK=1024, num_warps=4, num_stages=1)
+        del arg1_1
+    return buf0, buf1, arg0_1
 
 
 class ModelNew(nn.Module):
@@ -57,8 +64,7 @@ class ModelNew(nn.Module):
         self.scaling_factor = scaling_factor
 
     def forward(self, input_0):
-        primals_1 = self.matmul.weight
-        primals_2 = self.matmul.bias
-        primals_3 = input_0
-        output = call([primals_1, primals_2, primals_3])
+        arg1_1 = self.matmul.weight
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
         return output[0]

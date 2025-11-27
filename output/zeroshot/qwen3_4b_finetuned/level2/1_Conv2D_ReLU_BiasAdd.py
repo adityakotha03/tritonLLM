@@ -1,27 +1,24 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_0(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 262144
+def triton_poi_fused_relu_threshold_backward_0(in_out_ptr0, in_ptr0,
+    out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 2097152
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 4096 % 128
+    x0 = xindex % 128
+    x2 = xindex // 128
     tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
     tmp3 = tl.full([1], 0, tl.int32)
     tmp4 = triton_helpers.maximum(tmp3, tmp2)
@@ -31,30 +28,43 @@ def triton_poi_fused_convolution_relu_threshold_backward_0(in_out_ptr0,
     tl.store(out_ptr0 + x3, tmp6, xmask)
 
 
+@triton.jit
+def triton_poi_fused_convolution_1(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 1048576
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x1 = xindex // 16384 % 64
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
+
+
 def call(args):
     primals_1, primals_2, primals_3 = args
     args.clear()
     assert_size_stride(primals_1, (128, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_2, (128,), (1,))
-    assert_size_stride(primals_3, (128, 64, 128, 128), (8192, 128, 64, 1))
+    assert_size_stride(primals_2, (128, 64, 128, 128), (1048576, 16384, 128,
+        1))
+    assert_size_stride(primals_3, (128,), (1,))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = extern_kernels.convolution(reinterpret_tensor(primals_3, (128,
-            64, 128, 128), (8192, 128, 64, 1), 0), primals_1, stride=(1, 1),
-            padding=(1, 1), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf0, (128, 128, 128, 128), (2097152, 16384, 128,
-            1))
-        buf1 = empty_strided_cuda((128, 128, 128, 128), (2097152, 16384,
-            128, 1), torch.bool)
+        buf0 = empty_strided_cuda((128, 128, 128, 128), (2097152, 16384, 128,
+            1), torch.float32)
+        triton_poi_fused_convolution_1[1, 128](buf0, primals_1, 1048576,
+            XBLOCK=128, num_warps=4, num_stages=1)
         del primals_1
-        get_raw_stream(0)
-        triton_poi_fused_convolution_relu_threshold_backward_0[grid(262144)](
-            buf0, primals_2, buf1, 262144, XBLOCK=1024, num_warps=4,
-            num_stages=1)
-        del primals_2
-    return buf0, reinterpret_tensor(buf0, (128, 128, 128, 128), (2097152,
-        16384, 128, 1), 0), primals_3, buf1
+        buf1 = buf0
+        del buf0
+        buf2 = empty_strided_cuda((128, 128, 128, 128), (2097152, 16384, 128,
+            1), torch.float32)
+        triton_poi_fused_relu_threshold_backward_0[1, 128](buf1, primals_3,
+            buf2, 2097152, XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_3
+    return buf2, primals_2
 
 
 class ModelNew(nn.Module):
@@ -68,7 +78,7 @@ class ModelNew(nn.Module):
 
     def forward(self, input_0):
         primals_1 = self.conv.weight
-        primals_2 = self.conv.bias
-        primals_3 = input_0
+        primals_3 = self.bias
+        primals_2 = input_0
         output = call([primals_1, primals_2, primals_3])
         return output[0]

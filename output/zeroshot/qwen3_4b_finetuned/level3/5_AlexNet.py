@@ -1,264 +1,288 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused__unsafe_index_convolution_relu_threshold_backward_0(
-    in_out_ptr0, in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 12582912
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 144 % 96
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x3, tmp4, xmask)
-    tl.store(out_ptr0 + x3, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused__unsafe_index_max_pool2d_with_indices_1(in_ptr0, out_ptr0,
-    xnumel, XBLOCK: tl.constexpr):
-    xnumel = 1481760
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 112
-    x2 = xindex // 112 % 96
-    x3 = xindex // 11616
-    x4 = xindex // 10512 % 144
-    x5 = xindex // 140736
-    x1 = xindex // 10512
-    tmp0 = tl.load(in_ptr0 + (x0 + 576 * x1 + 152736 * x3 + 21576 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp1 = tl.load(in_ptr0 + (112 + x0 + 576 * x1 + 152736 * x3 + 21576 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp3 = tl.load(in_ptr0 + (224 + x0 + 576 * x1 + 152736 * x3 + 21576 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp6 = tl.load(in_ptr0 + (10512 + x0 + 576 * x1 + 152736 * x3 +
-        21576 * x4), xmask, eviction_policy='evict_last')
-    tmp11 = tl.load(in_ptr0 + (10512 + x0 + 576 * x1 + 152736 * x3 +
-        21576 * (x5 + 144)), xmask, eviction_policy='evict_last')
-    tmp2 = tmp1 > tmp0
-    tmp3 = tmp3 > tmp0
-    tmp4 = tmp2 | tmp3
-    tmp5 = tmp1 > tmp3
-    tmp7 = tmp6 > tmp0
-    tmp8 = tmp7 | tmp4
-    tmp9 = tmp6 > tmp3
-    tmp10 = tmp8 | tmp9
-    tmp12 = tmp11 > tmp0
-    tmp13 = tmp11 > tmp3
-    tmp14 = tmp12 | tmp13
-    tmp15 = tl.full([1], 1, tl.int8)
-    tmp16 = tl.full([1], 0, tl.int8)
-    tmp17 = tl.where(tmp10, tmp15, tmp16)
-    tl.store(out_ptr0 + (x2 + 96 * x0 + 144 * x1 + 10512 * x3), tmp17, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_2(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 12582912
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 224 % 256
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x3, tmp4, xmask)
-    tl.store(out_ptr0 + x3, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused__unsafe_index_max_pool2d_with_indices_3(in_ptr0,
-    out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 1450448
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 70
-    x2 = xindex // 70 % 256
-    x3 = xindex // 7776
-    x4 = xindex // 7168 % 144
-    x1 = xindex // 7168
-    tmp0 = tl.load(in_ptr0 + (x0 + 480 * x1 + 384 * x3 + 4032 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp1 = tl.load(in_ptr0 + (70 + x0 + 480 * x1 + 384 * x3 + 4032 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp3 = tl.load(in_ptr0 + (140 + x0 + 480 * x1 + 384 * x3 + 4032 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp6 = tl.load(in_ptr0 + (7168 + x0 + 480 * x1 + 384 * x3 + 4032 * x4),
-        xmask, eviction_policy='evict_last')
-    tmp11 = tl.load(in_ptr0 + (7168 + x0 + 480 * x1 + 384 * x3 +
-        4032 * (x4 + 144)), xmask, eviction_policy='evict_last')
-    tmp2 = tmp1 > tmp0
-    tmp3 = tmp3 > tmp0
-    tmp4 = tmp2 | tmp3
-    tmp5 = tmp1 > tmp3
-    tmp7 = tmp6 > tmp0
-    tmp8 = tmp7 | tmp4
-    tmp9 = tmp6 > tmp3
-    tmp10 = tmp8 | tmp9
-    tmp12 = tmp11 > tmp0
-    tmp13 = tmp11 > tmp3
-    tmp14 = tmp12 | tmp13
-    tmp15 = tl.full([1], 1, tl.int8)
-    tmp16 = tl.full([1], 0, tl.int8)
-    tmp17 = tl.where(tmp10, tmp15, tmp16)
-    tl.store(out_ptr0 + (x2 + 256 * x0 + 144 * x1), tmp17, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_4(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 28737888
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 70 % 384
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x3, tmp4, xmask)
-    tl.store(out_ptr0 + x3, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_5(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 57475776
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 49 % 384
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x3, tmp4, xmask)
-    tl.store(out_ptr0 + x3, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_6(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 11297664
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 36 % 256
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x3, tmp4, xmask)
-    tl.store(out_ptr0 + x3, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_7(in_ptr0, in_ptr1,
-    in_ptr2, in_ptr3, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_convolution_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
     xnumel = 1024
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + 0)
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK])
-    tmp3 = tl.load(in_ptr1 + 0)
-    tmp4 = tl.broadcast_to(tmp3, [XBLOCK])
-    tmp7 = tl.load(in_ptr2 + 0)
-    tmp8 = tl.broadcast_to(tmp7, [XBLOCK])
-    tmp11 = tl.load(in_ptr3 + 0)
-    tmp12 = tl.broadcast_to(tmp11, [XBLOCK])
-    tmp14 = tl_math.abs(tmp4)
-    tmp15 = triton_helpers.maximum(tmp14, tmp8)
-    tmp16 = triton_helpers.maximum(tmp15, tmp12)
-    tmp17 = tl_math.abs(tmp1)
-    tmp18 = triton_helpers.maximum(tmp17, tmp16)
-    tmp19 = tmp0 - tmp18
-    tmp20 = tl_math.abs(tmp19)
-    tmp21 = tmp20 * tmp20
-    tmp22 = tmp18 * tmp18
-    tmp23 = tmp21 / tmp22
-    tmp24 = tmp23 + tmp0
-    tmp25 = tmp24 > tmp1
-    tl.store(out_ptr0 + x0, tmp25, xmask)
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 96, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_8(in_ptr0, out_ptr0,
+def triton_poi_fused_max_pool2d_with_indices_1(in_ptr0, out_ptr0, out_ptr1,
     xnumel, XBLOCK: tl.constexpr):
-    xnumel = 4194304
+    xnumel = 1024
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 1024 % 1024
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tl.store(out_ptr0 + x3, tmp4, xmask)
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 4 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (2 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (3 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 > tmp1
+    tmp4 = tmp0 > tmp3
+    tmp6 = tmp0 > tmp5
+    tmp7 = tmp2 & tmp4
+    tmp8 = tmp7 & tmp6
+    tmp9 = tl.full([1], 1, tl.int8)
+    tmp10 = tl.full([1], 0, tl.int8)
+    tmp11 = tl.where(tmp8, tmp9, tmp10)
+    tmp12 = tmp1 > tmp0
+    tmp13 = tmp1 > tmp3
+    tmp15 = tmp1 > tmp5
+    tmp14 = tmp12 & tmp13
+    tmp16 = tmp14 & tmp15
+    tmp17 = tmp16 | tmp8
+    tmp18 = tl.full([1], 2, tl.int8)
+    tmp19 = tl.where(tmp17, tmp18, tmp11)
+    tmp20 = tmp3 > tmp0
+    tmp21 = tmp3 > tmp1
+    tmp23 = tmp3 > tmp5
+    tmp22 = tmp20 & tmp21
+    tmp24 = tmp22 & tmp23
+    tmp25 = tmp24 | tmp17
+    tmp26 = tl.full([1], 3, tl.int8)
+    tmp27 = tl.where(tmp25, tmp26, tmp19)
+    tmp28 = tmp5 > tmp0
+    tmp29 = tmp5 > tmp1
+    tmp31 = tmp5 > tmp3
+    tmp30 = tmp28 & tmp29
+    tmp32 = tmp30 & tmp31
+    tmp33 = tmp32 | tmp25
+    tmp34 = tl.full([1], 4, tl.int8)
+    tmp35 = tl.where(tmp33, tmp34, tmp27)
+    tl.store(out_ptr0 + x0, tmp19, xmask)
+    tl.store(out_ptr1 + x0, tmp35, xmask)
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_9(in_ptr0, out_ptr0,
-    xnumel, XBLOCK: tl.constexpr):
-    xnumel = 4194304
+def triton_poi_fused_convolution_relu_2(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 1024 % 1024
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tl.store(out_ptr0 + x3, tmp4, xmask)
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 256, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
 @triton.jit
-def triton_poi_fused_convolution_relu_threshold_backward_10(in_ptr0, out_ptr0,
+def triton_poi_fused_max_pool2d_with_indices_3(in_ptr0, out_ptr0, out_ptr1,
     xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 4 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (2 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (3 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 > tmp1
+    tmp4 = tmp0 > tmp3
+    tmp6 = tmp0 > tmp5
+    tmp7 = tmp2 & tmp4
+    tmp8 = tmp7 & tmp6
+    tmp9 = tl.full([1], 1, tl.int8)
+    tmp10 = tl.full([1], 0, tl.int8)
+    tmp11 = tl.where(tmp8, tmp9, tmp10)
+    tmp12 = tmp1 > tmp0
+    tmp13 = tmp1 > tmp3
+    tmp15 = tmp1 > tmp5
+    tmp14 = tmp12 & tmp13
+    tmp16 = tmp14 & tmp15
+    tmp17 = tmp16 | tmp8
+    tmp18 = tl.full([1], 2, tl.int8)
+    tmp19 = tl.where(tmp17, tmp18, tmp11)
+    tmp20 = tmp3 > tmp0
+    tmp21 = tmp3 > tmp1
+    tmp23 = tmp3 > tmp5
+    tmp22 = tmp20 & tmp21
+    tmp24 = tmp22 & tmp23
+    tmp25 = tmp24 | tmp17
+    tmp26 = tl.full([1], 3, tl.int8)
+    tmp27 = tl.where(tmp25, tmp26, tmp19)
+    tmp28 = tmp5 > tmp0
+    tmp29 = tmp5 > tmp1
+    tmp31 = tmp5 > tmp3
+    tmp30 = tmp28 & tmp29
+    tmp32 = tmp30 & tmp31
+    tmp33 = tmp32 | tmp25
+    tmp34 = tl.full([1], 4, tl.int8)
+    tmp35 = tl.where(tmp33, tmp34, tmp27)
+    tl.store(out_ptr0 + x0, tmp19, xmask)
+    tl.store(out_ptr1 + x0, tmp35, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_4(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 384, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_5(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 384, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_6(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 256, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_7(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 256, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_max_pool2d_with_indices_8(in_ptr0, out_ptr0, out_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 4 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (2 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (3 + 4 * x0), xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 > tmp1
+    tmp4 = tmp0 > tmp3
+    tmp6 = tmp0 > tmp5
+    tmp7 = tmp2 & tmp4
+    tmp8 = tmp7 & tmp6
+    tmp9 = tl.full([1], 1, tl.int8)
+    tmp10 = tl.full([1], 0, tl.int8)
+    tmp11 = tl.where(tmp8, tmp9, tmp10)
+    tmp12 = tmp1 > tmp0
+    tmp13 = tmp1 > tmp3
+    tmp15 = tmp1 > tmp5
+    tmp14 = tmp12 & tmp13
+    tmp16 = tmp14 & tmp15
+    tmp17 = tmp16 | tmp8
+    tmp18 = tl.full([1], 2, tl.int8)
+    tmp19 = tl.where(tmp17, tmp18, tmp11)
+    tmp20 = tmp3 > tmp0
+    tmp21 = tmp3 > tmp1
+    tmp23 = tmp3 > tmp5
+    tmp22 = tmp20 & tmp21
+    tmp24 = tmp22 & tmp23
+    tmp25 = tmp24 | tmp17
+    tmp26 = tl.full([1], 3, tl.int8)
+    tmp27 = tl.where(tmp25, tmp26, tmp19)
+    tmp28 = tmp5 > tmp0
+    tmp29 = tmp5 > tmp1
+    tmp31 = tmp5 > tmp3
+    tmp30 = tmp28 & tmp29
+    tmp32 = tmp30 & tmp31
+    tmp33 = tmp32 | tmp25
+    tmp34 = tl.full([1], 4, tl.int8)
+    tmp35 = tl.where(tmp33, tmp34, tmp27)
+    tl.store(out_ptr0 + x0, tmp19, xmask)
+    tl.store(out_ptr1 + x0, tmp35, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_9(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 4096
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 4096, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_10(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 4096
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 4096, tl.int32)
+    tmp4 = tmp2 < tmp3
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_11(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
     xnumel = 1000
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
@@ -266,9 +290,9 @@ def triton_poi_fused_convolution_relu_threshold_backward_10(in_ptr0, out_ptr0,
     x0 = xindex
     tmp0 = tl.load(in_ptr0 + x0, xmask)
     tmp1 = tl.full([1], 0, tl.int32)
-    tmp2 = triton_helpers.maximum(tmp1, tmp0)
-    tmp3 = 0.0
-    tmp4 = tmp2 <= tmp3
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 1000, tl.int32)
+    tmp4 = tmp2 < tmp3
     tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
@@ -277,187 +301,125 @@ def call(args):
         primals_7, primals_8, primals_9, primals_10, primals_11, primals_12,
         primals_13, primals_14, primals_15, primals_16, primals_17,
         primals_18, primals_19, primals_20, primals_21, primals_22,
-        primals_23) = args
-    args.clear()
-    assert_size_stride(primals_1, (96, 3, 11, 11), (363, 121, 11, 1))
-    assert_size_stride(primals_2, (96,), (1,))
-    assert_size_stride(primals_3, (1024, 3, 224, 224), (150528, 50176, 224,
-        1))
-    assert_size_stride(primals_4, (256, 96, 5, 5), (2400, 25, 5, 1))
-    assert_size_stride(primals_5, (256,), (1,))
-    assert_size_stride(primals_6, (384, 256, 3, 3), (2304, 9, 3, 1))
-    assert_size_stride(primals_7, (384,), (1,))
-    assert_size_stride(primals_8, (384, 384, 3, 3), (4161, 9, 3, 1))
-    assert_size_stride(primals_9, (384,), (1,))
-    assert_size_stride(primals_10, (256, 384, 3, 3), (3456, 9, 3, 1))
-    assert_size_stride(primals_11, (256,), (1,))
-    assert_size_stride(primals_12, (4096, 256, 6, 6), (9216, 36, 6, 1))
-    assert_size_stride(primals_13, (4096,), (1,))
-    assert_size_stride(primals_14, (4096, 4096, 1, 1), (16384, 1, 1, 1))
-    assert_size_stride(primals_15, (4096,), (1,))
-    assert_size_stride(primals_16, (1000, 4096, 1, 1), (4096, 1, 1, 1))
-    assert_size_stride(primals_17, (1000,), (1,))
-    assert_size_stride(primals_18, (96, 3, 11, 11), (363, 121, 11, 1))
-    assert_size_stride(primals_19, (96,), (1,))
-    assert_size_stride(primals_20, (256, 96, 5, 5), (2400, 25, 5, 1))
-    assert_size_stride(primals_21, (256,), (1,))
-    assert_size_stride(primals_22, (384, 256, 3, 3), (2304, 9, 3, 1))
-    assert_size_stride(primals_23, (384,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = extern_kernels.convolution(primals_3, primals_1, stride=(4,),
-            padding=(2, 2), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf0, (1024, 96, 56, 56), (271360, 2800, 56, 1))
-        buf1 = buf0
-        del buf0
-        buf2 = empty_strided_cuda((1024, 96, 56, 56), (271360, 2800, 56, 1),
-            torch.bool)
-        get_raw_stream(0)
-        triton_poi_fused__unsafe_index_convolution_relu_threshold_backward_0[
-            grid(12582912)](buf1, primals_2, buf2, 12582912, XBLOCK=512,
-            num_warps=8, num_stages=1)
-        del primals_2
-        buf3 = empty_strided_cuda((1024, 96, 56, 56), (271360, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused__unsafe_index_max_pool2d_with_indices_1[grid(1481760)](
-            buf1, buf3, 1481760, XBLOCK=1024, num_warps=4, num_stages=1)
-        buf4 = extern_kernels.convolution(reinterpret_tensor(buf1, (1024, 96,
-            56, 56), (271360, 2800, 56, 1), 0), primals_4, stride=(1, 1),
-            padding=(2, 2), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf4, (1024, 256, 56, 56), (73728, 2800, 56, 1))
-        buf5 = buf4
-        del buf4
-        buf6 = empty_strided_cuda((1024, 256, 56, 56), (73728, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_2[grid(12582912)](
-            buf5, primals_5, buf6, 12582912, XBLOCK=256, num_warps=4,
-            num_stages=1)
-        del primals_5
-        buf7 = empty_strided_cuda((1024, 256, 56, 56), (73728, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused__unsafe_index_max_pool2d_with_indices_3[grid(1450448)](
-            buf5, buf7, 1450448, XBLOCK=1024, num_warps=4, num_stages=1)
-        buf8 = extern_kernels.convolution(reinterpret_tensor(buf5, (1024, 256,
-            56, 56), (73728, 2800, 56, 1), 0), primals_6, stride=(1, 1),
-            padding=(1, 1), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf8, (1024, 384, 56, 56), (110592, 2800, 56, 1))
-        buf9 = buf8
-        del buf8
-        buf10 = empty_strided_cuda((1024, 384, 56, 56), (110592, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_4[grid(28737888)](
-            buf9, primals_7, buf10, 28737888, XBLOCK=256, num_warps=4,
-            num_stages=1)
-        del primals_7
-        buf11 = extern_kernels.convolution(buf9, primals_8, stride=(1, 1),
-            padding=(1, 1), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf11, (1024, 384, 56, 56), (110592, 2800, 56, 1))
-        buf12 = buf11
-        del buf11
-        buf13 = empty_strided_cuda((1024, 384, 56, 56), (110592, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_4[grid(28737888)](
-            buf12, primals_9, buf13, 28737888, XBLOCK=256, num_warps=4,
-            num_stages=1)
-        del primals_9
-        buf14 = extern_kernels.convolution(reinterpret_tensor(buf12, (1024,
-            384, 56, 56), (110592, 2800, 56, 1), 0), primals_10, stride=(1, 
-            1), padding=(1, 1), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf14, (1024, 256, 56, 56), (73728, 2800, 56, 1))
-        buf15 = buf14
-        del buf14
-        buf16 = empty_strided_cuda((1024, 256, 56, 56), (73728, 2800, 56, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_5[grid(57475776)](
-            buf15, primals_11, buf16, 57475776, XBLOCK=256, num_warps=16,
-            num_stages=1)
-        del primals_11
-        buf17 = extern_kernels.convolution(buf15, primals_12, stride=(2, 2),
-            padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf17, (1024, 256, 27, 27), (186624, 729, 27, 1))
-        buf18 = buf17
-        del buf17
-        buf19 = empty_strided_cuda((1024, 256, 27, 27), (186624, 729, 27, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_6[grid(11297664)](
-            buf18, primals_13, buf19, 11297664, XBLOCK=256, num_warps=16,
-            num_stages=1)
-        del primals_13
-        buf20 = empty_strided_cuda((1024, 256, 27, 27), (186624, 729, 27, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_7[grid(1024)](
-            primals_14, buf20, 1024, XBLOCK=128, num_warps=4, num_stages=1)
-        del primals_14
-        buf21 = extern_kernels.convolution(reinterpret_tensor(buf18, (1024,
-            256, 27, 27), (186624, 729, 27, 1), 0), primals_15, stride=(1, 1),
-            padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf21, (1024, 4096, 27, 27), (2434736, 9216, 27, 1
-            ))
-        buf22 = buf21
-        del buf21
-        buf23 = empty_strided_cuda((1024, 4096, 27, 27), (2434736, 9216, 27,
-            1), torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_8[grid(4194304)](
-            buf22, primals_16, buf23, 4194304, XBLOCK=512, num_warps=8,
-            num_stages=1)
-        del primals_16
-        buf24 = extern_kernels.convolution(reinterpret_tensor(buf22, (1024,
-            4096, 27, 27), (2434736, 9216, 27, 1), 0), primals_17, stride=(1,
-            1), padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf24, (1024, 4096, 27, 27), (2434736, 9216, 27, 1
-            ))
-        buf25 = buf24
-        del buf24
-        buf26 = empty_strided_cuda((1024, 4096, 27, 27), (2434736, 9216, 27,
-            1), torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_9[grid(4194304)](
-            buf25, primals_18, buf26, 4194304, XBLOCK=512, num_warps=8,
-            num_stages=1)
-        del primals_18
-        buf27 = empty_strided_cuda((1000, 1024), (1024, 1), torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_10[grid(1000)](
-            primals_19, buf27, 1000, XBLOCK=256, num_warps=4, num_stages=1)
-        del primals_19
-        buf28 = extern_kernels.convolution(reinterpret_tensor(buf25, (1024,
-            4096, 27, 27), (2434736, 9216, 27, 1), 0), primals_20, stride=(1,
-            1), padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf28, (1024, 256, 27, 27), (186624, 729, 27, 1))
-        buf29 = buf28
-        del buf28
-        buf30 = empty_strided_cuda((1024, 256, 27, 27), (186624, 729, 27, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_6[grid(11297664)](
-            buf29, primals_21, buf30, 11297664, XBLOCK=256, num_warps=16,
-            num_stages=1)
-        del primals_21
-        buf31 = extern_kernels.convolution(buf29, primals_22, stride=(1, 1),
-            padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf31, (1024, 384, 27, 27), (291600, 729, 27, 1))
-        buf32 = buf31
-        del buf31
-        buf33 = empty_strided_cuda((1024, 384, 27, 27), (291600, 729, 27, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_4[grid(28737888)](
-            buf32, primals_23, buf33, 28737888, XBLOCK=256, num_warps=16,
-            num_stages=1)
-        del primals_23
-        buf34 = extern_kernels.convolution(buf32, primals_23, stride=(1, 1),
-            padding=(0, 0), dilation=(1, 1), transposed=False,
-            output_padding=(0, 0), groups=1, bias=None)
-        assert_size_stride(buf34, (1024, 384, 27, 27), (291600, 729, 27, 1))
-        buf35 = buf34
-        del buf34
-        buf36 = empty_strided_cuda((1024, 384, 27, 27), (291600, 729, 27, 1),
-            torch.bool)
-        triton_poi_fused_convolution_relu_threshold_backward_4[grid(28737888)](
-            buf35, primals_23, buf36, 28737
+        primals_23, primals_24, primals_25, primals_26, primals_27,
+        primals_28, primals_29, primals_30, primals_31, primals_32,
+        primals_33, primals_34, primals_35, primals_36, primals_37,
+        primals_38, primals_39, primals_40, primals_41, primals_42,
+        primals_43, primals_44, primals_45, primals_46, primals_47,
+        primals_48, primals_49, primals_50, primals_51, primals_52,
+        primals_53, primals_54, primals_55, primals_56, primals_57,
+        primals_58, primals_59, primals_60, primals_61, primals_62,
+        primals_63, primals_64, primals_65, primals_66, primals_67,
+        primals_68, primals_69, primals_70, primals_71, primals_72,
+        primals_73, primals_74, primals_75, primals_76, primals_77,
+        primals_78, primals_79, primals_80, primals_81, primals_82,
+        primals_83, primals_84, primals_85, primals_86, primals_87,
+        primals_88, primals_89, primals_90, primals_91, primals_92,
+        primals_93, primals_94, primals_95, primals_96, primals_97,
+        primals_98, primals_99, primals_100, primals_101, primals_102,
+        primals_103, primals_104, primals_105, primals_106, primals_107,
+        primals_108, primals_109, primals_110, primals_111, primals_112,
+        primals_113, primals_114, primals_115, primals_116, primals_117,
+        primals_118, primals_119, primals_120, primals_121, primals_122,
+        primals_123, primals_124, primals_125, primals_126, primals_127,
+        primals_128, primals_129, primals_130, primals_131, primals_132,
+        primals_133, primals_134, primals_135, primals_136, primals_137,
+        primals_138, primals_139, primals_140, primals_141, primals_142,
+        primals_143, primals_144, primals_145, primals_146, primals_147,
+        primals_148, primals_149, primals_150, primals_151, primals_152,
+        primals_153, primals_154, primals_155, primals_156, primals_157,
+        primals_158, primals_159, primals_160, primals_161, primals_162,
+        primals_163, primals_164, primals_165, primals_166, primals_167,
+        primals_168, primals_169, primals_170, primals_171, primals_172,
+        primals_173, primals_174, primals_175, primals_176, primals_177,
+        primals_178, primals_179, primals_180, primals_181, primals_182,
+        primals_183, primals_184, primals_185, primals_186, primals_187,
+        primals_188, primals_189, primals_190, primals_191, primals_192,
+        primals_193, primals_194, primals_195, primals_196, primals_197,
+        primals_198, primals_199, primals_200, primals_201, primals_202,
+        primals_203, primals_204, primals_205, primals_206, primals_207,
+        primals_208, primals_209, primals_210, primals_211, primals_212,
+        primals_213, primals_214, primals_215, primals_216, primals_217,
+        primals_218, primals_219, primals_220, primals_221, primals_222,
+        primals_223, primals_224, primals_225, primals_226, primals_227,
+        primals_228, primals_229, primals_230, primals_231, primals_232,
+        primals_233, primals_234, primals_235, primals_236, primals_237,
+        primals_238, primals_239, primals_240, primals_241, primals_242,
+        primals_243, primals_244, primals_245, primals_246, primals_247,
+        primals_248, primals_249, primals_250, primals_251, primals_252,
+        primals_253, primals_254, primals_255, primals_256, primals_257,
+        primals_258, primals_259, primals_260, primals_261, primals_262,
+        primals_263, primals_264, primals_265, primals_266, primals_267,
+        primals_268, primals_269, primals_270, primals_271, primals_272,
+        primals_273, primals_274, primals_275, primals_276, primals_277,
+        primals_278, primals_279, primals_280, primals_281, primals_282,
+        primals_283, primals_284, primals_285, primals_286, primals_287,
+        primals_288, primals_289, primals_290, primals_291, primals_292,
+        primals_293, primals_294, primals_295, primals_296, primals_297,
+        primals_298, primals_299, primals_300, primals_301, primals_302,
+        primals_303, primals_304, primals_305, primals_306, primals_307,
+        primals_308, primals_309, primals_310, primals_311, primals_312,
+        primals_313, primals_314, primals_315, primals_316, primals_317,
+        primals_318, primals_319, primals_320, primals_321, primals_322,
+        primals_323, primals_324, primals_325, primals_326, primals_327,
+        primals_328, primals_329, primals_330, primals_331, primals_332,
+        primals_333, primals_334, primals_335, primals_336, primals_337,
+        primals_338, primals_339, primals_340, primals_341, primals_342,
+        primals_343, primals_344, primals_345, primals_346, primals_347,
+        primals_348, primals_349, primals_350, primals_351, primals_352,
+        primals_353, primals_354, primals_355, primals_356, primals_357,
+        primals_358, primals_359, primals_360, primals_361, primals_362,
+        primals_363, primals_364, primals_365, primals_366, primals_367,
+        primals_368, primals_369, primals_370, primals_371, primals_372,
+        primals_373, primals_374, primals_375, primals_376, primals_377,
+        primals_378, primals_379, primals_380, primals_381, primals_382,
+        primals_383, primals_384, primals_385, primals_386, primals_387,
+        primals_388, primals_389, primals_390, primals_391, primals_392,
+        primals_393, primals_394, primals_395, primals_396, primals_397,
+        primals_398, primals_399, primals_400, primals_401, primals_402,
+        primals_403, primals_404, primals_405, primals_406, primals_407,
+        primals_408, primals_409, primals_410, primals_411, primals_412,
+        primals_413, primals_414, primals_415, primals_416, primals_417,
+        primals_418, primals_419, primals_420, primals_421, primals_422,
+        primals_423, primals_424, primals_425, primals_426, primals_427,
+        primals_428, primals_429, primals_430, primals_431, primals_432,
+        primals_433, primals_434, primals_435, primals_436, primals_437,
+        primals_438, primals_439, primals_440, primals_441, primals_442,
+        primals_443, primals_444, primals_445, primals_446, primals_447,
+        primals_448, primals_449, primals_450, primals_451, primals_452,
+        primals_453, primals_454, primals_455, primals_456, primals_457,
+        primals_458, primals_459, primals_460, primals_461, primals_462,
+        primals_463, primals_464, primals_465, primals_466, primals_467,
+        primals_468, primals_469, primals_470, primals_471, primals_472,
+        primals_473, primals_474, primals_475, primals_476, primals_477,
+        primals_478, primals_479, primals_480, primals_481, primals_482,
+        primals_483, primals_484, primals_485, primals_486, primals_487,
+        primals_488, primals_489, primals_490, primals_491, primals_492,
+        primals_493, primals_494, primals_495, primals_496, primals_497,
+        primals_498, primals_499, primals_500, primals_501, primals_502,
+        primals_503, primals_504, primals_505, primals_506, primals_507,
+        primals_508, primals_509, primals_510, primals_511, primals_512,
+        primals_513, primals_514, primals_515, primals_516, primals_517,
+        primals_518, primals_519, primals_520, primals_521, primals_522,
+        primals_523, primals_524, primals_525, primals_526, primals_527,
+        primals_528, primals_529, primals_530, primals_531, primals_532,
+        primals_533, primals_534, primals_535, primals_536, primals_537,
+        primals_538, primals_539, primals_540, primals_541, primals_542,
+        primals_543, primals_544, primals_545, primals_546, primals_547,
+        primals_548, primals_549, primals_550, primals_551, primals_552,
+        primals_553, primals_554, primals_555, primals_556, primals_557,
+        primals_558, primals_559, primals_560, primals_561, primals_562,
+        primals_563, primals_564, primals_565, primals_566, primals_567,
+        primals_568, primals_569, primals_570, primals_571, primals_572,
+        primals_573, primals_574, primals_575, primals_576, primals_577,
+        primals_578, primals_579, primals_580, primals_581, primals_582,
+        primals_583, primals_584, primals_585, primals_586, primals_587,
+        primals_588, primals_589, primals_590, primals_591, primals_592,
+        primals_593, primals_594, primals_595, primals_596, primals_597,
+        primals_598, primals_599, primals_600, primals_601, primals_602,
+        primals_603, primals_604, primals_605, primals_606, primals_607,
+        primals_608, primals_609, primals_610, primals_611, primals_612,
+        primals_613, primals_614, primals_615, primals_616, primals_617,
+        primals_618, primals_619, primals_620, primals_621, primals_622,
+        primals_623, primals_624, primals_625, primals_626, primals_627,
+        primals_628, primals

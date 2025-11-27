@@ -1,0 +1,1 @@
+out, hn = self.lstm(x, (h0, c0))

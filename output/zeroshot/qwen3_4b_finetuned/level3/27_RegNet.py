@@ -1,362 +1,397 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
-import triton
-import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice
 import torch.nn as nn
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused__to_copy_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 384
+def triton_poi_fused_convolution_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 43264
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tmp0.to(tl.float32)
-    tl.store(out_ptr0 + x0, tmp1, xmask)
-
-
-@triton.jit
-def triton_poi_fused__to_copy_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
+    x0 = xindex % 64
+    x1 = xindex // 64
     x2 = xindex
-    x1 = xindex // 128
-    tmp0 = tl.load(in_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr0 + 128 * x1, xmask, eviction_policy='evict_last')
-    tmp2 = tl.load(in_ptr0 + (128 + 128 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp4 = tl.load(in_ptr0 + (256 + 128 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp7 = tl.load(in_ptr0 + (512 + 128 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp3 = tmp1 + tmp2
-    tmp5 = tmp3 + tmp4
-    tmp6 = 3.0
-    tmp8 = tmp5 / tmp6
-    tmp9 = tmp0 - tmp8
-    tmp10 = 0.0078125
-    tmp11 = tmp9 * tmp10
-    tl.store(out_ptr0 + x2, tmp11, xmask)
-
-
-@triton.jit
-def triton_poi_fused__to_copy_2(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 512
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tmp0.to(tl.float32)
-    tl.store(out_ptr0 + x0, tmp1, xmask)
-
-
-@triton.jit
-def triton_poi_fused__to_copy_3(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 16384
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x2 = xindex
-    x1 = xindex // 512
-    tmp0 = tl.load(in_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr0 + 512 * x1, xmask, eviction_policy='evict_last')
-    tmp2 = tl.load(in_ptr0 + (512 + 512 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp4 = tl.load(in_ptr0 + (1024 + 512 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp7 = tl.load(in_ptr0 + (2048 + 512 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp3 = tmp1 + tmp2
-    tmp5 = tmp3 + tmp4
-    tmp6 = 4.0
-    tmp8 = tmp5 / tmp6
-    tmp9 = tmp0 - tmp8
-    tmp10 = 0.0078125
-    tmp11 = tmp9 * tmp10
-    tl.store(out_ptr0 + x2, tmp11, xmask)
-
-
-@triton.jit
-def triton_poi_fused__to_copy_4(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 1024
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tmp0.to(tl.float32)
-    tl.store(out_ptr0 + x0, tmp1, xmask)
-
-
-def call(args):
-    (primals_1, primals_2, primals_3, primals_4, primals_5, primals_6,
-        primals_7, primals_8, primals_9, primals_10) = args
-    args.clear()
-    assert_size_stride(primals_1, (64, 3, 3, 3), (27, 9, 3, 1))
-    assert_size_stride(primals_2, (64,), (1,))
-    assert_size_stride(primals_3, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_4, (64,), (1,))
-    assert_size_stride(primals_5, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_6, (64,), (1,))
-    assert_size_stride(primals_7, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_8, (64,), (1,))
-    assert_size_stride(primals_9, (128, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_10, (128,), (1,))
-    assert_size_stride(primals_11, (128, 128, 3, 3), (1152, 9, 3, 1))
-    assert_size_stride(primals_12, (128,), (1,))
-    assert_size_stride(primals_13, (128, 128, 3, 3), (1152, 9, 3, 1))
-    assert_size_stride(primals_14, (128,), (1,))
-    assert_size_stride(primals_15, (128, 128, 3, 3), (1152, 9, 3, 1))
-    assert_size_stride(primals_16, (128,), (1,))
-    assert_size_stride(primals_17, (256, 128, 3, 3), (1152, 9, 3, 1))
-    assert_size_stride(primals_18, (256,), (1,))
-    assert_size_stride(primals_19, (256, 256, 3, 3), (2304, 9, 3, 1))
-    assert_size_stride(primals_20, (256,), (1,))
-    assert_size_stride(primals_21, (256, 256, 3, 3), (2304, 9, 3, 1))
-    assert_size_stride(primals_22, (256,), (1,))
-    assert_size_stride(primals_23, (256, 256, 3, 3), (2304, 9, 3, 1))
-    assert_size_stride(primals_24, (256,), (1,))
-    assert_size_stride(primals_25, (10, 256), (256, 1))
-    assert_size_stride(primals_26, (10,), (1,))
-    assert_size_stride(primals_27, (8, 3, 3, 3), (27, 9, 3, 1))
-    assert_size_stride(primals_28, (8,), (1,))
-    assert_size_stride(primals_29, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_30, (8,), (1,))
-    assert_size_stride(primals_31, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_32, (8,), (1,))
-    assert_size_stride(primals_33, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_34, (8,), (1,))
-    assert_size_stride(primals_35, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_36, (8,), (1,))
-    assert_size_stride(primals_37, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_38, (8,), (1,))
-    assert_size_stride(primals_39, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_40, (8,), (1,))
-    assert_size_stride(primals_41, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_42, (8,), (1,))
-    assert_size_stride(primals_43, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_44, (8,), (1,))
-    assert_size_stride(primals_45, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_46, (8,), (1,))
-    assert_size_stride(primals_47, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_48, (8,), (1,))
-    assert_size_stride(primals_49, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_50, (8,), (1,))
-    assert_size_stride(primals_51, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_52, (8,), (1,))
-    assert_size_stride(primals_53, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_54, (8,), (1,))
-    assert_size_stride(primals_55, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_56, (8,), (1,))
-    assert_size_stride(primals_57, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_58, (8,), (1,))
-    assert_size_stride(primals_59, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_60, (8,), (1,))
-    assert_size_stride(primals_61, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_62, (8,), (1,))
-    assert_size_stride(primals_63, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_64, (8,), (1,))
-    assert_size_stride(primals_65, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_66, (8,), (1,))
-    assert_size_stride(primals_67, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_68, (8,), (1,))
-    assert_size_stride(primals_69, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_70, (8,), (1,))
-    assert_size_stride(primals_71, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_72, (8,), (1,))
-    assert_size_stride(primals_73, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_74, (8,), (1,))
-    assert_size_stride(primals_75, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_76, (8,), (1,))
-    assert_size_stride(primals_77, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_78, (8,), (1,))
-    assert_size_stride(primals_79, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_80, (8,), (1,))
-    assert_size_stride(primals_81, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_82, (8,), (1,))
-    assert_size_stride(primals_83, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_84, (8,), (1,))
-    assert_size_stride(primals_85, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_86, (8,), (1,))
-    assert_size_stride(primals_87, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_88, (8,), (1,))
-    assert_size_stride(primals_89, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_90, (8,), (1,))
-    assert_size_stride(primals_91, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_92, (8,), (1,))
-    assert_size_stride(primals_93, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_94, (8,), (1,))
-    assert_size_stride(primals_95, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_96, (8,), (1,))
-    assert_size_stride(primals_97, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_98, (8,), (1,))
-    assert_size_stride(primals_99, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_100, (8,), (1,))
-    assert_size_stride(primals_101, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_102, (8,), (1,))
-    assert_size_stride(primals_103, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_104, (8,), (1,))
-    assert_size_stride(primals_105, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_106, (8,), (1,))
-    assert_size_stride(primals_107, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_108, (8,), (1,))
-    assert_size_stride(primals_109, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_110, (8,), (1,))
-    assert_size_stride(primals_111, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_112, (8,), (1,))
-    assert_size_stride(primals_113, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_114, (8,), (1,))
-    assert_size_stride(primals_115, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_116, (8,), (1,))
-    assert_size_stride(primals_117, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_118, (8,), (1,))
-    assert_size_stride(primals_119, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_120, (8,), (1,))
-    assert_size_stride(primals_121, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_122, (8,), (1,))
-    assert_size_stride(primals_123, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_124, (8,), (1,))
-    assert_size_stride(primals_125, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_126, (8,), (1,))
-    assert_size_stride(primals_127, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_128, (8,), (1,))
-    assert_size_stride(primals_129, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_130, (8,), (1,))
-    assert_size_stride(primals_131, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_132, (8,), (1,))
-    assert_size_stride(primals_133, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_134, (8,), (1,))
-    assert_size_stride(primals_135, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_136, (8,), (1,))
-    assert_size_stride(primals_137, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_138, (8,), (1,))
-    assert_size_stride(primals_139, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_140, (8,), (1,))
-    assert_size_stride(primals_141, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_142, (8,), (1,))
-    assert_size_stride(primals_143, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_144, (8,), (1,))
-    assert_size_stride(primals_145, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_146, (8,), (1,))
-    assert_size_stride(primals_147, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_148, (8,), (1,))
-    assert_size_stride(primals_149, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_150, (8,), (1,))
-    assert_size_stride(primals_151, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_152, (8,), (1,))
-    assert_size_stride(primals_153, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_154, (8,), (1,))
-    assert_size_stride(primals_155, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_156, (8,), (1,))
-    assert_size_stride(primals_157, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_158, (8,), (1,))
-    assert_size_stride(primals_159, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_160, (8,), (1,))
-    assert_size_stride(primals_161, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_162, (8,), (1,))
-    assert_size_stride(primals_163, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_164, (8,), (1,))
-    assert_size_stride(primals_165, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_166, (8,), (1,))
-    assert_size_stride(primals_167, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_168, (8,), (1,))
-    assert_size_stride(primals_169, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_170, (8,), (1,))
-    assert_size_stride(primals_171, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_172, (8,), (1,))
-    assert_size_stride(primals_173, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_174, (8,), (1,))
-    assert_size_stride(primals_175, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_176, (8,), (1,))
-    assert_size_stride(primals_177, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_178, (8,), (1,))
-    assert_size_stride(primals_179, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_180, (8,), (1,))
-    assert_size_stride(primals_181, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_182, (8,), (1,))
-    assert_size_stride(primals_183, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_184, (8,), (1,))
-    assert_size_stride(primals_185, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_186, (8,), (1,))
-    assert_size_stride(primals_187, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_188, (8,), (1,))
-    assert_size_stride(primals_189, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_190, (8,), (1,))
-    assert_size_stride(primals_191, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_192, (8,), (1,))
-    assert_size_stride(primals_193, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_194, (8,), (1,))
-    assert_size_stride(primals_195, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_196, (8,), (1,))
-    assert_size_stride(primals_197, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_198, (8,), (1,))
-    assert_size_stride(primals_199, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_200, (8,), (1,))
-    assert_size_stride(primals_201, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_202, (8,), (1,))
-    assert_size_stride(primals_203, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_204, (8,), (1,))
-    assert_size_stride(primals_205, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_206, (8,), (1,))
-    assert_size_stride(primals_207, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_208, (8,), (1,))
-    assert_size_stride(primals_209, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_210, (8,), (1,))
-    assert_size_stride(primals_211, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_212, (8,), (1,))
-    assert_size_stride(primals_213, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_214, (8,), (1,))
-    assert_size_stride(primals_215, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_216, (8,), (1,))
-    assert_size_stride(primals_217, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_218, (8,), (1,))
-    assert_size_stride(primals_219, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_220, (8,), (1,))
-    assert_size_stride(primals_221, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_222, (8,), (1,))
-    assert_size_stride(primals_223, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_224, (8,), (1,))
-    assert_size_stride(primals_225, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_226, (8,), (1,))
-    assert_size_stride(primals_227, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_228, (8,), (1,))
-    assert_size_stride(primals_229, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_230, (8,), (1,))
-    assert_size_stride(primals_231, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_232, (8,), (1,))
-    assert_size_stride(primals_233, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_234, (8,), (1,))
-    assert_size_stride(primals_235, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_236, (8,), (1,))
-    assert_size_stride(primals_237, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_238, (8,), (1,))
-    assert_size_stride(primals_239, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_240, (8,), (1,))
-    assert_size_stride(primals_241, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_242, (8,), (1,))
-    assert_size_stride(primals_243, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_244, (8,), (1,))
-    assert_size_stride(primals_245, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_246, (8,), (1,))
-    assert_size_stride(primals_247, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_248, (8,), (1,))
-    assert_size_stride(primals_249, (8, 8, 3, 3), (72, 9, 3, 1))
-    assert_size_stride(primals_250, (8,), (1,))
-    assert_size_stride(primals_251, (8, 8, 3
+    tmp0 = tl.load(in_ptr0 + (x0 + 256 * x1), xmask)
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = tmp1 + tmp0
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = tl.full([1], 1, tl.int32)
+    tmp5 = tmp3 < tmp4
+    tmp6 = tmp2 > tmp3
+    tmp7 = tmp5 & tmp6
+    tmp8 = tl.load(in_ptr0 + (1 + x0 + 256 * x1), xmask & tmp7, eviction_policy
+        ='evict_last', other=0.0)
+    tmp9 = tmp2 < tmp4
+    tmp10 = tmp8 > tmp3
+    tmp11 = tmp9 & tmp10
+    tmp12 = tl.load(in_ptr0 + (2 + x0 + 256 * x1), xmask & tmp11,
+        eviction_policy='evict_last', other=0.0)
+    tmp13 = tmp2 < tmp1
+    tmp14 = tmp8 > tmp1
+    tmp15 = tmp13 & tmp14
+    tmp16 = tl.load(in_ptr0 + (-1 + x0 + 256 * x1), xmask & tmp15,
+        eviction_policy='evict_last', other=0.0)
+    tmp17 = tmp2 < tmp1
+    tmp18 = tmp8 > tmp1
+    tmp19 = tmp17 & tmp18
+    tmp20 = tl.load(in_ptr0 + (-2 + x0 + 256 * x1), xmask & tmp19,
+        eviction_policy='evict_last', other=0.0)
+    tmp21 = tl.load(in_ptr0 + (256 + x0 + 256 * x1), xmask & tmp7,
+        eviction_policy='evict_last', other=0.0)
+    tmp22 = tmp21 > tmp3
+    tmp23 = tmp22 & tmp5
+    tmp24 = tl.load(in_ptr0 + (257 + x0 + 256 * x1), xmask & tmp23,
+        eviction_policy='evict_last', other=0.0)
+    tmp25 = tmp21 < tmp4
+    tmp26 = tmp24 > tmp3
+    tmp27 = tmp25 & tmp26
+    tmp28 = tl.load(in_ptr0 + (258 + x0 + 256 * x1), xmask & tmp27,
+        eviction_policy='evict_last', other=0.0)
+    tmp29 = tmp21 < tmp1
+    tmp30 = tmp24 > tmp1
+    tmp31 = tmp29 & tmp30
+    tmp32 = tl.load(in_ptr0 + (255 + x0 + 256 * x1), xmask & tmp31,
+        eviction_policy='evict_last', other=0.0)
+    tmp33 = tmp21 < tmp1
+    tmp34 = tmp24 > tmp1
+    tmp35 = tmp33 & tmp34
+    tmp36 = tl.load(in_ptr0 + (254 + x0 + 256 * x1), xmask & tmp35,
+        eviction_policy='evict_last', other=0.0)
+    tmp37 = tl.load(in_ptr0 + (256 + x0 + 256 * x1), xmask & tmp11,
+        eviction_policy='evict_last', other=0.0)
+    tmp38 = tmp37 > tmp3
+    tmp39 = tmp38 & tmp9
+    tmp40 = tl.load(in_ptr0 + (257 + x0 + 256 * x1), xmask & tmp39,
+        eviction_policy='evict_last', other=0.0)
+    tmp41 = tmp37 < tmp4
+    tmp42 = tmp40 > tmp3
+    tmp43 = tmp41 & tmp42
+    tmp44 = tl.load(in_ptr0 + (258 + x0 + 256 * x1), xmask & tmp43,
+        eviction_policy='evict_last', other=0.0)
+    tmp45 = tmp37 < tmp1
+    tmp46 = tmp40 > tmp1
+    tmp47 = tmp45 & tmp46
+    tmp48 = tl.load(in_ptr0 + (255 + x0 + 256 * x1), xmask & tmp47,
+        eviction_policy='evict_last', other=0.0)
+    tmp49 = tmp37 < tmp1
+    tmp50 = tmp40 > tmp1
+    tmp51 = tmp49 & tmp50
+    tmp52 = tl.load(in_ptr0 + (254 + x0 + 256 * x1), xmask & tmp51,
+        eviction_policy='evict_last', other=0.0)
+    tmp53 = tl.load(in_ptr0 + (256 + x0 + 256 * x1), xmask & tmp15,
+        eviction_policy='evict_last', other=0.0)
+    tmp54 = tmp53 > tmp3
+    tmp55 = tmp54 & tmp13
+    tmp56 = tl.load(in_ptr0 + (257 + x0 + 256 * x1), xmask & tmp55,
+        eviction_policy='evict_last', other=0.0)
+    tmp57 = tmp53 < tmp4
+    tmp58 = tmp56 > tmp3
+    tmp59 = tmp57 & tmp58
+    tmp60 = tl.load(in_ptr0 + (258 + x0 + 256 * x1), xmask & tmp59,
+        eviction_policy='evict_last', other=0.0)
+    tmp61 = tmp53 < tmp1
+    tmp62 = tmp56 > tmp1
+    tmp63 = tmp61 & tmp62
+    tmp64 = tl.load(in_ptr0 + (255 + x0 + 256 * x1), xmask & tmp63,
+        eviction_policy='evict_last', other=0.0)
+    tmp65 = tmp53 < tmp1
+    tmp66 = tmp56 > tmp1
+    tmp67 = tmp65 & tmp66
+    tmp68 = tl.load(in_ptr0 + (254 + x0 + 256 * x1), xmask & tmp67,
+        eviction_policy='evict_last', other=0.0)
+    tmp69 = tl.load(in_ptr0 + (256 + x0 + 256 * x1), xmask & tmp19,
+        eviction_policy='evict_last', other=0.0)
+    tmp70 = tmp69 > tmp3
+    tmp71 = tmp70 & tmp17
+    tmp72 = tl.load(in_ptr0 + (257 + x0 + 256 * x1), xmask & tmp71,
+        eviction_policy='evict_last', other=0.0)
+    tmp73 = tmp69 < tmp4
+    tmp74 = tmp72 > tmp3
+    tmp75 = tmp73 & tmp74
+    tmp76 = tl.load(in_ptr0 + (258 + x0 + 256 * x1), xmask & tmp75,
+        eviction_policy='evict_last', other=0.0)
+    tmp77 = tmp69 < tmp1
+    tmp78 = tmp72 > tmp1
+    tmp79 = tmp77 & tmp78
+    tmp80 = tl.load(in_ptr0 + (255 + x0 + 256 * x1), xmask & tmp79,
+        eviction_policy='evict_last', other=0.0)
+    tmp81 = tmp69 < tmp1
+    tmp82 = tmp72 > tmp1
+    tmp83 = tmp81 & tmp82
+    tmp84 = tl.load(in_ptr0 + (254 + x0 + 256 * x1), xmask & tmp83,
+        eviction_policy='evict_last', other=0.0)
+    tmp85 = tl.where(tmp7, tmp8, tmp12)
+    tmp86 = tl.where(tmp11, tmp16, tmp20)
+    tmp87 = tl.where(tmp23, tmp28, tmp32)
+    tmp88 = tl.where(tmp27, tmp36, tmp40)
+    tmp89 = tl.where(tmp31, tmp48, tmp52)
+    tmp90 = tl.where(tmp39, tmp44, tmp48)
+    tmp91 = tl.where(tmp43, tmp56, tmp60)
+    tmp92 = tl.where(tmp47, tmp68, tmp72)
+    tmp93 = tl.where(tmp55, tmp64, tmp68)
+    tmp94 = tl.where(tmp59, tmp76, tmp80)
+    tmp95 = tl.where(tmp67, tmp84, tmp88)
+    tmp96 = tl.where(tmp71, tmp84, tmp88)
+    tmp97 = tl.where(tmp75, tmp92, tmp96)
+    tmp98 = tl.where(tmp79, tmp94, tmp98)
+    tmp99 = tl.where(tmp83, tmp96, tmp100)
+    tmp100 = tl.where(tmp87, tmp94, tmp98)
+    tmp101 = tl.where(tmp91, tmp96, tmp100)
+    tmp102 = tl.where(tmp95, tmp98, tmp102)
+    tmp103 = tl.where(tmp99, tmp100, tmp104)
+    tmp104 = tl.where(tmp101, tmp102, tmp106)
+    tmp105 = tl.where(tmp103, tmp104, tmp108)
+    tmp106 = tl.where(tmp105, tmp106, tmp108)
+    tmp107 = tl.where(tmp107, tmp106, tmp108)
+    tmp108 = tl.where(tmp109, tmp106, tmp110)
+    tmp109 = tl.where(tmp111, tmp108, tmp112)
+    tmp110 = tl.where(tmp113, tmp108, tmp114)
+    tmp111 = tl.where(tmp115, tmp112, tmp116)
+    tmp112 = tl.where(tmp117, tmp114, tmp118)
+    tmp113 = tl.where(tmp119, tmp116, tmp120)
+    tmp114 = tl.where(tmp121, tmp118, tmp122)
+    tmp115 = tl.where(tmp123, tmp120, tmp124)
+    tmp116 = tl.where(tmp125, tmp122, tmp126)
+    tmp117 = tl.where(tmp127, tmp124, tmp128)
+    tmp118 = tl.where(tmp129, tmp126, tmp130)
+    tmp119 = tl.where(tmp131, tmp128, tmp132)
+    tmp120 = tl.where(tmp133, tmp130, tmp134)
+    tmp121 = tl.where(tmp135, tmp132, tmp136)
+    tmp122 = tl.where(tmp137, tmp134, tmp138)
+    tmp123 = tl.where(tmp139, tmp136, tmp140)
+    tmp124 = tl.where(tmp141, tmp138, tmp142)
+    tmp125 = tl.where(tmp143, tmp140, tmp144)
+    tmp126 = tl.where(tmp145, tmp142, tmp146)
+    tmp127 = tl.where(tmp147, tmp144, tmp148)
+    tmp128 = tl.where(tmp149, tmp146, tmp150)
+    tmp129 = tl.where(tmp151, tmp148, tmp152)
+    tmp130 = tl.where(tmp153, tmp150, tmp154)
+    tmp131 = tl.where(tmp155, tmp152, tmp156)
+    tmp132 = tl.where(tmp157, tmp154, tmp158)
+    tmp133 = tl.where(tmp159, tmp156, tmp160)
+    tmp134 = tl.where(tmp161, tmp158, tmp162)
+    tmp135 = tl.where(tmp163, tmp160, tmp164)
+    tmp136 = tl.where(tmp165, tmp162, tmp166)
+    tmp137 = tl.where(tmp167, tmp164, tmp168)
+    tmp138 = tl.where(tmp169, tmp166, tmp170)
+    tmp139 = tl.where(tmp171, tmp168, tmp172)
+    tmp140 = tl.where(tmp173, tmp170, tmp174)
+    tmp141 = tl.where(tmp175, tmp172, tmp176)
+    tmp142 = tl.where(tmp177, tmp174, tmp178)
+    tmp143 = tl.where(tmp179, tmp176, tmp178)
+    tmp144 = tl.where(tmp181, tmp178, tmp182)
+    tmp145 = tl.where(tmp183, tmp180, tmp184)
+    tmp146 = tl.where(tmp185, tmp182, tmp186)
+    tmp147 = tl.where(tmp187, tmp184, tmp188)
+    tmp148 = tl.where(tmp189, tmp186, tmp190)
+    tmp149 = tl.where(tmp191, tmp188, tmp192)
+    tmp150 = tl.where(tmp193, tmp190, tmp194)
+    tmp151 = tl.where(tmp195, tmp192, tmp196)
+    tmp152 = tl.where(tmp197, tmp194, tmp198)
+    tmp153 = tl.where(tmp199, tmp196, tmp200)
+    tmp154 = tl.where(tmp201, tmp198, tmp202)
+    tmp155 = tl.where(tmp203, tmp200, tmp204)
+    tmp156 = tl.where(tmp205, tmp202, tmp206)
+    tmp157 = tl.where(tmp207, tmp204, tmp208)
+    tmp158 = tl.where(tmp209, tmp206, tmp210)
+    tmp159 = tl.where(tmp211, tmp208, tmp212)
+    tmp160 = tl.where(tmp213, tmp210, tmp214)
+    tmp161 = tl.where(tmp215, tmp212, tmp216)
+    tmp162 = tl.where(tmp217, tmp214, tmp218)
+    tmp163 = tl.where(tmp219, tmp216, tmp220)
+    tmp164 = tl.where(tmp221, tmp218, tmp222)
+    tmp165 = tl.where(tmp223, tmp220, tmp224)
+    tmp166 = tl.where(tmp225, tmp222, tmp226)
+    tmp167 = tl.where(tmp227, tmp224, tmp228)
+    tmp168 = tl.where(tmp229, tmp226, tmp230)
+    tmp169 = tl.where(tmp231, tmp228, tmp232)
+    tmp170 = tl.where(tmp233, tmp230, tmp234)
+    tmp171 = tl.where(tmp235, tmp232, tmp236)
+    tmp172 = tl.where(tmp237, tmp234, tmp238)
+    tmp173 = tl.where(tmp239, tmp236, tmp240)
+    tmp174 = tl.where(tmp241, tmp238, tmp242)
+    tmp175 = tl.where(tmp243, tmp240, tmp244)
+    tmp176 = tl.where(tmp245, tmp242, tmp246)
+    tmp177 = tl.where(tmp247, tmp244, tmp248)
+    tmp178 = tl.where(tmp249, tmp246, tmp250)
+    tmp179 = tl.where(tmp251, tmp248, tmp252)
+    tmp180 = tl.where(tmp253, tmp250, tmp254)
+    tmp181 = tl.where(tmp255, tmp252, tmp256)
+    tmp182 = tl.where(tmp257, tmp254, tmp258)
+    tmp183 = tl.where(tmp259, tmp256, tmp260)
+    tmp184 = tl.where(tmp261, tmp258, tmp262)
+    tmp185 = tl.where(tmp263, tmp260, tmp264)
+    tmp186 = tl.where(tmp265, tmp262, tmp266)
+    tmp187 = tl.where(tmp267, tmp264, tmp268)
+    tmp188 = tl.where(tmp269, tmp266, tmp270)
+    tmp189 = tl.where(tmp271, tmp268, tmp272)
+    tmp190 = tl.where(tmp273, tmp270, tmp274)
+    tmp191 = tl.where(tmp275, tmp272, tmp276)
+    tmp192 = tl.where(tmp277, tmp274, tmp278)
+    tmp193 = tl.where(tmp279, tmp276, tmp280)
+    tmp194 = tl.where(tmp281, tmp278, tmp282)
+    tmp195 = tl.where(tmp283, tmp280, tmp284)
+    tmp196 = tl.where(tmp285, tmp282, tmp286)
+    tmp197 = tl.where(tmp287, tmp284, tmp288)
+    tmp198 = tl.where(tmp289, tmp286, tmp290)
+    tmp199 = tl.where(tmp291, tmp288, tmp292)
+    tmp200 = tl.where(tmp293, tmp290, tmp294)
+    tmp201 = tl.where(tmp295, tmp292, tmp296)
+    tmp202 = tl.where(tmp297, tmp294, tmp298)
+    tmp203 = tl.where(tmp299, tmp296, tmp300)
+    tmp204 = tl.where(tmp301, tmp298, tmp302)
+    tmp205 = tl.where(tmp303, tmp300, tmp304)
+    tmp206 = tl.where(tmp305, tmp302, tmp306)
+    tmp207 = tl.where(tmp307, tmp304, tmp308)
+    tmp208 = tl.where(tmp309, tmp306, tmp310)
+    tmp209 = tl.where(tmp311, tmp308, tmp312)
+    tmp210 = tl.where(tmp313, tmp310, tmp314)
+    tmp211 = tl.where(tmp315, tmp312, tmp316)
+    tmp212 = tl.where(tmp317, tmp314, tmp318)
+    tmp213 = tl.where(tmp319, tmp316, tmp320)
+    tmp214 = tl.where(tmp321, tmp318, tmp322)
+    tmp215 = tl.where(tmp323, tmp320, tmp324)
+    tmp216 = tl.where(tmp325, tmp322, tmp326)
+    tmp217 = tl.where(tmp327, tmp324, tmp328)
+    tmp218 = tl.where(tmp329, tmp326, tmp330)
+    tmp219 = tl.where(tmp331, tmp328, tmp332)
+    tmp220 = tl.where(tmp333, tmp330, tmp334)
+    tmp221 = tl.where(tmp335, tmp332, tmp336)
+    tmp222 = tl.where(tmp337, tmp334, tmp338)
+    tmp223 = tl.where(tmp339, tmp336, tmp340)
+    tmp224 = tl.where(tmp341, tmp338, tmp342)
+    tmp225 = tl.where(tmp343, tmp340, tmp344)
+    tmp226 = tl.where(tmp345, tmp342, tmp346)
+    tmp227 = tl.where(tmp347, tmp344, tmp348)
+    tmp228 = tl.where(tmp349, tmp346, tmp350)
+    tmp229 = tl.where(tmp351, tmp348, tmp352)
+    tmp230 = tl.where(tmp353, tmp350, tmp354)
+    tmp231 = tl.where(tmp355, tmp352, tmp356)
+    tmp232 = tl.where(tmp357, tmp354, tmp358)
+    tmp233 = tl.where(tmp359, tmp356, tmp360)
+    tmp234 = tl.where(tmp361, tmp358, tmp362)
+    tmp235 = tl.where(tmp363, tmp360, tmp364)
+    tmp236 = tl.where(tmp365, tmp362, tmp366)
+    tmp237 = tl.where(tmp367, tmp364, tmp368)
+    tmp238 = tl.where(tmp369, tmp366, tmp370)
+    tmp239 = tl.where(tmp371, tmp368, tmp372)
+    tmp240 = tl.where(tmp373, tmp370, tmp374)
+    tmp241 = tl.where(tmp375, tmp372, tmp376)
+    tmp242 = tl.where(tmp377, tmp374, tmp378)
+    tmp243 = tl.where(tmp379, tmp376, tmp380)
+    tmp244 = tl.where(tmp381, tmp378, tmp382)
+    tmp245 = tl.where(tmp383, tmp380, tmp384)
+    tmp246 = tl.where(tmp385, tmp382, tmp386)
+    tmp247 = tl.where(tmp387, tmp384, tmp388)
+    tmp248 = tl.where(tmp389, tmp386, tmp390)
+    tmp249 = tl.where(tmp391, tmp388, tmp392)
+    tmp250 = tl.where(tmp393, tmp390, tmp394)
+    tmp251 = tl.where(tmp395, tmp392, tmp396)
+    tmp252 = tl.where(tmp397, tmp394, tmp398)
+    tmp253 = tl.where(tmp399, tmp396, tmp400)
+    tmp254 = tl.where(tmp401, tmp398, tmp402)
+    tmp255 = tl.where(tmp403, tmp400, tmp404)
+    tmp256 = tl.where(tmp405, tmp402, tmp406)
+    tmp257 = tl.where(tmp407, tmp404, tmp408)
+    tmp258 = tl.where(tmp409, tmp406, tmp410)
+    tmp259 = tl.where(tmp411, tmp408, tmp412)
+    tmp260 = tl.where(tmp413, tmp410, tmp414)
+    tmp261 = tl.where(tmp415, tmp412, tmp416)
+    tmp262 = tl.where(tmp417, tmp414, tmp418)
+    tmp263 = tl.where(tmp419, tmp416, tmp420)
+    tmp264 = tl.where(tmp421, tmp418, tmp422)
+    tmp265 = tl.where(tmp423, tmp420, tmp424)
+    tmp266 = tl.where(tmp425, tmp422, tmp426)
+    tmp267 = tl.where(tmp427, tmp424, tmp428)
+    tmp268 = tl.where(tmp429, tmp426, tmp430)
+    tmp269 = tl.where(tmp431, tmp428, tmp432)
+    tmp270 = tl.where(tmp433, tmp430, tmp434)
+    tmp271 = tl.where(tmp435, tmp432, tmp436)
+    tmp272 = tl.where(tmp437, tmp434, tmp438)
+    tmp273 = tl.where(tmp439, tmp436, tmp440)
+    tmp274 = tl.where(tmp441, tmp438, tmp442)
+    tmp275 = tl.where(tmp443, tmp440, tmp444)
+    tmp276 = tl.where(tmp445, tmp442, tmp446)
+    tmp277 = tl.where(tmp447, tmp444, tmp448)
+    tmp278 = tl.where(tmp449, tmp446, tmp450)
+    tmp279 = tl.where(tmp451, tmp448, tmp452)
+    tmp280 = tl.where(tmp453, tmp450, tmp454)
+    tmp281 = tl.where(tmp455, tmp452, tmp456)
+    tmp282 = tl.where(tmp457, tmp454, tmp458)
+    tmp283 = tl.where(tmp459, tmp456, tmp460)
+    tmp284 = tl.where(tmp461, tmp458, tmp462)
+    tmp285 = tl.where(tmp463, tmp460, tmp464)
+    tmp286 = tl.where(tmp465, tmp462, tmp466)
+    tmp287 = tl.where(tmp467, tmp464, tmp468)
+    tmp288 = tl.where(tmp469, tmp466, tmp470)
+    tmp289 = tl.where(tmp471, tmp468, tmp472)
+    tmp290 = tl.where(tmp473, tmp470, tmp474)
+    tmp291 = tl.where(tmp475, tmp472, tmp476)
+    tmp292 = tl.where(tmp477, tmp474, tmp478)
+    tmp293 = tl.where(tmp479, tmp476, tmp480)
+    tmp294 = tl.where(tmp481, tmp478, tmp482)
+    tmp295 = tl.where(tmp483, tmp480, tmp484)
+    tmp296 = tl.where(tmp485, tmp482, tmp486)
+    tmp297 = tl.where(tmp487, tmp484, tmp488)
+    tmp298 = tl.where(tmp489, tmp486, tmp490)
+    tmp299 = tl.where(tmp491, tmp488, tmp492)
+    tmp300 = tl.where(tmp493, tmp490, tmp494)
+    tmp301 = tl.where(tmp495, tmp492, tmp496)
+    tmp302 = tl.where(tmp497, tmp494, tmp498)
+    tmp303 = tl.where(tmp499, tmp496, tmp500)
+    tmp304 = tl.where(tmp501, tmp498, tmp502)
+    tmp305 = tl.where(tmp503, tmp500, tmp504)
+    tmp306 = tl.where(tmp505, tmp502, tmp506)
+    tmp307 = tl.where(tmp507, tmp504, tmp508)
+    tmp308 = tl.where(tmp509, tmp506, tmp510)
+    tmp309 = tl.where(tmp511, tmp508, tmp512)
+    tmp310 = tl.where(tmp513, tmp510, tmp514)
+    tmp311 = tl.where(tmp515, tmp512, tmp516)
+    tmp312 = tl.where(tmp517, tmp514, tmp518)
+    tmp313 = tl.where(tmp519, tmp516, tmp520)
+    tmp314 = tl.where(tmp521, tmp518, tmp522)
+    tmp315 = tl.where(tmp523, tmp520, tmp524)
+    tmp316 = tl.where(tmp525, tmp522, tmp526)
+    tmp317 = tl.where(tmp527, tmp524, tmp528)
+    tmp318 = tl.where(tmp529, tmp526, tmp530)
+    tmp319 = tl.where(tmp531, tmp528, tmp532)
+    tmp320 = tl.where(tmp533, tmp530, tmp534)
+    tmp321 = tl.where(tmp535, tmp532, tmp536)
+    tmp322 = tl.where(tmp537, tmp534, tmp538)
+    tmp323 = tl.where(tmp539, tmp536, tmp540)
+    tmp324 = tl.where(tmp541, tmp538, tmp542)
+    tmp325 = tl.where(tmp543, tmp540, tmp544)
+    tmp326 = tl.where(tmp545, tmp542, tmp546)
+    tmp327 = tl.where(tmp547, tmp544, tmp548)
+    tmp328 = tl.where(tmp549, tmp546, tmp550)
+    tmp329 = tl.where(tmp551, tmp548, tmp552)
+    tmp330 = tl.where(tmp553, tmp550, tmp554)
+    tmp331 = tl.where(tmp555, tmp552, tmp556)
+    tmp332 = tl.where(tmp557, tmp554, tmp558)
+    tmp333 = tl.where(tmp559, tmp556, tmp560)
+    tmp334 = tl.where(tmp561, tmp558, tmp562)
+    tmp335 = tl.where(tmp563, tmp560, tmp564)
+    tmp336 = tl.where(tmp565, tmp562, tmp566)
+    tmp337 = tl.where(tmp567, tmp564, tmp568)
+    tmp338 = tl.where(tmp569, tmp566, tmp570)
+    tmp339 = tl.where(tmp571, tmp568, tmp572)
+    tmp340 = tl.where(tmp573, tmp570, tmp574)
+    tmp341 = tl.where(tmp575, tmp572, tmp576)
+    tmp342 = tl.where(tmp577, tmp574, tmp578)
+    tmp343 = tl.where(tmp579, tmp576, tmp580)
+    tmp344 = tl.where(tmp581, tmp578, tmp582)
+    tmp345 = tl.where(tmp583, tmp580, tmp584)
+    tmp346 = tl.where(tmp585, tmp582, tmp586)
+    tmp347 = tl.where(tmp587, tmp584, tmp588)
+    tmp348 = tl.where(tmp589, tmp586, tmp590)
+    tmp349 = tl.where(tmp591, tmp588, tmp592)
+    tmp350 = tl.where(tmp593, tmp590, tmp594)
+    tmp351 = tl.where(tmp595, tmp592, tmp596)
+    tmp352 = tl.where(tmp597, tmp594, tmp598)
+    tmp353 = tl.where(tmp

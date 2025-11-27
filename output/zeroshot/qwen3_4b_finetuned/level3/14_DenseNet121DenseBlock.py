@@ -1,163 +1,234 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 221184
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 64
-    x1 = xindex // 64
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 64 * x1), xmask)
-    tl.store(out_ptr0 + x2, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 110592
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 576
-    x1 = xindex // 576
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 576 * x1), xmask)
-    tl.store(out_ptr0 + x2, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_relu_threshold_backward_2(in_out_ptr0, in_ptr0,
-    out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 221184
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x2 = xindex
-    x0 = xindex % 64
-    tmp0 = tl.load(in_out_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = triton_helpers.maximum(tmp3, tmp2)
-    tmp5 = 0.0
-    tmp6 = tmp4 <= tmp5
-    tl.store(in_out_ptr0 + x2, tmp4, xmask)
-    tl.store(out_ptr0 + x2, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_3(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
+def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl.
     constexpr):
-    xnumel = 4096
+    xnumel = 1048576
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x1 = xindex // 16 % 64
-    x0 = xindex % 16
-    x2 = xindex // 1024
-    x4 = xindex
-    tmp0 = tl.load(in_ptr0 + (x1 + 512 * x2), xmask, eviction_policy=
-        'evict_last')
-    tmp1 = tl.load(in_ptr0 + (64 + x1 + 512 * x2), xmask, eviction_policy=
-        'evict_last')
-    tmp3 = tl.load(in_ptr0 + (128 + x1 + 512 * x2), xmask, eviction_policy=
-        'evict_last')
-    tmp5 = tl.load(in_ptr0 + (192 + x1 + 512 * x2), xmask, eviction_policy=
-        'evict_last')
+    x3 = xindex
+    x1 = xindex // 4096 % 32
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp4 = tmp2 + tmp3
-    tmp6 = tmp4 + tmp5
-    tl.store(out_ptr0 + x4, tmp6, xmask)
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
 
 
-def call(args):
-    primals_1, primals_2, primals_3, primals_4, primals_5 = args
-    args.clear()
-    assert_size_stride(primals_1, (6, 64, 64, 64), (4096, 64, 1, 1))
-    assert_size_stride(primals_2, (6, 32, 3, 3), (288, 9, 3, 1))
-    assert_size_stride(primals_3, (6, 64), (64, 1))
-    assert_size_stride(primals_4, (10, 32, 224, 224), (154240, 224, 224, 1))
-    assert_size_stride(primals_5, (6,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((64, 1, 224, 224), (512, 512, 1, 1), torch
-            .float32)
-        get_raw_stream(0)
-        triton_poi_fused_0[grid(221184)](primals_4, buf0, 221184, XBLOCK=
-            256, num_warps=4, num_stages=1)
-        del primals_4
-        buf1 = empty_strided_cuda((6, 576, 1, 1), (576, 1, 1, 1), torch.float32)
-        triton_poi_fused_1[grid(110592)](primals_2, buf1, 110592, XBLOCK=
-            512, num_warps=4, num_stages=1)
-        del primals_2
-        buf2 = extern_kernels.batch_norm(primals_1, buf0, None, None, True)
-        del primals_1
-        buf3 = empty_strided_cuda((10, 64, 224, 224), (327680, 5120, 2, 1),
-            torch.float32)
-        buf7 = empty_strided_cuda((10, 64, 224, 224), (327680, 5120, 2, 1),
-            torch.bool)
-        triton_poi_fused_relu_threshold_backward_2[grid(221184)](buf3,
-            buf2, buf7, 221184, XBLOCK=256, num_warps=4, num_stages=1)
-        buf4 = empty_strided_cuda((10, 576, 224, 224), (25165824, 43680, 1,
-            1), torch.float32)
-        extern_kernels.convolution(buf3, buf1, stride=(1, 1), padding=(1, 
-            1), dilation=(1, 1), transposed=False, output_padding=(0, 0),
-            groups=1, bias=None)
-        buf5 = empty_strided_cuda((10, 576, 224, 224), (25165824, 43680, 1,
-            1), torch.float32)
-        triton_poi_fused_convolution_3[grid(4096)](buf4, buf5, 4096, XBLOCK
-            =128, num_warps=4, num_stages=1)
-        del buf4
-        buf6 = extern_kernels.batch_norm(primals_3, buf5, None, None, True)
-        del primals_3
-    return buf6, reinterpret_tensor(buf3, (10, 576, 224, 224), (327680, 1,
-        224, 1), 0), reinterpret_tensor(buf0, (64, 224, 224), (5120, 224, 1
-        ), 0), reinterpret_tensor(buf2, (64, 1, 224, 224), (5120, 1, 1, 1),
-        0), buf5, reinterpret_tensor(buf1, (6, 576, 1, 1), (576, 1, 1, 1), 0
-        ), buf7
-
-
-class ModelNew(nn.Module):
-    def __init__(self, num_layers: int, num_input_features: int, growth_rate: int):
-        """
-        :param num_layers: The number of layers in the dense block
-        :param num_input_features: The number of input feature maps
-        :param growth_rate: The growth rate for the dense block (new features added per layer)
-        """
-        super(ModelNew, self).__init__()
-        layers = []
-        for i in range(num_layers):
-            layers.append(self._make_layer(num_input_features + i * growth_rate, growth_rate))
-        self.layers = nn.ModuleList(layers)
-
-    def _make_layer(self, in_features: int, growth_rate: int):
-        """
-        Creates a single layer with BatchNorm, ReLU, Conv2D, and Dropout.
-        """
-        return nn.Sequential(
-            nn.BatchNorm2d(in_features),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_features, growth_rate, kernel_size=3, padding=1, bias=False),
-            nn.Dropout(0.0)
-        )
-    
-    def forward(self, input_0):
-        primals_1 = self.layers[0][0].weight
-        primals_2 = self.layers[0][2].weight
-        primals_3 = self.layers[0][1].weight
-        primals_4 = input_0
-        primals_5 = self.layers[0][3].weight
-        output = call([primals_1, primals_2, primals_3, primals_4, primals_5])
-        return output[0]
+@triton.jit
+def triton_poi_fused_cat_1(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, in_ptr7, in_ptr8, in_ptr9, in_ptr10, in_ptr11,
+    in_ptr12, in_ptr13, in_ptr14, in_ptr15, in_ptr16, in_ptr17, in_ptr18,
+    in_ptr19, in_ptr20, in_ptr21, in_ptr22, in_ptr23, in_ptr24, in_ptr25,
+    in_ptr26, in_ptr27, in_ptr28, in_ptr29, in_ptr30, in_ptr31, in_ptr32,
+    in_ptr33, in_ptr34, in_ptr35, in_ptr36, in_ptr37, in_ptr38, in_ptr39,
+    in_ptr40, in_ptr41, in_ptr42, in_ptr43, in_ptr44, in_ptr45, in_ptr46,
+    in_ptr47, in_ptr48, in_ptr49, in_ptr50, in_ptr51, in_ptr52, in_ptr53,
+    in_ptr54, in_ptr55, in_ptr56, in_ptr57, in_ptr58, in_ptr59, in_ptr60,
+    in_ptr61, in_ptr62, in_ptr63, in_ptr64, in_ptr65, in_ptr66, in_ptr67,
+    in_ptr68, in_ptr69, in_ptr70, in_ptr71, in_ptr72, in_ptr73, in_ptr74,
+    in_ptr75, in_ptr76, in_ptr77, in_ptr78, in_ptr79, in_ptr80, in_ptr81,
+    in_ptr82, in_ptr83, in_ptr84, in_ptr85, in_ptr86, in_ptr87, in_ptr88,
+    in_ptr89, in_ptr90, in_ptr91, in_ptr92, in_ptr93, in_ptr94, in_ptr95,
+    in_ptr96, in_ptr97, in_ptr98, in_ptr99, in_ptr100, in_ptr101, in_ptr102,
+    in_ptr103, in_ptr104, in_ptr105, in_ptr106, in_ptr107, in_ptr108,
+    in_ptr109, in_ptr110, in_ptr111, in_ptr112, in_ptr113, in_ptr114,
+    in_ptr115, in_ptr116, in_ptr117, in_ptr118, in_ptr119, in_ptr120,
+    in_ptr121, in_ptr122, in_ptr123, in_ptr124, in_ptr125, in_ptr126,
+    in_ptr127, in_ptr128, in_ptr129, in_ptr130, in_ptr131, in_ptr132,
+    in_ptr133, in_ptr134, in_ptr135, in_ptr136, in_ptr137, in_ptr138,
+    in_ptr139, in_ptr140, in_ptr141, in_ptr142, in_ptr143, in_ptr144,
+    in_ptr145, in_ptr146, in_ptr147, in_ptr148, in_ptr149, in_ptr150,
+    in_ptr151, in_ptr152, in_ptr153, in_ptr154, in_ptr155, in_ptr156,
+    in_ptr157, in_ptr158, in_ptr159, in_ptr160, in_ptr161, in_ptr162,
+    in_ptr163, in_ptr164, in_ptr165, in_ptr166, in_ptr167, in_ptr168,
+    in_ptr169, in_ptr170, in_ptr171, in_ptr172, in_ptr173, in_ptr174,
+    in_ptr175, in_ptr176, in_ptr177, in_ptr178, in_ptr179, in_ptr180,
+    in_ptr181, in_ptr182, in_ptr183, in_ptr184, in_ptr185, in_ptr186,
+    in_ptr187, in_ptr188, in_ptr189, in_ptr190, in_ptr191, in_ptr192,
+    in_ptr193, in_ptr194, in_ptr195, in_ptr196, in_ptr197, in_ptr198,
+    in_ptr199, in_ptr200, in_ptr201, in_ptr202, in_ptr203, in_ptr204,
+    in_ptr205, in_ptr206, in_ptr207, in_ptr208, in_ptr209, in_ptr210,
+    in_ptr211, in_ptr212, in_ptr213, in_ptr214, in_ptr215, in_ptr216,
+    in_ptr217, in_ptr218, in_ptr219, in_ptr220, in_ptr221, in_ptr222,
+    in_ptr223, in_ptr224, in_ptr225, in_ptr226, in_ptr227, in_ptr228,
+    in_ptr229, in_ptr230, in_ptr231, in_ptr232, in_ptr233, in_ptr234,
+    in_ptr235, in_ptr236, in_ptr237, in_ptr238, in_ptr239, in_ptr240,
+    in_ptr241, in_ptr242, in_ptr243, in_ptr244, in_ptr245, in_ptr246,
+    in_ptr247, in_ptr248, in_ptr249, in_ptr250, in_ptr251, in_ptr252,
+    in_ptr253, in_ptr254, in_ptr255, in_ptr256, in_ptr257, in_ptr258,
+    in_ptr259, in_ptr260, in_ptr261, in_ptr262, in_ptr263, in_ptr264,
+    in_ptr265, in_ptr266, in_ptr267, in_ptr268, in_ptr269, in_ptr270,
+    in_ptr271, in_ptr272, in_ptr273, in_ptr274, in_ptr275, in_ptr276,
+    in_ptr277, in_ptr278, in_ptr279, in_ptr280, in_ptr281, in_ptr282,
+    in_ptr283, in_ptr284, in_ptr285, in_ptr286, in_ptr287, in_ptr288,
+    in_ptr289, in_ptr290, in_ptr291, in_ptr292, in_ptr293, in_ptr294,
+    in_ptr295, in_ptr296, in_ptr297, in_ptr298, in_ptr299, in_ptr300,
+    in_ptr301, in_ptr302, in_ptr303, in_ptr304, in_ptr305, in_ptr306,
+    in_ptr307, in_ptr308, in_ptr309, in_ptr310, in_ptr311, in_ptr312,
+    in_ptr313, in_ptr314, in_ptr315, in_ptr316, in_ptr317, in_ptr318,
+    in_ptr319, in_ptr320, in_ptr321, in_ptr322, in_ptr323, in_ptr324,
+    in_ptr325, in_ptr326, in_ptr327, in_ptr328, in_ptr329, in_ptr330,
+    in_ptr331, in_ptr332, in_ptr333, in_ptr334, in_ptr335, in_ptr336,
+    in_ptr337, in_ptr338, in_ptr339, in_ptr340, in_ptr341, in_ptr342,
+    in_ptr343, in_ptr344, in_ptr345, in_ptr346, in_ptr347, in_ptr348,
+    in_ptr349, in_ptr350, in_ptr351, in_ptr352, in_ptr353, in_ptr354,
+    in_ptr355, in_ptr356, in_ptr357, in_ptr358, in_ptr359, in_ptr360,
+    in_ptr361, in_ptr362, in_ptr363, in_ptr364, in_ptr365, in_ptr366,
+    in_ptr367, in_ptr368, in_ptr369, in_ptr370, in_ptr371, in_ptr372,
+    in_ptr373, in_ptr374, in_ptr375, in_ptr376, in_ptr377, in_ptr378,
+    in_ptr379, in_ptr380, in_ptr381, in_ptr382, in_ptr383, in_ptr384,
+    in_ptr385, in_ptr386, in_ptr387, in_ptr388, in_ptr389, in_ptr390,
+    in_ptr391, in_ptr392, in_ptr393, in_ptr394, in_ptr395, in_ptr396,
+    in_ptr397, in_ptr398, in_ptr399, in_ptr400, in_ptr401, in_ptr402,
+    in_ptr403, in_ptr404, in_ptr405, in_ptr406, in_ptr407, in_ptr408,
+    in_ptr409, in_ptr410, in_ptr411, in_ptr412, in_ptr413, in_ptr414,
+    in_ptr415, in_ptr416, in_ptr417, in_ptr418, in_ptr419, in_ptr420,
+    in_ptr421, in_ptr422, in_ptr423, in_ptr424, in_ptr425, in_ptr426,
+    in_ptr427, in_ptr428, in_ptr429, in_ptr430, in_ptr431, in_ptr432,
+    in_ptr433, in_ptr434, in_ptr435, in_ptr436, in_ptr437, in_ptr438,
+    in_ptr439, in_ptr440, in_ptr441, in_ptr442, in_ptr443, in_ptr444,
+    in_ptr445, in_ptr446, in_ptr447, in_ptr448, in_ptr449, in_ptr450,
+    in_ptr451, in_ptr452, in_ptr453, in_ptr454, in_ptr455, in_ptr456,
+    in_ptr457, in_ptr458, in_ptr459, in_ptr460, in_ptr461, in_ptr462,
+    in_ptr463, in_ptr464, in_ptr465, in_ptr466, in_ptr467, in_ptr468,
+    in_ptr469, in_ptr470, in_ptr471, in_ptr472, in_ptr473, in_ptr474,
+    in_ptr475, in_ptr476, in_ptr477, in_ptr478, in_ptr479, in_ptr480,
+    in_ptr481, in_ptr482, in_ptr483, in_ptr484, in_ptr485, in_ptr486,
+    in_ptr487, in_ptr488, in_ptr489, in_ptr490, in_ptr491, in_ptr492,
+    in_ptr493, in_ptr494, in_ptr495, in_ptr496, in_ptr497, in_ptr498,
+    in_ptr499, in_ptr500, in_ptr501, in_ptr502, in_ptr503, in_ptr504,
+    in_ptr505, in_ptr506, in_ptr507, in_ptr508, in_ptr509, in_ptr510,
+    in_ptr511, in_ptr512, in_ptr513, in_ptr514, in_ptr515, in_ptr516,
+    in_ptr517, in_ptr518, in_ptr519, in_ptr520, in_ptr521, in_ptr522,
+    in_ptr523, in_ptr524, in_ptr525, in_ptr526, in_ptr527, in_ptr528,
+    in_ptr529, in_ptr530, in_ptr531, in_ptr532, in_ptr533, in_ptr534,
+    in_ptr535, in_ptr536, in_ptr537, in_ptr538, in_ptr539, in_ptr540,
+    in_ptr541, in_ptr542, in_ptr543, in_ptr544, in_ptr545, in_ptr546,
+    in_ptr547, in_ptr548, in_ptr549, in_ptr550, in_ptr551, in_ptr552,
+    in_ptr553, in_ptr554, in_ptr555, in_ptr556, in_ptr557, in_ptr558,
+    in_ptr559, in_ptr560, in_ptr561, in_ptr562, in_ptr563, in_ptr564,
+    in_ptr565, in_ptr566, in_ptr567, in_ptr568, in_ptr569, in_ptr570,
+    in_ptr571, in_ptr572, in_ptr573, in_ptr574, in_ptr575, in_ptr576,
+    in_ptr577, in_ptr578, in_ptr579, in_ptr580, in_ptr581, in_ptr582,
+    in_ptr583, in_ptr584, in_ptr585, in_ptr586, in_ptr587, in_ptr588,
+    in_ptr589, in_ptr590, in_ptr591, in_ptr592, in_ptr593, in_ptr594,
+    in_ptr595, in_ptr596, in_ptr597, in_ptr598, in_ptr599, in_ptr600,
+    in_ptr601, in_ptr602, in_ptr603, in_ptr604, in_ptr605, in_ptr606,
+    in_ptr607, in_ptr608, in_ptr609, in_ptr610, in_ptr611, in_ptr612,
+    in_ptr613, in_ptr614, in_ptr615, in_ptr616, in_ptr617, in_ptr618,
+    in_ptr619, in_ptr620, in_ptr621, in_ptr622, in_ptr623, in_ptr624,
+    in_ptr625, in_ptr626, in_ptr627, in_ptr628, in_ptr629, in_ptr630,
+    in_ptr631, in_ptr632, in_ptr633, in_ptr634, in_ptr635, in_ptr636,
+    in_ptr637, in_ptr638, in_ptr639, in_ptr640, in_ptr641, in_ptr642,
+    in_ptr643, in_ptr644, in_ptr645, in_ptr646, in_ptr647, in_ptr648,
+    in_ptr649, in_ptr650, in_ptr651, in_ptr652, in_ptr653, in_ptr654,
+    in_ptr655, in_ptr656, in_ptr657, in_ptr658, in_ptr659, in_ptr660,
+    in_ptr661, in_ptr662, in_ptr663, in_ptr664, in_ptr665, in_ptr666,
+    in_ptr667, in_ptr668, in_ptr669, in_ptr670, in_ptr671, in_ptr672,
+    in_ptr673, in_ptr674, in_ptr675, in_ptr676, in_ptr677, in_ptr678,
+    in_ptr679, in_ptr680, in_ptr681, in_ptr682, in_ptr683, in_ptr684,
+    in_ptr685, in_ptr686, in_ptr687, in_ptr688, in_ptr689, in_ptr690,
+    in_ptr691, in_ptr692, in_ptr693, in_ptr694, in_ptr695, in_ptr696,
+    in_ptr697, in_ptr698, in_ptr699, in_ptr700, in_ptr701, in_ptr702,
+    in_ptr703, in_ptr704, in_ptr705, in_ptr706, in_ptr707, in_ptr708,
+    in_ptr709, in_ptr710, in_ptr711, in_ptr712, in_ptr713, in_ptr714,
+    in_ptr715, in_ptr716, in_ptr717, in_ptr718, in_ptr719, in_ptr720,
+    in_ptr721, in_ptr722, in_ptr723, in_ptr724, in_ptr725, in_ptr726,
+    in_ptr727, in_ptr728, in_ptr729, in_ptr730, in_ptr731, in_ptr732,
+    in_ptr733, in_ptr734, in_ptr735, in_ptr736, in_ptr737, in_ptr738,
+    in_ptr739, in_ptr740, in_ptr741, in_ptr742, in_ptr743, in_ptr744,
+    in_ptr745, in_ptr746, in_ptr747, in_ptr748, in_ptr749, in_ptr750,
+    in_ptr751, in_ptr752, in_ptr753, in_ptr754, in_ptr755, in_ptr756,
+    in_ptr757, in_ptr758, in_ptr759, in_ptr760, in_ptr761, in_ptr762,
+    in_ptr763, in_ptr764, in_ptr765, in_ptr766, in_ptr767, in_ptr768,
+    in_ptr769, in_ptr770, in_ptr771, in_ptr772, in_ptr773, in_ptr774,
+    in_ptr775, in_ptr776, in_ptr777, in_ptr778, in_ptr779, in_ptr780,
+    in_ptr781, in_ptr782, in_ptr783, in_ptr784, in_ptr785, in_ptr786,
+    in_ptr787, in_ptr788, in_ptr789, in_ptr790, in_ptr791, in_ptr792,
+    in_ptr793, in_ptr794, in_ptr795, in_ptr796, in_ptr797, in_ptr798,
+    in_ptr799, in_ptr800, in_ptr801, in_ptr802, in_ptr803, in_ptr804,
+    in_ptr805, in_ptr806, in_ptr807, in_ptr808, in_ptr809, in_ptr810,
+    in_ptr811, in_ptr812, in_ptr813, in_ptr814, in_ptr815, in_ptr816,
+    in_ptr817, in_ptr818, in_ptr819, in_ptr820, in_ptr821, in_ptr822,
+    in_ptr823, in_ptr824, in_ptr825, in_ptr826, in_ptr827, in_ptr828,
+    in_ptr829, in_ptr830, in_ptr831, in_ptr832, in_ptr833, in_ptr834,
+    in_ptr835, in_ptr836, in_ptr837, in_ptr838, in_ptr839, in_ptr840,
+    in_ptr841, in_ptr842, in_ptr843, in_ptr844, in_ptr845, in_ptr846,
+    in_ptr847, in_ptr848, in_ptr849, in_ptr850, in_ptr851, in_ptr852,
+    in_ptr853, in_ptr854, in_ptr855, in_ptr856, in_ptr857, in_ptr858,
+    in_ptr859, in_ptr860, in_ptr861, in_ptr862, in_ptr863, in_ptr864,
+    in_ptr865, in_ptr866, in_ptr867, in_ptr868, in_ptr869, in_ptr870,
+    in_ptr871, in_ptr872, in_ptr873, in_ptr874, in_ptr875, in_ptr876,
+    in_ptr877, in_ptr878, in_ptr879, in_ptr880, in_ptr881, in_ptr882,
+    in_ptr883, in_ptr884, in_ptr885, in_ptr886, in_ptr887, in_ptr888,
+    in_ptr889, in_ptr890, in_ptr891, in_ptr892, in_ptr893, in_ptr894,
+    in_ptr895, in_ptr896, in_ptr897, in_ptr898, in_ptr899, in_ptr900,
+    in_ptr901, in_ptr902, in_ptr903, in_ptr904, in_ptr905, in_ptr906,
+    in_ptr907, in_ptr908, in_ptr909, in_ptr910, in_ptr911, in_ptr912,
+    in_ptr913, in_ptr914, in_ptr915, in_ptr916, in_ptr917, in_ptr918,
+    in_ptr919, in_ptr920, in_ptr921, in_ptr922, in_ptr923, in_ptr924,
+    in_ptr925, in_ptr926, in_ptr927, in_ptr928, in_ptr929, in_ptr930,
+    in_ptr931, in_ptr932, in_ptr933, in_ptr934, in_ptr935, in_ptr936,
+    in_ptr937, in_ptr938, in_ptr939, in_ptr940, in_ptr941, in_ptr942,
+    in_ptr943, in_ptr944, in_ptr945, in_ptr946, in_ptr947, in_ptr948,
+    in_ptr949, in_ptr950, in_ptr951, in_ptr952, in_ptr953, in_ptr954,
+    in_ptr955, in_ptr956, in_ptr957, in_ptr958, in_ptr959, in_ptr960,
+    in_ptr961, in_ptr962, in_ptr963, in_ptr964, in_ptr965, in_ptr966,
+    in_ptr967, in_ptr968, in_ptr969, in_ptr970, in_ptr971, in_ptr972,
+    in_ptr973, in_ptr974, in_ptr975, in_ptr976, in_ptr977, in_ptr978,
+    in_ptr979, in_ptr980, in_ptr981, in_ptr982, in_ptr983, in_ptr984,
+    in_ptr985, in_ptr986, in_ptr987, in_ptr988, in_ptr989, in_ptr990,
+    in_ptr991, in_ptr992, in_ptr993, in_ptr994, in_ptr995, in_ptr996,
+    in_ptr997, in_ptr998, in_ptr999, in_ptr1000, in_ptr1001, in_ptr1002,
+    in_ptr1003, in_ptr1004, in_ptr1005, in_ptr1006, in_ptr1007, in_ptr1008,
+    in_ptr1009, in_ptr1010, in_ptr1011, in_ptr1012, in_ptr1013, in_ptr1014,
+    in_ptr1015, in_ptr1016, in_ptr1017, in_ptr1018, in_ptr1019, in_ptr1020,
+    in_ptr1021, in_ptr1022, in_ptr1023, in_ptr1024, in_ptr1025, in_ptr1026,
+    in_ptr1027, in_ptr1028, in_ptr1029, in_ptr1030, in_ptr1031, in_ptr1032,
+    in_ptr1033, in_ptr1034, in_ptr1035, in_ptr1036, in_ptr1037, in_ptr1038,
+    in_ptr1039, in_ptr1040, in_ptr1041, in_ptr1042, in_ptr1043, in_ptr1044,
+    in_ptr1045, in_ptr1046, in_ptr1047, in_ptr1048, in_ptr1049, in_ptr1050,
+    in_ptr1051, in_ptr1052, in_ptr1053, in_ptr1054, in_ptr1055, in_ptr1056,
+    in_ptr1057, in_ptr1058, in_ptr1059, in_ptr1060, in_ptr1061, in_ptr1062,
+    in_ptr1063, in_ptr1064, in_ptr1065, in_ptr1066, in_ptr1067, in_ptr1068,
+    in_ptr1069, in_ptr1070, in_ptr1071, in_ptr1072, in_ptr1073, in_ptr1074,
+    in_ptr1075, in_ptr1076, in_ptr1077, in_ptr1078, in_ptr1079, in_ptr1080,
+    in_ptr1081, in_ptr1082, in_ptr1083, in_ptr1084, in_ptr1085, in_ptr1086,
+    in_ptr1087, in_ptr1088, in_ptr1089, in_ptr1090, in_ptr1091, in_ptr1092,
+    in_ptr1093, in_ptr1094, in_ptr1095, in_ptr1096, in_ptr1097, in_ptr1098,
+    in_ptr1099, in_ptr1100, in_ptr1101, in_ptr1102, in_ptr1103, in_ptr1104,
+    in_ptr1105, in_ptr1106, in_ptr1107, in_ptr1108, in_ptr1109, in_ptr1110,
+    in_ptr1111, in_ptr1112, in_ptr1113, in_ptr1114, in_ptr1115, in_ptr1116,
+    in_ptr1117, in_ptr1118, in_ptr1119, in_ptr1120, in_ptr1121, in_ptr1122,
+    in_ptr1123, in_ptr1124, in_ptr1125, in_ptr1126, in_ptr1127, in_ptr1128,
+    in_ptr1129, in_ptr1130, in_ptr1131, in_ptr1132, in_ptr1133, in_ptr1134,
+    in_ptr1135, in_ptr1136, in_ptr1137, in_ptr1138, in_ptr1139, in_ptr1140,
+    in_ptr1141, in_ptr1142, in_ptr1143, in_ptr1144, in_ptr1145, in_ptr1146,
+    in_ptr1147, in_ptr1148, in_ptr1149, in_ptr1150, in_ptr1151, in_ptr1152,
+    in_ptr1153, in_ptr1154, in_ptr1155, in_ptr1156, in_ptr1157, in_ptr1158,
+    in_ptr1159, in_ptr1160, in_ptr1161, in_ptr1162, in_ptr1163, in_ptr1164,
+    in_ptr1165, in_ptr1166, in_ptr1167, in_ptr1168, in_ptr1169, in_ptr1170,
+    in_ptr1171, in_ptr1172, in_ptr1173, in_ptr1174, in_ptr1175, in_ptr1176,
+    in_ptr1177, in_ptr1178, in_ptr1179, in_ptr1180, in_ptr1181, in_ptr1182,
+    in_ptr1183, in_ptr1184, in_ptr1185, in_ptr1186, in_ptr1187, in_ptr1188,
+    in_ptr1189, in_ptr1190, in_ptr1191, in_ptr1192, in_ptr1193, in_ptr1194,
+    in_ptr1195, in_ptr1196, in_ptr1197, in_ptr1198, in_ptr1199, in_ptr1200,
+    in_ptr1201, in_ptr1202, in_ptr1203, in_ptr1204, in_ptr1205, in_ptr1206,
+    in_ptr1207, in_ptr1208, in_ptr1209, in_ptr1210, in_ptr1211, in_ptr1212,
+    in_ptr1213, in_ptr1214, in_ptr1215, in_ptr1216, in_ptr1217, in_ptr1218,
+    in_ptr1219, in_ptr1220, in_ptr1221, in_ptr1222, in_ptr1223, in_ptr1224,
+    in_ptr1225, in_ptr1226, in_ptr1227, in_ptr1228, in_ptr1229, in_ptr1230,
+    in_ptr1231, in_ptr1232, in_ptr1233, in_ptr1234, in_ptr1235, in_ptr1236,
+    in_ptr1237, in_ptr1238, in_ptr1239, in_ptr1240, in_ptr1241, in_ptr1242,
+    in_ptr1243, in_ptr1244, in_ptr1245, in_ptr1246, in_ptr1247, in_ptr1248,
+    in_ptr1249, in_ptr1250, in_ptr1251, in_ptr1252, in_ptr1253, in_ptr1254,
+    in_ptr1255, in_ptr1256, in_ptr1257, in_ptr1258, in_ptr1259, in_ptr1260,
+    in_ptr

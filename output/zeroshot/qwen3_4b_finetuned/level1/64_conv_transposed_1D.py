@@ -1,31 +1,29 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 507642624
+def triton_poi_fused__unsafe_index_convolution_relu_0(in_ptr0, in_ptr1,
+    out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 2097152
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 49568 % 128
-    x0 = xindex % 49568
-    x4 = xindex // 16777216
-    x2 = xindex // 49568
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + (x0 + 16777216 * x4), xmask, eviction_policy=
-        'evict_last')
+    x0 = xindex % 128
+    x1 = xindex // 128
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 128 * x1), xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + (x1 + 128 * x3), tmp2, xmask)
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = tmp3 == tmp2
+    tl.store(out_ptr0 + x2, tmp4, xmask)
 
 
 def call(args):
@@ -33,16 +31,17 @@ def call(args):
     args.clear()
     assert_size_stride(primals_1, (128, 128, 3), (384, 3, 1))
     assert_size_stride(primals_2, (128,), (1,))
-    assert_size_stride(primals_3, (64, 128, 65536), (8388608, 65536, 1))
+    assert_size_stride(primals_3, (64, 128, 65536), (8192000, 65536, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((64, 128, 49568), (6553600, 5120, 1),
-            torch.float32)
+        buf0 = empty_strided_cuda((64, 128, 65536), (8192000, 65536, 1),
+            torch.bool)
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(507642624)](primals_3, primals_1,
-            buf0, 507642624, XBLOCK=512, num_warps=8, num_stages=1)
+        triton_poi_fused__unsafe_index_convolution_relu_0[grid(2097152)](primals_1, primals_2, buf0, 2097152, XBLOCK=1024, num_warps=4,
+            num_stages=1)
         del primals_1
-    return buf0, primals_2, primals_3
+        del primals_2
+    return buf0, primals_3, buf0
 
 
 class ModelNew(nn.Module):
@@ -59,13 +58,9 @@ class ModelNew(nn.Module):
         groups (int, optional): Number of blocked connections from input channels to output channels. Defaults to 1.
         bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
     """
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-        stride: int = 1, padding: int = 0, output_padding: int = 0,
-        groups: int = 1, bias: bool = False):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, output_padding: int = 0, groups: int = 1, bias: bool = False):
         super(ModelNew, self).__init__()
-        self.conv1d_transpose = nn.ConvTranspose1d(in_channels, out_channels,
-            kernel_size, stride=stride, padding=padding, output_padding=
-            output_padding, groups=groups, bias=bias)
+        self.conv1d_transpose = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding, groups=groups, bias=bias)
         
     def forward(self, input_0):
         primals_1 = self.conv1d_transpose.weight
