@@ -1,16 +1,15 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_add_div_mul_rsub_0(in_ptr0, in_ptr1, in_ptr2, out_ptr0,
+def triton_poi_fused_add_div_matmul_mul_0(in_ptr0, in_ptr1, out_ptr0,
     xnumel, XBLOCK: tl.constexpr):
     xnumel = 16777216
     xoffset = tl.program_id(0) * XBLOCK
@@ -21,25 +20,14 @@ def triton_poi_fused_add_div_mul_rsub_0(in_ptr0, in_ptr1, in_ptr2, out_ptr0,
     x2 = xindex
     tmp0 = tl.load(in_ptr0 + (x0 + 4096 * x1), xmask)
     tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
-    tmp3 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
-    tmp5 = tl.load(in_ptr1 + 4096 * x1, xmask, eviction_policy='evict_last')
-    tmp7 = tl.load(in_ptr2 + x2, xmask)
-    tmp2 = tmp1 + tmp3
-    tmp4 = tmp2 * 0.5
-    tmp6 = tmp5 + tmp5
-    tmp8 = tmp4 * tmp6
-    tmp9 = tmp7 * tmp7
-    tmp10 = 1e-05
-    tmp11 = tmp9 + tmp10
-    tmp12 = tl.math.rsqrt(tmp11)
-    tmp13 = tmp8 * tmp12
-    tmp14 = tmp4 * tmp4
-    tmp15 = tl.math.rsqrt(tmp14)
-    tmp16 = tmp0 * tmp15
-    tmp17 = tmp8 * tmp16
-    tmp18 = tmp17 * tmp12
-    tmp19 = tmp13 - tmp18
-    tl.store(out_ptr0 + x2, tmp19, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tmp0 + tmp0
+    tmp4 = 0.5
+    tmp5 = tmp3 * tmp4
+    tmp6 = tmp5 * tmp5
+    tmp7 = tmp2 * tmp2
+    tmp8 = tmp6 + tmp7
+    tl.store(out_ptr0 + x2, tmp8, xmask)
 
 
 def call(args):
@@ -51,9 +39,8 @@ def call(args):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((4096, 4096), (4096, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_add_div_mul_rsub_0[grid(16777216)](arg1_1,
-            arg0_1, arg0_1, buf0, 16777216, XBLOCK=512, num_warps=8,
-            num_stages=1)
+        triton_poi_fused_add_div_matmul_mul_0[grid(16777216)](arg0_1,
+            arg1_1, buf0, 16777216, XBLOCK=1024, num_warps=4, num_stages=1)
         del arg0_1
         del arg1_1
     return buf0,

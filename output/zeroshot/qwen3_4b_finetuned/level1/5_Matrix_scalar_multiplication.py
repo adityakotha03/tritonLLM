@@ -1,17 +1,15 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_per_fused_mul_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_mul_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
     xnumel = 262144
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
@@ -26,13 +24,13 @@ def triton_per_fused_mul_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
 def call(args):
     arg0_1, = args
     args.clear()
-    assert_size_stride(arg0_1, (65536, 16384), (16384, 1))
+    assert_size_stride(arg0_1, (16384, 4096), (4096, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((65536, 16384), (16384, 1), torch.float32)
+        buf0 = empty_strided_cuda((16384, 4096), (4096, 1), torch.float32)
         get_raw_stream(0)
-        triton_per_fused_mul_0[grid(262144)](arg0_1, buf0, 262144, XBLOCK=
-            128, num_warps=4, num_stages=1)
+        triton_poi_fused_mul_0[grid(262144)](arg0_1, buf0, 262144, XBLOCK=
+            256, num_warps=4, num_stages=1)
         del arg0_1
     return buf0,
 
@@ -48,15 +46,3 @@ class ModelNew(nn.Module):
         arg0_1 = input_0
         output = call([arg0_1])
         return output[0]
-
-M = 16384 * 4
-N = 4096 * 4
-
-def test():
-    arg0_1_1 = torch.rand(65536, 16384, device='cuda:0')
-    output = ModelNew()
-    output = output(arg0_1_1)
-    return output
-
-
-test()

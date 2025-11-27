@@ -1,55 +1,600 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_matmul_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
-    tl.constexpr):
-    xnumel = 16777216
+def triton_poi_fused_clone_0(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 4096 % 4096
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x3, tmp2, xmask)
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
 
 
-def call(args):
-    arg0_1, arg1_1 = args
-    args.clear()
-    assert_size_stride(arg0_1, (2048, 8192), (8192, 1))
-    assert_size_stride(arg1_1, (8192, 8196), (8192, 1))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((2048, 8196), (8196, 1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_matmul_0[grid(16777216)](arg0_1, arg1_1, buf0, 
-            16777216, XBLOCK=256, num_warps=4, num_stages=1)
-        del arg0_1
-        del arg1_1
-    return buf0,
+@triton.jit
+def triton_poi_fused_clone_1(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
 
 
-class ModelNew(nn.Module):
-    """
-    Simple model that performs a single matrix multiplication (C = A * B)
-    """
-    def __init__(self):
-        super(ModelNew, self).__init__()
-    
-    def forward(self, input_0, input_1):
-        arg0_1 = input_0
-        arg1_1 = input_1
-        output = call([arg0_1, arg1_1])
-        return output[0]
+@triton.jit
+def triton_poi_fused_clone_2(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_3(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_4(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_5(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_6(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_7(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_8(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_9(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_10(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_11(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_12(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_13(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_14(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_15(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_16(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_17(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_18(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_19(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_20(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_21(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_22(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_23(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_24(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_25(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_26(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_27(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_28(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 4096
+    y1 = yindex // 4096
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 4096 * x2 + 16777216 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 8192 * y3), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_clone_29(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
+    constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 8192
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0,

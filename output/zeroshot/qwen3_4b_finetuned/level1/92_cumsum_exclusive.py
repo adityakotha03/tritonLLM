@@ -1,93 +1,715 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_cat_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 32767
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 32768
-    x1 = xindex // 32768
-    x2 = xindex
-    tmp0 = x0
-    tl.full([1], 0, tl.int64)
-    tmp3 = tl.full([1], 32768, tl.int64)
-    tmp4 = tmp0 < tmp3
-    tmp5 = tl.load(in_ptr0 + (x0 + 32768 * x1), tmp4 & xmask, eviction_policy
-        = 'evict_last', other=0.0)
-    tmp6 = tl.load(in_ptr1 + x0, tmp4 & xmask, eviction_policy='evict_last',
-        other=0.0)
-    tmp7 = tmp5 + tmp6
-    tmp8 = tl.full(tmp7.shape, 0.0, tmp7.dtype)
-    tmp9 = tl.where(tmp4, tmp8, tmp7)
-    tl.store(out_ptr0 + x2, tmp9, xmask)
-
-
-@triton.jit
-def triton_poi_fused_cumsum_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_cat_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
     xnumel = 32768
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x2 = xindex
-    x0 = xindex % 32768
-    tmp0 = x2
-    tl.full([1], 0, tl.int64)
-    tmp3 = tl.full([1], 32768, tl.int64)
-    tmp4 = tmp0 < tmp3
-    tmp5 = tl.load(in_ptr0 + x0, tmp4 & xmask, eviction_policy='evict_last',
-        other=0.0)
-    tmp6 = tmp0 + tmp5
-    tmp7 = 0.0
-    tmp8 = tmp6 < tmp7
-    tmp9 = libdevice.select(tmp8, tmp7, tmp6)
-    tl.store(out_ptr0 + x2, tmp9, xmask)
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x0, tmp2, xmask)
 
 
-def call(args):
-    arg0_1, arg1_1 = args
-    args.clear()
-    assert_size_stride(arg0_1, (32768,), (1,))
-    assert_size_stride(arg1_1, (32768,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((32768,), (1,), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_cat_0[grid(32767)](arg1_1, arg0_1, buf0, 32767,
-            XBLOCK=128, num_warps=4, num_stages=1)
-        del arg0_1
-        del arg1_1
-        buf1 = empty_strided_cuda((32768,), (1,), torch.float32)
-        triton_poi_fused_cumsum_1[grid(32768)](buf0, buf1, 32768, XBLOCK=128,
-            num_warps=4, num_stages=1)
-        del buf0
-    return buf1,
+@triton.jit
+def triton_poi_fused_cat_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
 
 
-class ModelNew(nn.Module):
-    """
-    A model that performs an exclusive cumulative sum (does not include the current element).
+@triton.jit
+def triton_poi_fused_cat_2(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
 
-    Parameters:
-        dim (int): The dimension along which to perform the exclusive cumulative sum.
-    """
 
-    def __init__(self, dim):
-        super(ModelNew, self).__init__()
-        self.dim = dim
+@triton.jit
+def triton_poi_fused_cat_3(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
 
-    def forward(self, input_0):
-        arg1_1 = input_0
-        arg0_1 = arg1_1
-        output = call([arg0_1, arg1_1])
-        return output[0]
+
+@triton.jit
+def triton_poi_fused_cat_4(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_5(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_6(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_7(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_8(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_9(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_10(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_11(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_12(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_13(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_14(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_15(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_16(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_17(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_18(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_19(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_20(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_21(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_22(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_23(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_24(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_25(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_26(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_27(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_28(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_29(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_30(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_31(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_32(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_33(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_34(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_35(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_36(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_37(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_38(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_39(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_40(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_41(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_42(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_43(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_44(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_45(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_46(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_47(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_48(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_49(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_50(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_51(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_52(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_53(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_54(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_55(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_56(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_57(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 + tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_58(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl

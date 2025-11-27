@@ -1,3 +1,5 @@
 .env
 __pycache__/
 kernelbook.csv
+results.jsonl
+processed_reasoning_traces.csv

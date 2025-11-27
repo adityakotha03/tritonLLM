@@ -1,51 +1,61 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_mul_sum_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
+def triton_poi_fused_add_mul_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
     tl.constexpr):
-    xnumel = 49152
+    xnumel = 13762880
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
+    x0 = xindex % 256
+    x1 = xindex // 256 % 512
+    x2 = xindex // 131072
     x3 = xindex
-    x1 = xindex // 16384 % 256
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp0 = tl.load(in_ptr0 + (x0 + 256 * x1 + 65536 * x2), xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp3 = tl_math.mul(tmp0, tmp1)
-    tmp4 = tl.broadcast_to(tmp3, [XBLOCK])
-    tmp6 = triton_helpers.promote_to_tensor(tl.sum(tmp4, 1))
-    tl.store(out_ptr0 + x3, tmp6, xmask)
+    tmp3 = tmp2 * tmp2
+    tmp4 = tl.load(in_ptr0 + (256 + x0 + 256 * x1 + 65536 * x2), xmask)
+    tmp5 = tl.load(in_ptr1 + (256 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 * tmp6
+    tmp8 = tmp3 + tmp7
+    tmp9 = tl.load(in_ptr0 + (512 + x0 + 256 * x1 + 65536 * x2), xmask)
+    tmp10 = tl.load(in_ptr1 + (512 + x0), xmask, eviction_policy='evict_last')
+    tmp11 = tmp9 + tmp10
+    tmp12 = tmp11 * tmp11
+    tmp13 = tmp8 + tmp12
+    tmp14 = tl.load(in_ptr0 + (768 + x0 + 256 * x1 + 65536 * x2), xmask)
+    tmp15 = tl.load(in_ptr1 + (768 + x0), xmask, eviction_policy='evict_last')
+    tmp16 = tmp14 + tmp15
+    tmp17 = tmp16 * tmp16
+    tmp18 = tmp13 + tmp17
+    tl.store(out_ptr0 + x3, tmp18, xmask)
 
 
 def call(args):
     arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(arg0_1, (8, 256, 512, 256), (65536, 256, 512, 1))
+    assert_size_stride(arg0_1, (8, 256, 512, 256), (32768, 128, 256, 1))
     assert_size_stride(arg1_1, (256, 768), (768, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((8, 256, 512, 768), (100352, 4, 2, 1),
+        buf0 = empty_strided_cuda((8, 256, 512, 256), (32768, 128, 256, 1),
             torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_mul_sum_0[grid(49152)](arg0_1, arg1_1, buf0, 49152,
-            XBLOCK=128, num_warps=4, num_stages=1)
+        triton_poi_fused_add_mul_0[grid(13762880)](arg0_1, arg1_1, buf0, 
+            13762880, XBLOCK=512, num_warps=8, num_stages=1)
         del arg0_1
         del arg1_1
-    return reinterpret_tensor(buf0, (8, 256, 512, 768), (100352, 4, 2, 1), 0),
-        reinterpret_tensor(buf0, (8, 512, 256, 768), (100352, 2, 1, 0), 1)
+    return buf0,
 
 
 class ModelNew(nn.Module):

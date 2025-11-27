@@ -1,44 +1,42 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_per_fused_sum_0(in_out_ptr0, in_ptr0, xnumel, rnumel):
-    XBLOCK: tl.constexpr = 1
-    RBLOCK: tl.constexpr = 256
+def triton_poi_fused_sum_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 5242880
     xoffset = tl.program_id(0) * XBLOCK
-    tl.full([1], xoffset, tl.int32)
-    tl.full([RBLOCK], True, tl.int1)
-    rindex = tl.arange(0, RBLOCK)[:]
-    tl.full([RBLOCK], True, tl.int1)
-    r0 = rindex
-    tmp0 = tl.load(in_ptr0 + r0, None)
-    tmp1 = tl.broadcast_to(tmp0, [RBLOCK])
-    tmp3 = tl.sum(tmp1, 1)[:, None]
-    tl.debug_barrier()
-    tl.store(in_out_ptr0 + tl.full([1], 0, tl.int32), tmp3, None)
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 4096
+    x1 = xindex // 4096 % 4095
+    x2 = xindex // 16777216
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 4096 * x1 + 16777216 * x2), xmask)
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK])
+    tmp2 = tl.sum(tmp1, 0)[:, None]
+    tl.store(out_ptr0 + x3, tmp2, xmask)
 
 
 def call(args):
     arg0_1, = args
     args.clear()
-    assert_size_stride(arg0_1, (128, 4096, 4095), (16796448, 4096, 1))
+    assert_size_stride(arg0_1, (128, 4096, 4095), (16777216, 4096, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((), (), torch.float32)
-        buf1 = buf0
-        del buf0
+        buf0 = empty_strided_cuda((128, 4095, 1), (4095, 1, 16777216), torch
+            .float32)
         get_raw_stream(0)
-        triton_per_fused_sum_0[grid(1)](buf1, arg0_1, 1, 256, num_warps=2,
-            num_stages=1)
+        triton_poi_fused_sum_0[grid(5242880)](arg0_1, buf0, 5242880,
+            XBLOCK=1024, num_warps=4, num_stages=1)
         del arg0_1
-    return buf1,
+    return buf0,
 
 
 class ModelNew(nn.Module):

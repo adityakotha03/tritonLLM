@@ -1,264 +1,263 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused__native_batch_norm_legit_0(in_ptr0, out_ptr0, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 2560
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 40
-    x1 = xindex // 40
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 160 * x1), xmask)
-    tmp1 = tl.load(in_ptr0 + (40 + x0 + 160 * x1), xmask)
-    tmp3 = tl.load(in_ptr0 + (80 + x0 + 160 * x1), xmask)
-    tmp5 = tl.load(in_ptr0 + (120 + x0 + 160 * x1), xmask)
-    tmp10 = tl.load(in_ptr0 + (160 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp12 = tl.load(in_ptr0 + (1 + 160 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp14 = tl.load(in_ptr0 + (41 + 160 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp16 = tl.load(in_ptr0 + (81 + 160 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp18 = tl.load(in_ptr0 + (121 + 160 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp23 = tl.load(in_ptr0 + (2 * x0 + 320 * x1), xmask)
-    tmp25 = tl.load(in_ptr0 + (320 + 2 * x0 + 320 * x1), xmask)
-    tmp27 = tl.load(in_ptr0 + (640 + 2 * x0 + 320 * x1), xmask)
-    tmp29 = tl.load(in_ptr0 + (960 + 2 * x0 + 320 * x1), xmask)
-    tmp2 = tmp1 + tmp0
-    tmp4 = tmp3 + tmp2
-    tmp6 = tmp5 + tmp4
-    tmp7 = 16.0
-    tmp8 = tmp6 / tmp7
-    tmp9 = tmp10 / tmp7
-    tmp11 = tmp8 + tmp9
-    tmp13 = tmp12 + tmp11
-    tmp15 = tmp14 + tmp13
-    tmp17 = tmp16 + tmp15
-    tmp19 = tmp18 + tmp17
-    tmp20 = 40.0
-    tmp21 = tmp19 / tmp20
-    tmp22 = tmp21 + tmp11
-    tmp24 = tmp23 + tmp22
-    tmp26 = tmp25 + tmp24
-    tmp28 = tmp27 + tmp26
-    tmp30 = tmp29 + tmp28
-    tmp31 = tmp30 / tmp20
-    tmp32 = tmp31 + tmp22
-    tmp33 = tmp23 - tmp22
-    tmp34 = tmp33 * tmp33
-    tmp35 = tmp25 - tmp22
-    tmp36 = tmp35 * tmp35
-    tmp37 = tmp34 + tmp36
-    tmp38 = tmp27 - tmp22
-    tmp39 = tmp38 * tmp38
-    tmp40 = tmp37 + tmp39
-    tmp41 = tmp29 - tmp22
-    tmp42 = tmp41 * tmp41
-    tmp43 = tmp40 + tmp42
-    tmp44 = 16.0
-    tmp45 = tmp43 / tmp44
-    tmp46 = libdevice.rsqrt(tmp45)
-    tl.store(out_ptr0 + x2, tmp46, xmask)
-
-
-@triton.jit
-def triton_poi_fused__native_batch_norm_legit_1(in_ptr0, in_ptr1, out_ptr0,
-    out_ptr1, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2560
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex % 40
-    x1 = xindex // 40
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 160 * x1), xmask)
-    tmp1 = tl.load(in_ptr1 + (x0 + 160 * x1), xmask)
-    tmp2 = tmp0 - tmp1
-    tmp3 = tmp2 * tmp2
-    tl.store(out_ptr0 + x2, tmp3, xmask)
-    tl.store(out_ptr1 + x2, tmp1, xmask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_2(in_ptr0, out_ptr0, ynumel, xnumel,
-    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
-    ynumel = 2560
-    xnumel = 27
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
-    xmask = xindex < xnumel
-    x1 = xindex % 9
-    x2 = xindex // 9
-    y0 = yindex % 40
-    y1 = yindex // 40
-    y3 = yindex
-    tmp0 = tl.load(in_ptr0 + (y0 + 160 * y1 + 6400 * x2 + 19200 * x1), xmask &
-        ymask, eviction_policy='evict_last')
-    tl.store(out_ptr0 + (x1 + 27 * y3), tmp0, xmask & ymask)
-
-
-@triton.jit
-def triton_poi_fused_convolution_3(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
-    .constexpr):
+def triton_poi_fused__native_batch_norm_legit_0(in_ptr0, out_ptr0, out_ptr1,
+    out_ptr2, out_ptr3, out_ptr4, xnumel, XBLOCK: tl.constexpr):
     xnumel = 16384
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x2 = xindex
-    x1 = xindex // 64
-    tmp0 = tl.load(in_out_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tl.store(in_out_ptr0 + x2, tmp2, xmask)
-
-
-@triton.jit
-def triton_poi_fused_avg_pool2d_4(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK
-    : tl.constexpr, XBLOCK: tl.constexpr):
-    ynumel = 2048
-    xnumel = 16
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
-    xmask = xindex < xnumel
-    x0 = xindex
-    y0 = yindex % 64
-    y2 = yindex // 64
-    y3 = yindex
-    tmp0 = tl.load(in_ptr0 + (y0 + 64 * x0 + 1024 * y2), xmask & ymask,
-        eviction_policy='evict_last')
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, YBLOCK])
-    tmp3 = tl.where(ymask & xmask, tmp1, 0)
-    tmp4 = tl.sum(tmp3, 1)[:, None]
-    tmp5 = 16.0
-    tmp6 = tmp4 / tmp5
-    tl.store(out_ptr0 + (x0 + 16 * y3), tmp6, xmask & ymask)
-
-
-@triton.jit
-def triton_poi_fused_avg_pool2d_5(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK
-    : tl.constexpr, XBLOCK: tl.constexpr):
-    ynumel = 1024
-    xnumel = 4
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
-    xmask = xindex < xnumel
-    x0 = xindex
-    y0 = yindex % 256
-    y1 = yindex // 256
-    y2 = yindex
-    tmp0 = tl.load(in_ptr0 + (y0 + 256 * x0 + 1024 * y1), xmask & ymask,
-        eviction_policy='evict_last')
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, YBLOCK])
-    tmp3 = tl.where(ymask & xmask, tmp1, 0)
-    tmp4 = tl.sum(tmp3, 1)[:, None]
-    tmp5 = 4.0
-    tmp6 = tmp4 / tmp5
-    tl.store(out_ptr0 + (x0 + 4 * y2), tmp6, xmask & ymask)
-
-
-def call(args):
-    (primals_1, primals_2, primals_3, primals_4, primals_5, primals_6,
-        primals_7) = args
-    args.clear()
-    assert_size_stride(primals_1, (64, 3, 32, 32, 32), (49152, 16384, 512,
-        16, 1))
-    assert_size_stride(primals_2, (16, 3, 3, 3, 3), (243, 81, 27, 9, 1))
-    assert_size_stride(primals_3, (16,), (1,))
-    assert_size_stride(primals_4, (16, 1, 1, 1), (1, 1, 1, 1))
-    assert_size_stride(primals_5, (16,), (1,))
-    assert_size_stride(primals_6, (16, 1, 1, 1), (1, 1, 1, 1))
-    assert_size_stride(primals_7, (16,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 3, 3, 3, 3), (243, 1, 81, 27, 9), 
-            torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused__native_batch_norm_legit_0[grid(2560)](primals_4,
-            buf0, 2560, XBLOCK=256, num_warps=4, num_stages=1)
-        buf1 = empty_strided_cuda((16, 3, 3, 3, 3), (243, 1, 81, 27, 9),
-            torch.float32)
-        triton_poi_fused__native_batch_norm_legit_1[grid(2560)](primals_2,
-            buf0, buf1, buf0, 2560, XBLOCK=256, num_warps=4, num_stages=1)
-        del primals_4
-        del primals_2
-        buf2 = extern_kernels.convolution(primals_1, buf1, stride=(2, 2, 2),
-            padding=(1, 1, 1), dilation=(1, 1, 1), transposed=True,
-            output_padding=(0, 0, 0), groups=1, bias=None)
-        assert_size_stride(buf2, (64, 16, 33, 34, 34), (3757504, 234793, 70669,
-            2065, 64))
-        buf3 = buf2
-        del buf2
-        triton_poi_fused_convolution_2[grid(2560, 27)](primals_3, buf3, 
-            2560, 27, XBLOCK=27, YBLOCK=64, num_warps=4, num_stages=1)
-        buf4 = empty_strided_cuda((64, 16, 33, 34, 34), (3757504, 234793,
-            70669, 2065, 64), torch.float32)
-        extern_kernels.addmm(primals_7, buf3, buf0, alpha=1, beta=1,
-            out=buf4)
-        del primals_7
-        del buf0
-        buf5 = buf4
-        del buf4
-        triton_poi_fused_convolution_3[grid(16384)](buf5, primals_5,
-            16384, XBLOCK=128, num_warps=4, num_stages=1)
-        del primals_5
-        buf6 = empty_strided_cuda((64, 16, 16, 16, 16), (4194304, 262144,
-            16384, 1024, 1), torch.float32)
-        triton_poi_fused_avg_pool2d_4[grid(2048, 16)](buf5, buf6, 2048, 16,
-            XBLOCK=16, YBLOCK=64, num_warps=4, num_stages=1)
-        buf7 = empty_strided_cuda((64, 16, 4, 4, 4), (4096, 256, 64, 16, 1),
-            torch.float32)
-        triton_poi_fused_avg_pool2d_5[grid(1024, 4)](buf6, buf7, 1024, 4,
-            XBLOCK=4, YBLOCK=128, num_warps=4, num_stages=1)
-    return buf7, primals_1, buf5, primals_6, buf1, reinterpret_tensor(buf3,
-        (64, 3, 33, 34, 34), (3757504, 234793, 70669, 2065, 64), 0)
-
-
-class ModelNew(nn.Module):
-    """
-    A model that performs a 3D transposed convolution, followed by batch normalization, 
-    two average pooling layers.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias_shape):
-        super(ModelNew, self).__init__()
-        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels,
-            kernel_size, stride=stride, padding=padding)
-        self.batch_norm = nn.BatchNorm3d(out_channels)
-        self.avg_pool1 = nn.AvgPool3d(kernel_size=2)
-        self.avg_pool2 = nn.AvgPool3d(kernel_size=2)
-
-    def forward(self, input_0):
-        primals_4 = self.conv_transpose.weight
-        primals_3 = self.conv_transpose.bias
-        primals_2 = self.batch_norm.weight
-        primals_5 = self.batch_norm.bias
-        primals_1 = input_0
-        primals_6 = self.avg_pool1.bias
-        primals_7 = self.avg_pool2.bias
-        output = call([primals_1, primals_2, primals_3, primals_4,
-            primals_5, primals_6, primals_7])
-        return output[0]
+    x3 = xindex
+    x1 = xindex // 1024 % 16
+    x0 = xindex % 1024
+    tmp0 = tl.load(in_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + (x1 + 16384), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (1024 + x1), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (16384 + x1), xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr0 + (20480 + x1), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr0 + (25600 + x1), xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr0 + (30720 + x1), xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr0 + (35840 + x1), xmask, eviction_policy='evict_last')
+    tmp18 = tl.load(in_ptr0 + (40960 + x1), xmask, eviction_policy='evict_last')
+    tmp20 = tl.load(in_ptr0 + (46080 + x1), xmask, eviction_policy='evict_last')
+    tmp23 = tl.load(in_ptr0 + (51200 + x1), xmask, eviction_policy='evict_last')
+    tmp25 = tl.load(in_ptr0 + (56320 + x1), xmask, eviction_policy='evict_last')
+    tmp28 = tl.load(in_ptr0 + (61440 + x1), xmask, eviction_policy='evict_last')
+    tmp30 = tl.load(in_ptr0 + (66560 + x1), xmask, eviction_policy='evict_last')
+    tmp33 = tl.load(in_ptr0 + (71680 + x1), xmask, eviction_policy='evict_last')
+    tmp35 = tl.load(in_ptr0 + (76800 + x1), xmask, eviction_policy='evict_last')
+    tmp38 = tl.load(in_ptr0 + (81920 + x1), xmask, eviction_policy='evict_last')
+    tmp40 = tl.load(in_ptr0 + (87040 + x1), xmask, eviction_policy='evict_last')
+    tmp43 = tl.load(in_ptr0 + (92160 + x1), xmask, eviction_policy='evict_last')
+    tmp45 = tl.load(in_ptr0 + (97280 + x1), xmask, eviction_policy='evict_last')
+    tmp48 = tl.load(in_ptr0 + (102400 + x1), xmask, eviction_policy='evict_last')
+    tmp50 = tl.load(in_ptr0 + (107520 + x1), xmask, eviction_policy='evict_last')
+    tmp53 = tl.load(in_ptr0 + (112640 + x1), xmask, eviction_policy='evict_last')
+    tmp55 = tl.load(in_ptr0 + (117760 + x1), xmask, eviction_policy='evict_last')
+    tmp58 = tl.load(in_ptr0 + (122880 + x1), xmask, eviction_policy='evict_last')
+    tmp60 = tl.load(in_ptr0 + (127999 + x1), xmask, eviction_policy='evict_last')
+    tmp63 = tl.load(in_ptr0 + (133120 + x1), xmask, eviction_policy='evict_last')
+    tmp65 = tl.load(in_ptr0 + (138240 + x1), xmask, eviction_policy='evict_last')
+    tmp68 = tl.load(in_ptr0 + (143360 + x1), xmask, eviction_policy='evict_last')
+    tmp70 = tl.load(in_ptr0 + (148479 + x1), xmask, eviction_policy='evict_last')
+    tmp73 = tl.load(in_ptr0 + (153599 + x1), xmask, eviction_policy='evict_last')
+    tmp75 = tl.load(in_ptr0 + (158720 + x1), xmask, eviction_policy='evict_last')
+    tmp78 = tl.load(in_ptr0 + (163839 + x1), xmask, eviction_policy='evict_last')
+    tmp80 = tl.load(in_ptr0 + (168960 + x1), xmask, eviction_policy='evict_last')
+    tmp83 = tl.load(in_ptr0 + (174079 + x1), xmask, eviction_policy='evict_last')
+    tmp85 = tl.load(in_ptr0 + (179199 + x1), xmask, eviction_policy='evict_last')
+    tmp88 = tl.load(in_ptr0 + (184320 + x1), xmask, eviction_policy='evict_last')
+    tmp90 = tl.load(in_ptr0 + (189440 + x1), xmask, eviction_policy='evict_last')
+    tmp93 = tl.load(in_ptr0 + (194560 + x1), xmask, eviction_policy='evict_last')
+    tmp95 = tl.load(in_ptr0 + (199679 + x1), xmask, eviction_policy='evict_last')
+    tmp98 = tl.load(in_ptr0 + (204799 + x1), xmask, eviction_policy='evict_last')
+    tmp100 = tl.load(in_ptr0 + (209920 + x1), xmask, eviction_policy='evict_last')
+    tmp103 = tl.load(in_ptr0 + (215039 + x1), xmask, eviction_policy='evict_last')
+    tmp105 = tl.load(in_ptr0 + (220160 + x1), xmask, eviction_policy='evict_last')
+    tmp108 = tl.load(in_ptr0 + (225279 + x1), xmask, eviction_policy='evict_last')
+    tmp110 = tl.load(in_ptr0 + (230399 + x1), xmask, eviction_policy='evict_last')
+    tmp113 = tl.load(in_ptr0 + (235520 + x1), xmask, eviction_policy='evict_last')
+    tmp115 = tl.load(in_ptr0 + (240640 + x1), xmask, eviction_policy='evict_last')
+    tmp118 = tl.load(in_ptr0 + (245760 + x1), xmask, eviction_policy='evict_last')
+    tmp120 = tl.load(in_ptr0 + (250880 + x1), xmask, eviction_policy='evict_last')
+    tmp123 = tl.load(in_ptr0 + (255999 + x1), xmask, eviction_policy='evict_last')
+    tmp125 = tl.load(in_ptr0 + (261120 + x1), xmask, eviction_policy='evict_last')
+    tmp128 = tl.load(in_ptr0 + (266240 + x1), xmask, eviction_policy='evict_last')
+    tmp130 = tl.load(in_ptr0 + (271360 + x1), xmask, eviction_policy='evict_last')
+    tmp133 = tl.load(in_ptr0 + (276479 + x1), xmask, eviction_policy='evict_last')
+    tmp135 = tl.load(in_ptr0 + (281599 + x1), xmask, eviction_policy='evict_last')
+    tmp138 = tl.load(in_ptr0 + (286720 + x1), xmask, eviction_policy='evict_last')
+    tmp140 = tl.load(in_ptr0 + (291840 + x1), xmask, eviction_policy='evict_last')
+    tmp143 = tl.load(in_ptr0 + (296960 + x1), xmask, eviction_policy='evict_last')
+    tmp145 = tl.load(in_ptr0 + (302079 + x1), xmask, eviction_policy='evict_last')
+    tmp148 = tl.load(in_ptr0 + (307199 + x1), xmask, eviction_policy='evict_last')
+    tmp150 = tl.load(in_ptr0 + (312320 + x1), xmask, eviction_policy='evict_last')
+    tmp153 = tl.load(in_ptr0 + (317440 + x1), xmask, eviction_policy='evict_last')
+    tmp155 = tl.load(in_ptr0 + (322560 + x1), xmask, eviction_policy='evict_last')
+    tmp158 = tl.load(in_ptr0 + (327679 + x1), xmask, eviction_policy='evict_last')
+    tmp160 = tl.load(in_ptr0 + (332799 + x1), xmask, eviction_policy='evict_last')
+    tmp163 = tl.load(in_ptr0 + (337920 + x1), xmask, eviction_policy='evict_last')
+    tmp165 = tl.load(in_ptr0 + (343040 + x1), xmask, eviction_policy='evict_last')
+    tmp168 = tl.load(in_ptr0 + (348160 + x1), xmask, eviction_policy='evict_last')
+    tmp170 = tl.load(in_ptr0 + (353279 + x1), xmask, eviction_policy='evict_last')
+    tmp173 = tl.load(in_ptr0 + (358399 + x1), xmask, eviction_policy='evict_last')
+    tmp175 = tl.load(in_ptr0 + (363520 + x1), xmask, eviction_policy='evict_last')
+    tmp178 = tl.load(in_ptr0 + (368639 + x1), xmask, eviction_policy='evict_last')
+    tmp180 = tl.load(in_ptr0 + (373760 + x1), xmask, eviction_policy='evict_last')
+    tmp183 = tl.load(in_ptr0 + (378879 + x1), xmask, eviction_policy='evict_last')
+    tmp185 = tl.load(in_ptr0 + (383999 + x1), xmask, eviction_policy='evict_last')
+    tmp188 = tl.load(in_ptr0 + (389120 + x1), xmask, eviction_policy='evict_last')
+    tmp190 = tl.load(in_ptr0 + (394240 + x1), xmask, eviction_policy='evict_last')
+    tmp193 = tl.load(in_ptr0 + (399360 + x1), xmask, eviction_policy='evict_last')
+    tmp195 = tl.load(in_ptr0 + (404479 + x1), xmask, eviction_policy='evict_last')
+    tmp198 = tl.load(in_ptr0 + (409599 + x1), xmask, eviction_policy='evict_last')
+    tmp200 = tl.load(in_ptr0 + (414720 + x1), xmask, eviction_policy='evict_last')
+    tmp203 = tl.load(in_ptr0 + (419839 + x1), xmask, eviction_policy='evict_last')
+    tmp205 = tl.load(in_ptr0 + (424960 + x1), xmask, eviction_policy='evict_last')
+    tmp208 = tl.load(in_ptr0 + (429999 + x1), xmask, eviction_policy='evict_last')
+    tmp210 = tl.load(in_ptr0 + (435120 + x1), xmask, eviction_policy='evict_last')
+    tmp213 = tl.load(in_ptr0 + (440239 + x1), xmask, eviction_policy='evict_last')
+    tmp215 = tl.load(in_ptr0 + (445360 + x1), xmask, eviction_policy='evict_last')
+    tmp218 = tl.load(in_ptr0 + (450479 + x1), xmask, eviction_policy='evict_last')
+    tmp220 = tl.load(in_ptr0 + (455599 + x1), xmask, eviction_policy='evict_last')
+    tmp223 = tl.load(in_ptr0 + (460720 + x1), xmask, eviction_policy='evict_last')
+    tmp225 = tl.load(in_ptr0 + (465840 + x1), xmask, eviction_policy='evict_last')
+    tmp228 = tl.load(in_ptr0 + (470960 + x1), xmask, eviction_policy='evict_last')
+    tmp230 = tl.load(in_ptr0 + (476079 + x1), xmask, eviction_policy='evict_last')
+    tmp233 = tl.load(in_ptr0 + (481199 + x1), xmask, eviction_policy='evict_last')
+    tmp235 = tl.load(in_ptr0 + (486320 + x1), xmask, eviction_policy='evict_last')
+    tmp238 = tl.load(in_ptr0 + (491440 + x1), xmask, eviction_policy='evict_last')
+    tmp240 = tl.load(in_ptr0 + (496560 + x1), xmask, eviction_policy='evict_last')
+    tmp243 = tl.load(in_ptr0 + (501679 + x1), xmask, eviction_policy='evict_last')
+    tmp245 = tl.load(in_ptr0 + (506799 + x1), xmask, eviction_policy='evict_last')
+    tmp248 = tl.load(in_ptr0 + (511920 + x1), xmask, eviction_policy='evict_last')
+    tmp250 = tl.load(in_ptr0 + (517040 + x1), xmask, eviction_policy='evict_last')
+    tmp253 = tl.load(in_ptr0 + (522159 + x1), xmask, eviction_policy='evict_last')
+    tmp255 = tl.load(in_ptr0 + (527280 + x1), xmask, eviction_policy='evict_last')
+    tmp258 = tl.load(in_ptr0 + (532400 + x1), xmask, eviction_policy='evict_last')
+    tmp260 = tl.load(in_ptr0 + (537520 + x1), xmask, eviction_policy='evict_last')
+    tmp263 = tl.load(in_ptr0 + (542639 + x1), xmask, eviction_policy='evict_last')
+    tmp265 = tl.load(in_ptr0 + (547760 + x1), xmask, eviction_policy='evict_last')
+    tmp268 = tl.load(in_ptr0 + (552879 + x1), xmask, eviction_policy='evict_last')
+    tmp270 = tl.load(in_ptr0 + (557999 + x1), xmask, eviction_policy='evict_last')
+    tmp273 = tl.load(in_ptr0 + (563120 + x1), xmask, eviction_policy='evict_last')
+    tmp275 = tl.load(in_ptr0 + (568240 + x1), xmask, eviction_policy='evict_last')
+    tmp278 = tl.load(in_ptr0 + (573359 + x1), xmask, eviction_policy='evict_last')
+    tmp280 = tl.load(in_ptr0 + (578480 + x1), xmask, eviction_policy='evict_last')
+    tmp283 = tl.load(in_ptr0 + (583600 + x1), xmask, eviction_policy='evict_last')
+    tmp285 = tl.load(in_ptr0 + (588720 + x1), xmask, eviction_policy='evict_last')
+    tmp288 = tl.load(in_ptr0 + (593839 + x1), xmask, eviction_policy='evict_last')
+    tmp290 = tl.load(in_ptr0 + (598960 + x1), xmask, eviction_policy='evict_last')
+    tmp293 = tl.load(in_ptr0 + (604079 + x1), xmask, eviction_policy='evict_last')
+    tmp295 = tl.load(in_ptr0 + (609199 + x1), xmask, eviction_policy='evict_last')
+    tmp298 = tl.load(in_ptr0 + (614320 + x1), xmask, eviction_policy='evict_last')
+    tmp300 = tl.load(in_ptr0 + (619440 + x1), xmask, eviction_policy='evict_last')
+    tmp303 = tl.load(in_ptr0 + (624559 + x1), xmask, eviction_policy='evict_last')
+    tmp305 = tl.load(in_ptr0 + (629680 + x1), xmask, eviction_policy='evict_last')
+    tmp308 = tl.load(in_ptr0 + (634799 + x1), xmask, eviction_policy='evict_last')
+    tmp310 = tl.load(in_ptr0 + (639920 + x1), xmask, eviction_policy='evict_last')
+    tmp313 = tl.load(in_ptr0 + (645039 + x1), xmask, eviction_policy='evict_last')
+    tmp315 = tl.load(in_ptr0 + (650160 + x1), xmask, eviction_policy='evict_last')
+    tmp318 = tl.load(in_ptr0 + (655279 + x1), xmask, eviction_policy='evict_last')
+    tmp320 = tl.load(in_ptr0 + (660399 + x1), xmask, eviction_policy='evict_last')
+    tmp323 = tl.load(in_ptr0 + (665520 + x1), xmask, eviction_policy='evict_last')
+    tmp325 = tl.load(in_ptr0 + (670640 + x1), xmask, eviction_policy='evict_last')
+    tmp328 = tl.load(in_ptr0 + (675759 + x1), xmask, eviction_policy='evict_last')
+    tmp330 = tl.load(in_ptr0 + (680880 + x1), xmask, eviction_policy='evict_last')
+    tmp333 = tl.load(in_ptr0 + (685999 + x1), xmask, eviction_policy='evict_last')
+    tmp335 = tl.load(in_ptr0 + (691120 + x1), xmask, eviction_policy='evict_last')
+    tmp338 = tl.load(in_ptr0 + (696239 + x1), xmask, eviction_policy='evict_last')
+    tmp340 = tl.load(in_ptr0 + (701360 + x1), xmask, eviction_policy='evict_last')
+    tmp343 = tl.load(in_ptr0 + (706479 + x1), xmask, eviction_policy='evict_last')
+    tmp345 = tl.load(in_ptr0 + (711599 + x1), xmask, eviction_policy='evict_last')
+    tmp348 = tl.load(in_ptr0 + (716720 + x1), xmask, eviction_policy='evict_last')
+    tmp350 = tl.load(in_ptr0 + (721840 + x1), xmask, eviction_policy='evict_last')
+    tmp353 = tl.load(in_ptr0 + (726959 + x1), xmask, eviction_policy='evict_last')
+    tmp355 = tl.load(in_ptr0 + (732080 + x1), xmask, eviction_policy='evict_last')
+    tmp358 = tl.load(in_ptr0 + (737199 + x1), xmask, eviction_policy='evict_last')
+    tmp360 = tl.load(in_ptr0 + (742320 + x1), xmask, eviction_policy='evict_last')
+    tmp363 = tl.load(in_ptr0 + (747439 + x1), xmask, eviction_policy='evict_last')
+    tmp365 = tl.load(in_ptr0 + (752560 + x1), xmask, eviction_policy='evict_last')
+    tmp368 = tl.load(in_ptr0 + (757679 + x1), xmask, eviction_policy='evict_last')
+    tmp370 = tl.load(in_ptr0 + (762799 + x1), xmask, eviction_policy='evict_last')
+    tmp373 = tl.load(in_ptr0 + (767920 + x1), xmask, eviction_policy='evict_last')
+    tmp375 = tl.load(in_ptr0 + (773040 + x1), xmask, eviction_policy='evict_last')
+    tmp378 = tl.load(in_ptr0 + (778159 + x1), xmask, eviction_policy='evict_last')
+    tmp380 = tl.load(in_ptr0 + (783280 + x1), xmask, eviction_policy='evict_last')
+    tmp383 = tl.load(in_ptr0 + (788399 + x1), xmask, eviction_policy='evict_last')
+    tmp385 = tl.load(in_ptr0 + (793520 + x1), xmask, eviction_policy='evict_last')
+    tmp388 = tl.load(in_ptr0 + (798639 + x1), xmask, eviction_policy='evict_last')
+    tmp390 = tl.load(in_ptr0 + (803760 + x1), xmask, eviction_policy='evict_last')
+    tmp393 = tl.load(in_ptr0 + (808879 + x1), xmask, eviction_policy='evict_last')
+    tmp395 = tl.load(in_ptr0 + (813999 + x1), xmask, eviction_policy='evict_last')
+    tmp398 = tl.load(in_ptr0 + (819120 + x1), xmask, eviction_policy='evict_last')
+    tmp400 = tl.load(in_ptr0 + (824240 + x1), xmask, eviction_policy='evict_last')
+    tmp403 = tl.load(in_ptr0 + (829359 + x1), xmask, eviction_policy='evict_last')
+    tmp405 = tl.load(in_ptr0 + (834480 + x1), xmask, eviction_policy='evict_last')
+    tmp408 = tl.load(in_ptr0 + (839599 + x1), xmask, eviction_policy='evict_last')
+    tmp410 = tl.load(in_ptr0 + (844720 + x1), xmask, eviction_policy='evict_last')
+    tmp413 = tl.load(in_ptr0 + (849839 + x1), xmask, eviction_policy='evict_last')
+    tmp415 = tl.load(in_ptr0 + (854960 + x1), xmask, eviction_policy='evict_last')
+    tmp418 = tl.load(in_ptr0 + (859999 + x1), xmask, eviction_policy='evict_last')
+    tmp420 = tl.load(in_ptr0 + (865120 + x1), xmask, eviction_policy='evict_last')
+    tmp423 = tl.load(in_ptr0 + (870239 + x1), xmask, eviction_policy='evict_last')
+    tmp425 = tl.load(in_ptr0 + (875360 + x1), xmask, eviction_policy='evict_last')
+    tmp428 = tl.load(in_ptr0 + (880479 + x1), xmask, eviction_policy='evict_last')
+    tmp430 = tl.load(in_ptr0 + (885600 + x1), xmask, eviction_policy='evict_last')
+    tmp433 = tl.load(in_ptr0 + (890719 + x1), xmask, eviction_policy='evict_last')
+    tmp435 = tl.load(in_ptr0 + (895840 + x1), xmask, eviction_policy='evict_last')
+    tmp438 = tl.load(in_ptr0 + (900959 + x1), xmask, eviction_policy='evict_last')
+    tmp440 = tl.load(in_ptr0 + (906080 + x1), xmask, eviction_policy='evict_last')
+    tmp443 = tl.load(in_ptr0 + (911200 + x1), xmask, eviction_policy='evict_last')
+    tmp445 = tl.load(in_ptr0 + (916320 + x1), xmask, eviction_policy='evict_last')
+    tmp448 = tl.load(in_ptr0 + (921439 + x1), xmask, eviction_policy='evict_last')
+    tmp450 = tl.load(in_ptr0 + (926560 + x1), xmask, eviction_policy='evict_last')
+    tmp453 = tl.load(in_ptr0 + (931679 + x1), xmask, eviction_policy='evict_last')
+    tmp455 = tl.load(in_ptr0 + (936800 + x1), xmask, eviction_policy='evict_last')
+    tmp458 = tl.load(in_ptr0 + (941919 + x1), xmask, eviction_policy='evict_last')
+    tmp460 = tl.load(in_ptr0 + (947040 + x1), xmask, eviction_policy='evict_last')
+    tmp463 = tl.load(in_ptr0 + (952159 + x1), xmask, eviction_policy='evict_last')
+    tmp465 = tl.load(in_ptr0 + (957280 + x1), xmask, eviction_policy='evict_last')
+    tmp468 = tl.load(in_ptr0 + (962399 + x1), xmask, eviction_policy='evict_last')
+    tmp470 = tl.load(in_ptr0 + (967520 + x1), xmask, eviction_policy='evict_last')
+    tmp473 = tl.load(in_ptr0 + (972639 + x1), xmask, eviction_policy='evict_last')
+    tmp475 = tl.load(in_ptr0 + (977760 + x1), xmask, eviction_policy='evict_last')
+    tmp478 = tl.load(in_ptr0 + (982879 + x1), xmask, eviction_policy='evict_last')
+    tmp480 = tl.load(in_ptr0 + (987999 + x1), xmask, eviction_policy='evict_last')
+    tmp483 = tl.load(in_ptr0 + (993120 + x1), xmask, eviction_policy='evict_last')
+    tmp485 = tl.load(in_ptr0 + (998240 + x1), xmask, eviction_policy='evict_last')
+    tmp488 = tl.load(in_ptr0 + (1003359 + x1), xmask, eviction_policy='evict_last')
+    tmp490 = tl.load(in_ptr0 + (1008480 + x1), xmask, eviction_policy='evict_last')
+    tmp493 = tl.load(in_ptr0 + (1013599 + x1), xmask, eviction_policy='evict_last')
+    tmp495 = tl.load(in_ptr0 + (1018720 + x1), xmask, eviction_policy='evict_last')
+    tmp498 = tl.load(in_ptr0 + (1023839 + x1), xmask, eviction_policy='evict_last')
+    tmp500 = tl.load(in_ptr0 + (1028960 + x1), xmask, eviction_policy='evict_last')
+    tmp503 = tl.load(in_ptr0 + (1034079 + x1), xmask, eviction_policy='evict_last')
+    tmp505 = tl.load(in_ptr0 + (1039200 + x1), xmask, eviction_policy='evict_last')
+    tmp508 = tl.load(in_ptr0 + (1044319 + x1), xmask, eviction_policy='evict_last')
+    tmp510 = tl.load(in_ptr0 + (1049440 + x1), xmask, eviction_policy='evict_last')
+    tmp513 = tl.load(in_ptr0 + (1054559 + x1), xmask, eviction_policy='evict_last')
+    tmp515 = tl.load(in_ptr0 + (1059680 + x1), xmask, eviction_policy='evict_last')
+    tmp518 = tl.load(in_ptr0 + (1064799 + x1), xmask, eviction_policy='evict_last')
+    tmp520 = tl.load(in_ptr0 + (1069920 + x1), xmask, eviction_policy='evict_last')
+    tmp523 = tl.load(in_ptr0 + (1075039 + x1), xmask, eviction_policy='evict_last')
+    tmp525 = tl.load(in_ptr0 + (1080160 + x1), xmask, eviction_policy='evict_last')
+    tmp528 = tl.load(in_ptr0 + (1085279 + x1), xmask, eviction_policy='evict_last')
+    tmp530 = tl.load(in_ptr0 + (1090400 + x1), xmask, eviction_policy='evict_last')
+    tmp533 = tl.load(in_ptr0 + (1095519 + x1), xmask, eviction_policy='evict_last')
+    tmp535 = tl.load(in_ptr0 + (1100640 + x1), xmask, eviction_policy='evict_last')
+    tmp538 = tl.load(in_ptr0 + (1105759 + x1), xmask, eviction_policy='evict_last')
+    tmp540 = tl.load(in_ptr0 + (1110880 + x1), xmask, eviction_policy='evict_last')
+    tmp543 = tl.load(in_ptr0 + (1115999 + x1), xmask, eviction_policy='evict_last')
+    tmp545 = tl.load(in_ptr0 + (1121120 + x1), xmask, eviction_policy='evict_last')
+    tmp548 = tl.load(in_ptr0 + (1126239 + x1), xmask, eviction_policy='evict_last')
+    tmp550 = tl.load(in_ptr0 + (1131360 + x1), xmask, eviction_policy='evict_last')
+    tmp553 = tl.load(in_ptr0 + (1136479 + x1), xmask, eviction_policy='evict_last')
+    tmp555 = tl.load(in_ptr0 + (1141600 + x1), xmask, eviction_policy='evict_last')
+    tmp558 = tl.load(in_ptr0 + (1146719 + x1), xmask, eviction_policy='evict_last')
+    tmp560 = tl.load(in_ptr0 + (1151840 + x1), xmask, eviction_policy='evict_last')
+    tmp563 = tl.load(in_ptr0 + (1156959 + x1), xmask, eviction_policy='evict_last')
+    tmp565 = tl.load(in_ptr0 + (1162080 + x1), xmask, eviction_policy='evict_last')
+    tmp568 = tl.load(in_ptr0 + (1167199 + x1), xmask, eviction_policy='evict_last')
+    tmp570 = tl.load(in_ptr0 + (1172320 + x1), xmask, eviction_policy='evict_last')
+    tmp573 = tl.load(in_ptr0 + (1177439 + x1), xmask, eviction_policy='evict_last')
+    tmp575 = tl.load(in_ptr0 + (1182560 + x1), xmask, eviction_policy='evict_last')
+    tmp578 = tl.load(in_ptr0 + (1187679 + x1), xmask, eviction_policy='evict_last')
+    tmp580 = tl.load(in_ptr0 + (1192800 + x1), xmask, eviction_policy='evict_last')
+    tmp583 = tl.load(in_ptr0 + (1197919 + x1), xmask, eviction_policy='evict_last')
+    tmp585 = tl.load(in_ptr0 + (1203040 + x1), xmask, eviction_policy='evict_last')
+    tmp588 = tl.load(in_ptr0 + (1208159 + x1), xmask, eviction_policy='evict_last')
+    tmp590 = tl.load(in_ptr0 + (1213280 + x1), xmask, eviction_policy='evict_last')
+    tmp593 = tl.load(in_ptr0 + (1218399 + x1), xmask, eviction_policy='evict_last')
+    tmp595 = tl.load(in_ptr0 + (1223520 + x1), xmask, eviction_policy='evict_last')
+    tmp598 = tl.load(in_ptr0 + (1228639 + x1), xmask, eviction_policy='evict_last')
+    tmp600 = tl.load(in_ptr0 + (1233760 + x1),

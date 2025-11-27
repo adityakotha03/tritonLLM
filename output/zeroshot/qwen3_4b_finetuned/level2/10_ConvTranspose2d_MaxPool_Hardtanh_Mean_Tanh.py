@@ -1,86 +1,497 @@
 import torch
-from torch._inductor.select_algorithm import extern_kernels
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_hardtanh_max_pool2d_with_indices_mean_0(in_out_ptr0,
-    in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 256
+def triton_poi_fused_hardtanh_max_pool2d_mean_tanh_0(in_ptr0, out_ptr0,
+    out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1024
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 256 % 64
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp3 = 1.0
-    tmp4 = tmp2 * tmp3
-    tmp5 = libdevice.tanh(tmp4)
-    tmp6 = 0.0
-    tmp7 = triton_helpers.maximum(tmp6, tmp5)
-    tmp8 = triton_helpers.minimum(tmp7, tmp3)
-    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
-    tl.debug_barrier()
-    tl.store(in_out_ptr0 + x3, tmp8, xmask)
-    tl.store(out_ptr0 + x3, tmp9, xmask)
-
-
-def call(args):
-    primals_1, primals_2, primals_3 = args
-    args.clear()
-    assert_size_stride(primals_1, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_2, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_3, (128, 64, 256, 256), (4096, 64, 16, 1))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((128, 64, 258, 258), (415296, 64, 16, 1),
-            torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_3, (128, 64,
-            256, 256), (4096, 1, 16, 64), 0), primals_1, stride=(1, 1),
-            padding=(1, 1), dilation=(1, 1), transposed=True,
-            output_padding=(0, 0), groups=1, bias=None, stride_cuda=(1, 1),
-            padding_cuda=(1, 1), stride_strided=(1, 1), padding_strided=(1, 1
-            ))
-        del primals_1
-        buf1 = buf0
-        del buf0
-        buf2 = empty_strided_cuda((128, 64, 128, 128), (1048576, 16384, 81,
-            1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_hardtanh_max_pool2d_with_indices_mean_0[grid(256)](
-            buf1, primals_2, buf2, 256, XBLOCK=128, num_warps=4, num_stages=1)
-        del primals_2
-    return reinterpret_tensor(buf2, (128, 64, 1, 1), (64, 1, 64, 64), 0
-        ), reinterpret_tensor(primals_3, (128, 64, 256, 256), (4096, 1, 16, 64
-        ), 0), buf1
-
-
-class ModelNew(nn.Module):
-    """
-    Model that performs a transposed convolution, followed by max pooling, hardtanh activation, mean operation, and tanh activation.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, maxpool_kernel_size, maxpool_stride, hardtanh_min, hardtanh_max):
-        super(ModelNew, self).__init__()
-        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels,
-            kernel_size, stride=stride, padding=padding)
-        self.maxpool = nn.MaxPool2d(kernel_size=maxpool_kernel_size,
-            stride=maxpool_stride)
-        self.hardtanh = nn.Hardtanh(min_val=hardtanh_min, max_val=hardtanh_max)
-
-    def forward(self, input_0):
-        primals_1 = self.conv_transpose.weight
-        primals_2 = self.conv_transpose.weight
-        primals_3 = input_0
-        output = call([primals_1, primals_2, primals_3])
-        return output[0]
+    x0 = xindex % 64
+    x1 = xindex // 64
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 64 * x1), xmask)
+    tmp1 = tl.full([1], 1, tl.int32)
+    tmp2 = tmp1.to(tl.float32)
+    tmp3 = tmp0 * tmp2
+    tmp4 = 0.0
+    tmp5 = tmp3 > tmp4
+    tmp6 = tmp3 < tmp1
+    tmp7 = tmp5 & tmp6
+    tmp8 = tl.where(tmp7, tmp3, tmp4)
+    tmp9 = tmp0 * tmp1
+    tmp10 = tmp9 > tmp4
+    tmp11 = tmp9 < tmp1
+    tmp12 = tmp10 & tmp11
+    tmp13 = tl.where(tmp12, tmp9, tmp4)
+    tmp14 = tmp8 > tmp13
+    tmp15 = tl.where(tmp14, tmp8, tmp13)
+    tmp16 = tmp15.to(tl.int32)
+    tmp17 = 0.0
+    tmp18 = tmp16 > tmp17
+    tmp19 = tmp16 < tmp1
+    tmp20 = tmp18 & tmp19
+    tmp21 = tl.load(in_ptr0 + (64 + x0 + 64 * x1), tmp20 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp22 = tmp21 * tmp2
+    tmp23 = tmp22 > tmp17
+    tmp24 = tmp22 < tmp1
+    tmp25 = tmp23 & tmp24
+    tmp26 = tl.where(tmp25, tmp22, tmp17)
+    tmp27 = tmp21 * tmp1
+    tmp28 = tmp27 > tmp17
+    tmp29 = tmp27 < tmp1
+    tmp30 = tmp28 & tmp29
+    tmp31 = tl.where(tmp30, tmp27, tmp17)
+    tmp32 = tmp26 > tmp31
+    tmp33 = tl.where(tmp32, tmp26, tmp31)
+    tmp34 = tmp33.to(tl.int32)
+    tmp35 = tmp34 > tmp17
+    tmp36 = tmp34 < tmp1
+    tmp37 = tmp35 & tmp36
+    tmp38 = tl.load(in_ptr0 + (128 + x0 + 64 * x1), tmp37 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp39 = tmp38 * tmp2
+    tmp40 = tmp39 > tmp17
+    tmp41 = tmp39 < tmp1
+    tmp42 = tmp40 & tmp41
+    tmp43 = tl.where(tmp42, tmp39, tmp17)
+    tmp44 = tmp38 * tmp1
+    tmp45 = tmp44 > tmp17
+    tmp46 = tmp44 < tmp1
+    tmp47 = tmp45 & tmp46
+    tmp48 = tl.where(tmp47, tmp44, tmp17)
+    tmp49 = tmp43 > tmp48
+    tmp50 = tl.where(tmp49, tmp43, tmp48)
+    tmp51 = tmp50.to(tl.int32)
+    tmp52 = tmp51 > tmp17
+    tmp53 = tmp51 < tmp1
+    tmp54 = tmp52 & tmp53
+    tmp55 = tl.load(in_ptr0 + (192 + x0 + 64 * x1), tmp54 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp56 = tmp55 * tmp2
+    tmp57 = tmp56 > tmp17
+    tmp58 = tmp56 < tmp1
+    tmp59 = tmp57 & tmp58
+    tmp60 = tl.where(tmp59, tmp56, tmp17)
+    tmp61 = tmp55 * tmp1
+    tmp62 = tmp61 > tmp17
+    tmp63 = tmp61 < tmp1
+    tmp64 = tmp62 & tmp63
+    tmp65 = tl.where(tmp64, tmp61, tmp17)
+    tmp66 = tmp60 > tmp65
+    tmp67 = tl.where(tmp66, tmp60, tmp65)
+    tmp68 = tmp67.to(tl.int32)
+    tmp69 = tmp68 > tmp17
+    tmp70 = tmp68 < tmp1
+    tmp71 = tmp69 & tmp70
+    tmp72 = tl.load(in_ptr0 + (256 + x0 + 64 * x1), tmp71 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp73 = tmp72 * tmp2
+    tmp74 = tmp73 > tmp17
+    tmp75 = tmp73 < tmp1
+    tmp76 = tmp74 & tmp75
+    tmp77 = tl.where(tmp76, tmp73, tmp17)
+    tmp78 = tmp72 * tmp1
+    tmp79 = tmp78 > tmp17
+    tmp80 = tmp78 < tmp1
+    tmp81 = tmp79 & tmp80
+    tmp82 = tl.where(tmp81, tmp78, tmp17)
+    tmp83 = tmp77 > tmp82
+    tmp84 = tl.where(tmp83, tmp77, tmp82)
+    tmp85 = tmp84.to(tl.int32)
+    tmp86 = tmp85 > tmp17
+    tmp87 = tmp85 < tmp1
+    tmp88 = tmp86 & tmp87
+    tmp89 = tl.load(in_ptr0 + (320 + x0 + 64 * x1), tmp88 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp90 = tmp89 * tmp2
+    tmp91 = tmp90 > tmp17
+    tmp92 = tmp90 < tmp1
+    tmp93 = tmp91 & tmp92
+    tmp94 = tl.where(tmp93, tmp90, tmp17)
+    tmp95 = tmp89 * tmp1
+    tmp96 = tmp95 > tmp17
+    tmp97 = tmp95 < tmp1
+    tmp98 = tmp96 & tmp97
+    tmp99 = tl.where(tmp98, tmp95, tmp17)
+    tmp100 = tmp94 > tmp99
+    tmp101 = tl.where(tmp100, tmp94, tmp99)
+    tmp102 = tmp101.to(tl.int32)
+    tmp103 = tmp102 > tmp17
+    tmp104 = tmp102 < tmp1
+    tmp105 = tmp103 & tmp104
+    tmp106 = tl.load(in_ptr0 + (384 + x0 + 64 * x1), tmp105 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp107 = tmp106 * tmp2
+    tmp108 = tmp107 > tmp17
+    tmp109 = tmp107 < tmp1
+    tmp110 = tmp108 & tmp109
+    tmp111 = tl.where(tmp110, tmp107, tmp17)
+    tmp112 = tmp106 * tmp1
+    tmp113 = tmp112 > tmp17
+    tmp114 = tmp112 < tmp1
+    tmp115 = tmp113 & tmp114
+    tmp116 = tl.where(tmp115, tmp112, tmp17)
+    tmp117 = tmp111 > tmp116
+    tmp118 = tl.where(tmp117, tmp111, tmp116)
+    tmp119 = tmp118.to(tl.int32)
+    tmp120 = tmp119 > tmp17
+    tmp121 = tmp119 < tmp1
+    tmp122 = tmp120 & tmp121
+    tmp123 = tl.load(in_ptr0 + (448 + x0 + 64 * x1), tmp122 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp124 = tmp123 * tmp2
+    tmp125 = tmp124 > tmp17
+    tmp126 = tmp124 < tmp1
+    tmp127 = tmp125 & tmp126
+    tmp128 = tl.where(tmp127, tmp124, tmp17)
+    tmp129 = tmp123 * tmp1
+    tmp130 = tmp129 > tmp17
+    tmp131 = tmp129 < tmp1
+    tmp132 = tmp130 & tmp131
+    tmp133 = tl.where(tmp132, tmp129, tmp17)
+    tmp134 = tmp128 > tmp133
+    tmp135 = tl.where(tmp134, tmp128, tmp133)
+    tmp136 = tmp135.to(tl.int32)
+    tmp137 = tmp136 > tmp17
+    tmp138 = tmp136 < tmp1
+    tmp139 = tmp137 & tmp138
+    tmp140 = tl.load(in_ptr0 + (512 + x0 + 64 * x1), tmp139 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp141 = tmp140 * tmp2
+    tmp142 = tmp141 > tmp17
+    tmp143 = tmp141 < tmp1
+    tmp144 = tmp142 & tmp143
+    tmp145 = tl.where(tmp144, tmp141, tmp17)
+    tmp146 = tmp140 * tmp1
+    tmp147 = tmp146 > tmp17
+    tmp148 = tmp146 < tmp1
+    tmp149 = tmp147 & tmp148
+    tmp150 = tl.where(tmp149, tmp146, tmp17)
+    tmp151 = tmp145 > tmp150
+    tmp152 = tl.where(tmp151, tmp145, tmp150)
+    tmp153 = tmp152.to(tl.int32)
+    tmp154 = tmp153 > tmp17
+    tmp155 = tmp153 < tmp1
+    tmp156 = tmp154 & tmp155
+    tmp157 = tl.load(in_ptr0 + (576 + x0 + 64 * x1), tmp156 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp158 = tmp157 * tmp2
+    tmp159 = tmp158 > tmp17
+    tmp160 = tmp158 < tmp1
+    tmp161 = tmp159 & tmp160
+    tmp162 = tl.where(tmp161, tmp158, tmp17)
+    tmp163 = tmp157 * tmp1
+    tmp164 = tmp163 > tmp17
+    tmp165 = tmp163 < tmp1
+    tmp166 = tmp164 & tmp165
+    tmp167 = tl.where(tmp166, tmp163, tmp17)
+    tmp168 = tmp162 > tmp167
+    tmp169 = tl.where(tmp168, tmp162, tmp167)
+    tmp170 = tmp169.to(tl.int32)
+    tmp171 = tmp170 > tmp17
+    tmp172 = tmp170 < tmp1
+    tmp173 = tmp171 & tmp172
+    tmp174 = tl.load(in_ptr0 + (640 + x0 + 64 * x1), tmp173 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp175 = tmp174 * tmp2
+    tmp176 = tmp175 > tmp17
+    tmp177 = tmp175 < tmp1
+    tmp178 = tmp176 & tmp177
+    tmp179 = tl.where(tmp178, tmp175, tmp17)
+    tmp180 = tmp174 * tmp1
+    tmp181 = tmp180 > tmp17
+    tmp182 = tmp180 < tmp1
+    tmp183 = tmp181 & tmp182
+    tmp184 = tl.where(tmp183, tmp180, tmp17)
+    tmp185 = tmp179 > tmp184
+    tmp186 = tl.where(tmp185, tmp179, tmp184)
+    tmp187 = tmp186.to(tl.int32)
+    tmp188 = tmp187 > tmp17
+    tmp189 = tmp187 < tmp1
+    tmp190 = tmp188 & tmp189
+    tmp191 = tl.load(in_ptr0 + (704 + x0 + 64 * x1), tmp190 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp192 = tmp191 * tmp2
+    tmp193 = tmp192 > tmp17
+    tmp194 = tmp192 < tmp1
+    tmp195 = tmp193 & tmp194
+    tmp196 = tl.where(tmp195, tmp192, tmp17)
+    tmp197 = tmp191 * tmp1
+    tmp198 = tmp197 > tmp17
+    tmp199 = tmp197 < tmp1
+    tmp200 = tmp198 & tmp199
+    tmp201 = tl.where(tmp200, tmp197, tmp17)
+    tmp202 = tmp196 > tmp201
+    tmp203 = tl.where(tmp202, tmp196, tmp201)
+    tmp204 = tmp203.to(tl.int32)
+    tmp205 = tmp204 > tmp17
+    tmp206 = tmp204 < tmp1
+    tmp207 = tmp205 & tmp206
+    tmp208 = tl.load(in_ptr0 + (768 + x0 + 64 * x1), tmp207 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp209 = tmp208 * tmp2
+    tmp210 = tmp209 > tmp17
+    tmp211 = tmp209 < tmp1
+    tmp212 = tmp210 & tmp211
+    tmp213 = tl.where(tmp212, tmp209, tmp17)
+    tmp214 = tmp208 * tmp1
+    tmp215 = tmp214 > tmp17
+    tmp216 = tmp214 < tmp1
+    tmp217 = tmp215 & tmp216
+    tmp218 = tl.where(tmp217, tmp214, tmp17)
+    tmp219 = tmp213 > tmp218
+    tmp220 = tl.where(tmp219, tmp213, tmp218)
+    tmp221 = tmp220.to(tl.int32)
+    tmp222 = tmp221 > tmp17
+    tmp223 = tmp221 < tmp1
+    tmp224 = tmp222 & tmp223
+    tmp225 = tl.load(in_ptr0 + (832 + x0 + 64 * x1), tmp224 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp226 = tmp225 * tmp2
+    tmp227 = tmp226 > tmp17
+    tmp228 = tmp226 < tmp1
+    tmp229 = tmp227 & tmp228
+    tmp230 = tl.where(tmp229, tmp226, tmp17)
+    tmp231 = tmp225 * tmp1
+    tmp232 = tmp231 > tmp17
+    tmp233 = tmp231 < tmp1
+    tmp234 = tmp232 & tmp233
+    tmp235 = tl.where(tmp234, tmp231, tmp17)
+    tmp236 = tmp230 > tmp235
+    tmp237 = tl.where(tmp236, tmp230, tmp235)
+    tmp238 = tmp237.to(tl.int32)
+    tmp239 = tmp238 > tmp17
+    tmp240 = tmp238 < tmp1
+    tmp241 = tmp239 & tmp240
+    tmp242 = tl.load(in_ptr0 + (896 + x0 + 64 * x1), tmp241 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp243 = tmp242 * tmp2
+    tmp244 = tmp243 > tmp17
+    tmp245 = tmp243 < tmp1
+    tmp246 = tmp244 & tmp245
+    tmp247 = tl.where(tmp246, tmp243, tmp17)
+    tmp248 = tmp242 * tmp1
+    tmp249 = tmp248 > tmp17
+    tmp250 = tmp248 < tmp1
+    tmp251 = tmp249 & tmp250
+    tmp252 = tl.where(tmp251, tmp248, tmp17)
+    tmp253 = tmp247 > tmp252
+    tmp254 = tl.where(tmp253, tmp247, tmp252)
+    tmp255 = tmp254.to(tl.int32)
+    tmp256 = tmp255 > tmp17
+    tmp257 = tmp255 < tmp1
+    tmp258 = tmp256 & tmp257
+    tmp259 = tl.load(in_ptr0 + (960 + x0 + 64 * x1), tmp258 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp260 = tmp259 * tmp2
+    tmp261 = tmp260 > tmp17
+    tmp262 = tmp260 < tmp1
+    tmp263 = tmp261 & tmp262
+    tmp264 = tl.where(tmp263, tmp260, tmp17)
+    tmp265 = tmp259 * tmp1
+    tmp266 = tmp265 > tmp17
+    tmp267 = tmp265 < tmp1
+    tmp268 = tmp266 & tmp267
+    tmp269 = tl.where(tmp268, tmp265, tmp17)
+    tmp270 = tmp264 > tmp269
+    tmp271 = tl.where(tmp270, tmp264, tmp269)
+    tmp272 = tmp271.to(tl.int32)
+    tmp273 = tmp272 > tmp17
+    tmp274 = tmp272 < tmp1
+    tmp275 = tmp273 & tmp274
+    tmp276 = tl.load(in_ptr0 + (1024 + x0 + 64 * x1), tmp275 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp277 = tmp276 * tmp2
+    tmp278 = tmp277 > tmp17
+    tmp279 = tmp277 < tmp1
+    tmp280 = tmp278 & tmp279
+    tmp281 = tl.where(tmp280, tmp277, tmp17)
+    tmp282 = tmp276 * tmp1
+    tmp283 = tmp282 > tmp17
+    tmp284 = tmp282 < tmp1
+    tmp285 = tmp283 & tmp284
+    tmp286 = tl.where(tmp285, tmp282, tmp17)
+    tmp287 = tmp281 > tmp286
+    tmp288 = tl.where(tmp287, tmp281, tmp286)
+    tmp289 = tmp288.to(tl.int32)
+    tmp290 = tmp289 > tmp17
+    tmp291 = tmp289 < tmp1
+    tmp292 = tmp290 & tmp291
+    tmp293 = tl.load(in_ptr0 + (1088 + x0 + 64 * x1), tmp292 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp294 = tmp293 * tmp2
+    tmp295 = tmp294 > tmp17
+    tmp296 = tmp294 < tmp1
+    tmp297 = tmp295 & tmp296
+    tmp298 = tl.where(tmp297, tmp294, tmp17)
+    tmp299 = tmp293 * tmp1
+    tmp300 = tmp299 > tmp17
+    tmp301 = tmp299 < tmp1
+    tmp302 = tmp300 & tmp301
+    tmp303 = tl.where(tmp302, tmp299, tmp17)
+    tmp304 = tmp298 > tmp303
+    tmp305 = tl.where(tmp304, tmp298, tmp303)
+    tmp306 = tmp305.to(tl.int32)
+    tmp307 = tmp306 > tmp17
+    tmp308 = tmp306 < tmp1
+    tmp309 = tmp307 & tmp308
+    tmp310 = tl.load(in_ptr0 + (1152 + x0 + 64 * x1), tmp309 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp311 = tmp310 * tmp2
+    tmp312 = tmp311 > tmp17
+    tmp313 = tmp311 < tmp1
+    tmp314 = tmp312 & tmp313
+    tmp315 = tl.where(tmp314, tmp311, tmp17)
+    tmp316 = tmp310 * tmp1
+    tmp317 = tmp316 > tmp17
+    tmp318 = tmp316 < tmp1
+    tmp319 = tmp317 & tmp318
+    tmp320 = tl.where(tmp319, tmp316, tmp17)
+    tmp321 = tmp315 > tmp320
+    tmp322 = tl.where(tmp321, tmp315, tmp320)
+    tmp323 = tmp322.to(tl.int32)
+    tmp324 = tmp323 > tmp17
+    tmp325 = tmp323 < tmp1
+    tmp326 = tmp324 & tmp325
+    tmp327 = tl.load(in_ptr0 + (1216 + x0 + 64 * x1), tmp326 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp328 = tmp327 * tmp2
+    tmp329 = tmp328 > tmp17
+    tmp330 = tmp328 < tmp1
+    tmp331 = tmp329 & tmp330
+    tmp332 = tl.where(tmp331, tmp328, tmp17)
+    tmp333 = tmp327 * tmp1
+    tmp334 = tmp333 > tmp17
+    tmp335 = tmp333 < tmp1
+    tmp336 = tmp334 & tmp335
+    tmp337 = tl.where(tmp336, tmp333, tmp17)
+    tmp338 = tmp332 > tmp337
+    tmp339 = tl.where(tmp338, tmp332, tmp337)
+    tmp340 = tmp339.to(tl.int32)
+    tmp341 = tmp340 > tmp17
+    tmp342 = tmp340 < tmp1
+    tmp343 = tmp341 & tmp342
+    tmp344 = tl.load(in_ptr0 + (1280 + x0 + 64 * x1), tmp343 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp345 = tmp344 * tmp2
+    tmp346 = tmp345 > tmp17
+    tmp347 = tmp345 < tmp1
+    tmp348 = tmp346 & tmp347
+    tmp349 = tl.where(tmp348, tmp345, tmp17)
+    tmp350 = tmp344 * tmp1
+    tmp351 = tmp350 > tmp17
+    tmp352 = tmp350 < tmp1
+    tmp353 = tmp351 & tmp352
+    tmp354 = tl.where(tmp353, tmp350, tmp17)
+    tmp355 = tmp349 > tmp354
+    tmp356 = tl.where(tmp355, tmp349, tmp354)
+    tmp357 = tmp356.to(tl.int32)
+    tmp358 = tmp357 > tmp17
+    tmp359 = tmp357 < tmp1
+    tmp360 = tmp358 & tmp359
+    tmp361 = tl.load(in_ptr0 + (1344 + x0 + 64 * x1), tmp360 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp362 = tmp361 * tmp2
+    tmp363 = tmp362 > tmp17
+    tmp364 = tmp362 < tmp1
+    tmp365 = tmp363 & tmp364
+    tmp366 = tl.where(tmp365, tmp362, tmp17)
+    tmp367 = tmp361 * tmp1
+    tmp368 = tmp367 > tmp17
+    tmp369 = tmp367 < tmp1
+    tmp370 = tmp368 & tmp369
+    tmp371 = tl.where(tmp370, tmp367, tmp17)
+    tmp372 = tmp366 > tmp371
+    tmp373 = tl.where(tmp372, tmp366, tmp371)
+    tmp374 = tmp373.to(tl.int32)
+    tmp375 = tmp374 > tmp17
+    tmp376 = tmp374 < tmp1
+    tmp377 = tmp375 & tmp376
+    tmp378 = tl.load(in_ptr0 + (1408 + x0 + 64 * x1), tmp377 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp379 = tmp378 * tmp2
+    tmp380 = tmp379 > tmp17
+    tmp381 = tmp379 < tmp1
+    tmp382 = tmp380 & tmp381
+    tmp383 = tl.where(tmp382, tmp379, tmp17)
+    tmp384 = tmp378 * tmp1
+    tmp385 = tmp384 > tmp17
+    tmp386 = tmp384 < tmp1
+    tmp387 = tmp385 & tmp386
+    tmp388 = tl.where(tmp387, tmp384, tmp17)
+    tmp389 = tmp383 > tmp388
+    tmp390 = tl.where(tmp389, tmp383, tmp388)
+    tmp391 = tmp390.to(tl.int32)
+    tmp392 = tmp391 > tmp17
+    tmp393 = tmp391 < tmp1
+    tmp394 = tmp392 & tmp393
+    tmp395 = tl.load(in_ptr0 + (1472 + x0 + 64 * x1), tmp394 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp396 = tmp395 * tmp2
+    tmp397 = tmp396 > tmp17
+    tmp398 = tmp396 < tmp1
+    tmp399 = tmp397 & tmp398
+    tmp400 = tl.where(tmp399, tmp396, tmp17)
+    tmp401 = tmp395 * tmp1
+    tmp402 = tmp401 > tmp17
+    tmp403 = tmp401 < tmp1
+    tmp404 = tmp402 & tmp403
+    tmp405 = tl.where(tmp404, tmp401, tmp17)
+    tmp406 = tmp400 > tmp405
+    tmp407 = tl.where(tmp406, tmp400, tmp405)
+    tmp408 = tmp407.to(tl.int32)
+    tmp409 = tmp408 > tmp17
+    tmp410 = tmp408 < tmp1
+    tmp411 = tmp409 & tmp410
+    tmp412 = tl.load(in_ptr0 + (1536 + x0 + 64 * x1), tmp411 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp413 = tmp412 * tmp2
+    tmp414 = tmp413 > tmp17
+    tmp415 = tmp413 < tmp1
+    tmp416 = tmp414 & tmp415
+    tmp417 = tl.where(tmp416, tmp413, tmp17)
+    tmp418 = tmp412 * tmp1
+    tmp419 = tmp418 > tmp17
+    tmp420 = tmp418 < tmp1
+    tmp421 = tmp419 & tmp420
+    tmp422 = tl.where(tmp421, tmp418, tmp17)
+    tmp423 = tmp417 > tmp422
+    tmp424 = tl.where(tmp423, tmp417, tmp422)
+    tmp425 = tmp424.to(tl.int32)
+    tmp426 = tmp425 > tmp17
+    tmp427 = tmp425 < tmp1
+    tmp428 = tmp426 & tmp427
+    tmp429 = tl.load(in_ptr0 + (1600 + x0 + 64 * x1), tmp428 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp430 = tmp429 * tmp2
+    tmp431 = tmp430 > tmp17
+    tmp432 = tmp430 < tmp1
+    tmp433 = tmp431 & tmp432
+    tmp434 = tl.where(tmp433, tmp430, tmp17)
+    tmp435 = tmp429 * tmp1
+    tmp436 = tmp435 > tmp17
+    tmp437 = tmp435 < tmp1
+    tmp438 = tmp436 & tmp437
+    tmp439 = tl.where(tmp438, tmp435, tmp17)
+    tmp440 = tmp434 > tmp439
+    tmp441 = tl.where(tmp440, tmp434, tmp439)
+    tmp442 = tmp441.to(tl.int32)
+    tmp443 = tmp442 > tmp17
+    tmp444 = tmp442 < tmp1
+    tmp445 = tmp443 & tmp444
+    tmp446 = tl.load(in_ptr0 + (1664 + x0 + 64 * x1), tmp445 & xmask,
+        eviction_policy='evict_last', other=0.0)
+    tmp447 = tmp446 * tmp2
+    tmp448 = tmp447 > tmp17
+    tmp44

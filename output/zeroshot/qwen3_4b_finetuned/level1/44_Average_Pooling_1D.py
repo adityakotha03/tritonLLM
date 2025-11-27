@@ -1,72 +1,219 @@
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice
-import torch.nn as nn
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import math as tl_math
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_per_fused_avg_pool1d_with_indices_0(in_ptr0, out_ptr0, out_ptr1,
-    xnumel, rnumel):
-    XBLOCK: tl.constexpr = 1
-    RBLOCK: tl.constexpr = 256
+def triton_poi_fused_avg_pool2d_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 524288
     xoffset = tl.program_id(0) * XBLOCK
-    tl.full([1], xoffset, tl.int32)
-    tl.full([RBLOCK], True, tl.int1)
-    rindex = tl.arange(0, RBLOCK)[:]
-    tl.full([RBLOCK], True, tl.int1)
-    r0 = rindex
-    tmp0 = tl.load(in_ptr0 + r0, None)
-    tmp1 = 1.0
-    tmp2 = tmp0 * tmp1
-    tmp3 = tl.broadcast_to(tmp2, [RBLOCK])
-    tmp5 = tl.sum(tmp3, 0)[:, None]
-    tl.store(out_ptr0 + r0, tmp5, None)
-    tl.store(out_ptr1 + r0, tmp2, None)
-
-
-def call(args):
-    primals_1, primals_2 = args
-    args.clear()
-    assert_size_stride(primals_1, (64, 128, 65536), (8388608, 65536, 1))
-    assert_size_stride(primals_2, (8,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((64, 128, 65536), (8388608, 65536, 1),
-            torch.float32)
-        buf1 = empty_strided_cuda((64, 128, 65532), (8388608, 65536, 1),
-            torch.float32)
-        buf2 = empty_strided_cuda((64, 128, 65532), (8388608, 65536, 1),
-            torch.float32)
-        get_raw_stream(0)
-        triton_per_fused_avg_pool1d_with_indices_0[grid(256)](primals_1,
-            buf1, buf2, 256, 256, num_warps=2, num_stages=1)
-    return buf2, primals_1, buf1, primals_2
-
-
-class ModelNew(nn.Module):
-    """
-    Simple model that performs 1D Average Pooling.
-    """
-    def __init__(self, kernel_size: int, stride: int = 1, padding: int = 0):
-        """
-        Initializes the 1D Average Pooling layer.
-
-        Args:
-            kernel_size (int): Size of the pooling window.
-            stride (int, optional): Stride of the pooling operation. Defaults to 1.
-            padding (int, optional): Padding applied to the input tensor. Defaults to 0.
-        """
-        super(ModelNew, self).__init__()
-        self.avg_pool = nn.AvgPool1d(kernel_size=kernel_size, stride=stride,
-            padding=padding)
-
-    def forward(self, input_0):
-        primals_2 = self.avg_pool.weight
-        primals_1 = input_0
-        output = call([primals_1, primals_2])
-        return output[0]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x1 = xindex // 8192 % 128
+    tmp0 = tl.load(in_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + (x1 + 8192 * x3 % 65536), xmask)
+    tmp3 = tl.load(in_ptr0 + (128 + x1 + 8192 * x3 % 65536), xmask)
+    tmp6 = tl.load(in_ptr0 + (256 + x1 + 8192 * x3 % 65536), xmask)
+    tmp9 = tl.load(in_ptr0 + (384 + x1 + 8192 * x3 % 65536), xmask)
+    tmp12 = tl.load(in_ptr0 + (512 + x1 + 8192 * x3 % 65536), xmask)
+    tmp15 = tl.load(in_ptr0 + (640 + x1 + 8192 * x3 % 65536), xmask)
+    tmp18 = tl.load(in_ptr0 + (768 + x1 + 8192 * x3 % 65536), xmask)
+    tmp21 = tl.load(in_ptr0 + (896 + x1 + 8192 * x3 % 65536), xmask)
+    tmp24 = tl.load(in_ptr0 + (1024 + x1 + 8192 * x3 % 65536), xmask)
+    tmp27 = tl.load(in_ptr0 + (1152 + x1 + 8192 * x3 % 65536), xmask)
+    tmp30 = tl.load(in_ptr0 + (1280 + x1 + 8192 * x3 % 65536), xmask)
+    tmp33 = tl.load(in_ptr0 + (1408 + x1 + 8192 * x3 % 65536), xmask)
+    tmp36 = tl.load(in_ptr0 + (1536 + x1 + 8192 * x3 % 65536), xmask)
+    tmp39 = tl.load(in_ptr0 + (1664 + x1 + 8192 * x3 % 65536), xmask)
+    tmp42 = tl.load(in_ptr0 + (1792 + x1 + 8192 * x3 % 65536), xmask)
+    tmp45 = tl.load(in_ptr0 + (1920 + x1 + 8192 * x3 % 65536), xmask)
+    tmp48 = tl.load(in_ptr0 + (2048 + x1 + 8192 * x3 % 65536), xmask)
+    tmp51 = tl.load(in_ptr0 + (2176 + x1 + 8192 * x3 % 65536), xmask)
+    tmp54 = tl.load(in_ptr0 + (2304 + x1 + 8192 * x3 % 65536), xmask)
+    tmp57 = tl.load(in_ptr0 + (2432 + x1 + 8192 * x3 % 65536), xmask)
+    tmp60 = tl.load(in_ptr0 + (2560 + x1 + 8192 * x3 % 65536), xmask)
+    tmp63 = tl.load(in_ptr0 + (2688 + x1 + 8192 * x3 % 65536), xmask)
+    tmp66 = tl.load(in_ptr0 + (2816 + x1 + 8192 * x3 % 65536), xmask)
+    tmp69 = tl.load(in_ptr0 + (2944 + x1 + 8192 * x3 % 65536), xmask)
+    tmp72 = tl.load(in_ptr0 + (3072 + x1 + 8192 * x3 % 65536), xmask)
+    tmp75 = tl.load(in_ptr0 + (3200 + x1 + 8192 * x3 % 65536), xmask)
+    tmp78 = tl.load(in_ptr0 + (3328 + x1 + 8192 * x3 % 65536), xmask)
+    tmp81 = tl.load(in_ptr0 + (3456 + x1 + 8192 * x3 % 65536), xmask)
+    tmp84 = tl.load(in_ptr0 + (3584 + x1 + 8192 * x3 % 65536), xmask)
+    tmp87 = tl.load(in_ptr0 + (3712 + x1 + 8192 * x3 % 65536), xmask)
+    tmp90 = tl.load(in_ptr0 + (3840 + x1 + 8192 * x3 % 65536), xmask)
+    tmp93 = tl.load(in_ptr0 + (3968 + x1 + 8192 * x3 % 65536), xmask)
+    tmp96 = tl.load(in_ptr0 + (4096 + x1 + 8192 * x3 % 65536), xmask)
+    tmp99 = tl.load(in_ptr0 + (4224 + x1 + 8192 * x3 % 65536), xmask)
+    tmp102 = tl.load(in_ptr0 + (4352 + x1 + 8192 * x3 % 65536), xmask)
+    tmp105 = tl.load(in_ptr0 + (4480 + x1 + 8192 * x3 % 65536), xmask)
+    tmp108 = tl.load(in_ptr0 + (4608 + x1 + 8192 * x3 % 65536), xmask)
+    tmp111 = tl.load(in_ptr0 + (4736 + x1 + 8192 * x3 % 65536), xmask)
+    tmp114 = tl.load(in_ptr0 + (4864 + x1 + 8192 * x3 % 65536), xmask)
+    tmp117 = tl.load(in_ptr0 + (5088 + x1 + 8192 * x3 % 65536), xmask)
+    tmp120 = tl.load(in_ptr0 + (5216 + x1 + 8192 * x3 % 65536), xmask)
+    tmp123 = tl.load(in_ptr0 + (5344 + x1 + 8192 * x3 % 65536), xmask)
+    tmp126 = tl.load(in_ptr0 + (5472 + x1 + 8192 * x3 % 65536), xmask)
+    tmp129 = tl.load(in_ptr0 + (5600 + x1 + 8192 * x3 % 65536), xmask)
+    tmp132 = tl.load(in_ptr0 + (5728 + x1 + 8192 * x3 % 65536), xmask)
+    tmp135 = tl.load(in_ptr0 + (5856 + x1 + 8192 * x3 % 65536), xmask)
+    tmp138 = tl.load(in_ptr0 + (5984 + x1 + 8192 * x3 % 65536), xmask)
+    tmp141 = tl.load(in_ptr0 + (6112 + x1 + 8192 * x3 % 65536), xmask)
+    tmp144 = tl.load(in_ptr0 + (6240 + x1 + 8192 * x3 % 65536), xmask)
+    tmp147 = tl.load(in_ptr0 + (6368 + x1 + 8192 * x3 % 65536), xmask)
+    tmp150 = tl.load(in_ptr0 + (6496 + x1 + 8192 * x3 % 65536), xmask)
+    tmp153 = tl.load(in_ptr0 + (6624 + x1 + 8192 * x3 % 65536), xmask)
+    tmp156 = tl.load(in_ptr0 + (6752 + x1 + 8192 * x3 % 65536), xmask)
+    tmp159 = tl.load(in_ptr0 + (6880 + x1 + 8192 * x3 % 65536), xmask)
+    tmp162 = tl.load(in_ptr0 + (7008 + x1 + 8192 * x3 % 65536), xmask)
+    tmp165 = tl.load(in_ptr0 + (7136 + x1 + 8192 * x3 % 65536), xmask)
+    tmp168 = tl.load(in_ptr0 + (7264 + x1 + 8192 * x3 % 65536), xmask)
+    tmp171 = tl.load(in_ptr0 + (7392 + x1 + 8192 * x3 % 65536), xmask)
+    tmp174 = tl.load(in_ptr0 + (7520 + x1 + 8192 * x3 % 65536), xmask)
+    tmp177 = tl.load(in_ptr0 + (7648 + x1 + 8192 * x3 % 65536), xmask)
+    tmp180 = tl.load(in_ptr0 + (7776 + x1 + 8192 * x3 % 65536), xmask)
+    tmp183 = tl.load(in_ptr0 + (7904 + x1 + 8192 * x3 % 65536), xmask)
+    tmp186 = tl.load(in_ptr0 + (8032 + x1 + 8192 * x3 % 65536), xmask)
+    tmp189 = tl.load(in_ptr0 + (8160 + x1 + 8192 * x3 % 65536), xmask)
+    tmp192 = tl.load(in_ptr0 + (8288 + x1 + 8192 * x3 % 65536), xmask)
+    tmp195 = tl.load(in_ptr0 + (8416 + x1 + 8192 * x3 % 65536), xmask)
+    tmp198 = tl.load(in_ptr0 + (8544 + x1 + 8192 * x3 % 65536), xmask)
+    tmp201 = tl.load(in_ptr0 + (8672 + x1 + 8192 * x3 % 65536), xmask)
+    tmp204 = tl.load(in_ptr0 + (8800 + x1 + 8192 * x3 % 65536), xmask)
+    tmp207 = tl.load(in_ptr0 + (8928 + x1 + 8192 * x3 % 65536), xmask)
+    tmp210 = tl.load(in_ptr0 + (9056 + x1 + 8192 * x3 % 65536), xmask)
+    tmp213 = tl.load(in_ptr0 + (9184 + x1 + 8192 * x3 % 65536), xmask)
+    tmp216 = tl.load(in_ptr0 + (9312 + x1 + 8192 * x3 % 65536), xmask)
+    tmp219 = tl.load(in_ptr0 + (9440 + x1 + 8192 * x3 % 65536), xmask)
+    tmp222 = tl.load(in_ptr0 + (9568 + x1 + 8192 * x3 % 65536), xmask)
+    tmp225 = tl.load(in_ptr0 + (9696 + x1 + 8192 * x3 % 65536), xmask)
+    tmp228 = tl.load(in_ptr0 + (9824 + x1 + 8192 * x3 % 65536), xmask)
+    tmp231 = tl.load(in_ptr0 + (9952 + x1 + 8192 * x3 % 65536), xmask)
+    tmp234 = tl.load(in_ptr0 + (10080 + x1 + 8192 * x3 % 65536), xmask)
+    tmp237 = tl.load(in_ptr0 + (10208 + x1 + 8192 * x3 % 65536), xmask)
+    tmp240 = tl.load(in_ptr0 + (10336 + x1 + 8192 * x3 % 65536), xmask)
+    tmp243 = tl.load(in_ptr0 + (10464 + x1 + 8192 * x3 % 65536), xmask)
+    tmp246 = tl.load(in_ptr0 + (10592 + x1 + 8192 * x3 % 65536), xmask)
+    tmp249 = tl.load(in_ptr0 + (10720 + x1 + 8192 * x3 % 65536), xmask)
+    tmp252 = tl.load(in_ptr0 + (10848 + x1 + 8192 * x3 % 65536), xmask)
+    tmp255 = tl.load(in_ptr0 + (10976 + x1 + 8192 * x3 % 65536), xmask)
+    tmp258 = tl.load(in_ptr0 + (11104 + x1 + 8192 * x3 % 65536), xmask)
+    tmp261 = tl.load(in_ptr0 + (11232 + x1 + 8192 * x3 % 65536), xmask)
+    tmp264 = tl.load(in_ptr0 + (11360 + x1 + 8192 * x3 % 65536), xmask)
+    tmp267 = tl.load(in_ptr0 + (11488 + x1 + 8192 * x3 % 65536), xmask)
+    tmp270 = tl.load(in_ptr0 + (11616 + x1 + 8192 * x3 % 65536), xmask)
+    tmp273 = tl.load(in_ptr0 + (11744 + x1 + 8192 * x3 % 65536), xmask)
+    tmp276 = tl.load(in_ptr0 + (11872 + x1 + 8192 * x3 % 65536), xmask)
+    tmp279 = tl.load(in_ptr0 + (12000 + x1 + 8192 * x3 % 65536), xmask)
+    tmp282 = tl.load(in_ptr0 + (12128 + x1 + 8192 * x3 % 65536), xmask)
+    tmp285 = tl.load(in_ptr0 + (12256 + x1 + 8192 * x3 % 65536), xmask)
+    tmp288 = tl.load(in_ptr0 + (12384 + x1 + 8192 * x3 % 65536), xmask)
+    tmp291 = tl.load(in_ptr0 + (12512 + x1 + 8192 * x3 % 65536), xmask)
+    tmp294 = tl.load(in_ptr0 + (12640 + x1 + 8192 * x3 % 65536), xmask)
+    tmp297 = tl.load(in_ptr0 + (12768 + x1 + 8192 * x3 % 65536), xmask)
+    tmp300 = tl.load(in_ptr0 + (12896 + x1 + 8192 * x3 % 65536), xmask)
+    tmp303 = tl.load(in_ptr0 + (13024 + x1 + 8192 * x3 % 65536), xmask)
+    tmp306 = tl.load(in_ptr0 + (13152 + x1 + 8192 * x3 % 65536), xmask)
+    tmp309 = tl.load(in_ptr0 + (13280 + x1 + 8192 * x3 % 65536), xmask)
+    tmp312 = tl.load(in_ptr0 + (13408 + x1 + 8192 * x3 % 65536), xmask)
+    tmp315 = tl.load(in_ptr0 + (13536 + x1 + 8192 * x3 % 65536), xmask)
+    tmp318 = tl.load(in_ptr0 + (13664 + x1 + 8192 * x3 % 65536), xmask)
+    tmp321 = tl.load(in_ptr0 + (13792 + x1 + 8192 * x3 % 65536), xmask)
+    tmp324 = tl.load(in_ptr0 + (13920 + x1 + 8192 * x3 % 65536), xmask)
+    tmp327 = tl.load(in_ptr0 + (14048 + x1 + 8192 * x3 % 65536), xmask)
+    tmp330 = tl.load(in_ptr0 + (14176 + x1 + 8192 * x3 % 65536), xmask)
+    tmp333 = tl.load(in_ptr0 + (14304 + x1 + 8192 * x3 % 65536), xmask)
+    tmp336 = tl.load(in_ptr0 + (14432 + x1 + 8192 * x3 % 65536), xmask)
+    tmp339 = tl.load(in_ptr0 + (14560 + x1 + 8192 * x3 % 65536), xmask)
+    tmp342 = tl.load(in_ptr0 + (14688 + x1 + 8192 * x3 % 65536), xmask)
+    tmp345 = tl.load(in_ptr0 + (14816 + x1 + 8192 * x3 % 65536), xmask)
+    tmp348 = tl.load(in_ptr0 + (14944 + x1 + 8192 * x3 % 65536), xmask)
+    tmp351 = tl.load(in_ptr0 + (15072 + x1 + 8192 * x3 % 65536), xmask)
+    tmp354 = tl.load(in_ptr0 + (15200 + x1 + 8192 * x3 % 65536), xmask)
+    tmp357 = tl.load(in_ptr0 + (15328 + x1 + 8192 * x3 % 65536), xmask)
+    tmp360 = tl.load(in_ptr0 + (15456 + x1 + 8192 * x3 % 65536), xmask)
+    tmp363 = tl.load(in_ptr0 + (15584 + x1 + 8192 * x3 % 65536), xmask)
+    tmp366 = tl.load(in_ptr0 + (15712 + x1 + 8192 * x3 % 65536), xmask)
+    tmp369 = tl.load(in_ptr0 + (15840 + x1 + 8192 * x3 % 65536), xmask)
+    tmp372 = tl.load(in_ptr0 + (15968 + x1 + 8192 * x3 % 65536), xmask)
+    tmp375 = tl.load(in_ptr0 + (16096 + x1 + 8192 * x3 % 65536), xmask)
+    tmp378 = tl.load(in_ptr0 + (16224 + x1 + 8192 * x3 % 65536), xmask)
+    tmp381 = tl.load(in_ptr0 + (16352 + x1 + 8192 * x3 % 65536), xmask)
+    tmp384 = tl.load(in_ptr0 + (16480 + x1 + 8192 * x3 % 65536), xmask)
+    tmp387 = tl.load(in_ptr0 + (16608 + x1 + 8192 * x3 % 65536), xmask)
+    tmp390 = tl.load(in_ptr0 + (16736 + x1 + 8192 * x3 % 65536), xmask)
+    tmp393 = tl.load(in_ptr0 + (16864 + x1 + 8192 * x3 % 65536), xmask)
+    tmp396 = tl.load(in_ptr0 + (16992 + x1 + 8192 * x3 % 65536), xmask)
+    tmp399 = tl.load(in_ptr0 + (17120 + x1 + 8192 * x3 % 65536), xmask)
+    tmp402 = tl.load(in_ptr0 + (17248 + x1 + 8192 * x3 % 65536), xmask)
+    tmp405 = tl.load(in_ptr0 + (17376 + x1 + 8192 * x3 % 65536), xmask)
+    tmp408 = tl.load(in_ptr0 + (17504 + x1 + 8192 * x3 % 65536), xmask)
+    tmp411 = tl.load(in_ptr0 + (17632 + x1 + 8192 * x3 % 65536), xmask)
+    tmp414 = tl.load(in_ptr0 + (17760 + x1 + 8192 * x3 % 65536), xmask)
+    tmp417 = tl.load(in_ptr0 + (17888 + x1 + 8192 * x3 % 65536), xmask)
+    tmp420 = tl.load(in_ptr0 + (18016 + x1 + 8192 * x3 % 65536), xmask)
+    tmp423 = tl.load(in_ptr0 + (18144 + x1 + 8192 * x3 % 65536), xmask)
+    tmp426 = tl.load(in_ptr0 + (18272 + x1 + 8192 * x3 % 65536), xmask)
+    tmp429 = tl.load(in_ptr0 + (18400 + x1 + 8192 * x3 % 65536), xmask)
+    tmp432 = tl.load(in_ptr0 + (18528 + x1 + 8192 * x3 % 65536), xmask)
+    tmp435 = tl.load(in_ptr0 + (18656 + x1 + 8192 * x3 % 65536), xmask)
+    tmp438 = tl.load(in_ptr0 + (18784 + x1 + 8192 * x3 % 65536), xmask)
+    tmp441 = tl.load(in_ptr0 + (18912 + x1 + 8192 * x3 % 65536), xmask)
+    tmp444 = tl.load(in_ptr0 + (19040 + x1 + 8192 * x3 % 65536), xmask)
+    tmp447 = tl.load(in_ptr0 + (19168 + x1 + 8192 * x3 % 65536), xmask)
+    tmp450 = tl.load(in_ptr0 + (19296 + x1 + 8192 * x3 % 65536), xmask)
+    tmp453 = tl.load(in_ptr0 + (19424 + x1 + 8192 * x3 % 65536), xmask)
+    tmp456 = tl.load(in_ptr0 + (19552 + x1 + 8192 * x3 % 65536), xmask)
+    tmp459 = tl.load(in_ptr0 + (19680 + x1 + 8192 * x3 % 65536), xmask)
+    tmp462 = tl.load(in_ptr0 + (19808 + x1 + 8192 * x3 % 65536), xmask)
+    tmp465 = tl.load(in_ptr0 + (19936 + x1 + 8192 * x3 % 65536), xmask)
+    tmp468 = tl.load(in_ptr0 + (20064 + x1 + 8192 * x3 % 65536), xmask)
+    tmp471 = tl.load(in_ptr0 + (20192 + x1 + 8192 * x3 % 65536), xmask)
+    tmp474 = tl.load(in_ptr0 + (20320 + x1 + 8192 * x3 % 65536), xmask)
+    tmp477 = tl.load(in_ptr0 + (20448 + x1 + 8192 * x3 % 65536), xmask)
+    tmp480 = tl.load(in_ptr0 + (20576 + x1 + 8192 * x3 % 65536), xmask)
+    tmp483 = tl.load(in_ptr0 + (20704 + x1 + 8192 * x3 % 65536), xmask)
+    tmp486 = tl.load(in_ptr0 + (20832 + x1 + 8192 * x3 % 65536), xmask)
+    tmp489 = tl.load(in_ptr0 + (20960 + x1 + 8192 * x3 % 65536), xmask)
+    tmp492 = tl.load(in_ptr0 + (21088 + x1 + 8192 * x3 % 65536), xmask)
+    tmp495 = tl.load(in_ptr0 + (21216 + x1 + 8192 * x3 % 65536), xmask)
+    tmp498 = tl.load(in_ptr0 + (21344 + x1 + 8192 * x3 % 65536), xmask)
+    tmp501 = tl.load(in_ptr0 + (21472 + x1 + 8192 * x3 % 65536), xmask)
+    tmp504 = tl.load(in_ptr0 + (21600 + x1 + 8192 * x3 % 65536), xmask)
+    tmp507 = tl.load(in_ptr0 + (21728 + x1 + 8192 * x3 % 65536), xmask)
+    tmp510 = tl.load(in_ptr0 + (21856 + x1 + 8192 * x3 % 65536), xmask)
+    tmp513 = tl.load(in_ptr0 + (21984 + x1 + 8192 * x3 % 65536), xmask)
+    tmp516 = tl.load(in_ptr0 + (22112 + x1 + 8192 * x3 % 65536), xmask)
+    tmp519 = tl.load(in_ptr0 + (22240 + x1 + 8192 * x3 % 65536), xmask)
+    tmp522 = tl.load(in_ptr0 + (22368 + x1 + 8192 * x3 % 65536), xmask)
+    tmp525 = tl.load(in_ptr0 + (22496 + x1 + 8192 * x3 % 65536), xmask)
+    tmp528 = tl.load(in_ptr0 + (22624 + x1 + 8192 * x3 % 65536), xmask)
+    tmp531 = tl.load(in_ptr0 + (22752 + x1 + 8192 * x3 % 65536), xmask)
+    tmp534 = tl.load(in_ptr0 + (22880 + x1 + 8192 * x3 % 65536), xmask)
+    tmp537 = tl.load(in_ptr0 + (23008 + x1 + 8192 * x3 % 65536), xmask)
+    tmp540 = tl.load(in_ptr0 + (23136 + x1 + 8192 * x3 % 65536), xmask)
+    tmp543 = tl.load(in_ptr0 + (23264 + x1 + 8192 * x3 % 65536), xmask)
+    tmp546 = tl.load(in_ptr0 + (23392 + x1 + 8192 * x3 % 65536), xmask)
+    tmp549 = tl.load(in_ptr0 + (23520 + x1 + 8192 * x3 % 65536), xmask)
+    tmp552 = tl.load(in_ptr0 + (23648 + x1 + 8192 * x3 % 65536), xmask)
+    tmp555 = tl.load(in_ptr0 + (23776 + x1 + 8192 * x3 % 65536), xmask)
+    tmp558 = tl.load(in_ptr0 + (23904 + x1 + 8192 * x3 % 65536), xmask)
+    tmp561 = tl.load(in_ptr0 + (24032 + x1 + 8192 * x3 % 65536), xmask)
+    tmp564 = tl.load(in_ptr0 + (24160 + x1 + 8192 * x3 % 65536), xmask)
+    tmp567 = tl.load(in_ptr0 + (24288 + x1 + 8192 * x3 % 65536), xmask)
+    tmp570 = tl.load(in_ptr0 + (24416 + x1 + 8192 * x3 % 65536), xmask)
+    tmp573 = tl.load(in_ptr0 + (24544 + x1 + 8192 * x3 % 65536), xmask)
+    tmp576 = tl.load(in_ptr0 + (24672 + x1 + 8192 * x3 % 65536), xmask)
+    tmp579 = tl.load(in_ptr0 + (24800 + x1 + 8192 * x3 % 65536), xmask)
+    tmp582 = tl.load(in_ptr0 + (24928 + x1 + 8192 * x3 % 65536), xmask)
+    tmp585 = tl.load(in_ptr0 + (25056 + x1 + 8192 * x3 % 65536), xmask)
+    tmp588 = tl.load(in_ptr0 + (25184 + x1 + 8192 * x3 % 655

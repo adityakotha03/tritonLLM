@@ -1,34 +1,31 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_per_fused_abs_0(in_ptr0, in_ptr1, out_ptr0, xnumel, rnumel):
-    XBLOCK: tl.constexpr = 1
-    RBLOCK: tl.constexpr = 256
+def triton_poi_fused_abs_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 32768
     xoffset = tl.program_id(0) * XBLOCK
-    tl.full([1], xoffset, tl.int32)
-    tl.full([RBLOCK], True, tl.int1)
-    rindex = tl.arange(0, RBLOCK)[:]
-    tl.full([RBLOCK], True, tl.int1)
-    r0 = rindex
-    tmp0 = tl.load(in_ptr0 + r0, None)
-    tmp1 = tl.load(in_ptr1 + r0, None)
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
     tmp2 = tmp0 - tmp1
-    tmp3 = 0.5
-    tmp4 = tmp2 * tmp3
-    tmp5 = triton_helpers.maximum(tmp4, 0.0)
-    tmp6 = tmp2.abs()
-    tmp7 = triton_helpers.minimum(tmp6, 1.0)
-    tmp8 = tmp5 + tmp7
-    tl.store(out_ptr0 + tl.broadcast_to(r0, [RBLOCK]), tmp8, None)
+    tmp3 = tl.abs(tmp2)
+    tmp4 = 0.5
+    tmp5 = tmp3 * tmp4
+    tmp6 = 1.0
+    tmp7 = tmp3 >= tmp6
+    tmp8 = tl.full([1], 1, tl.int32)
+    tmp9 = tl.where(tmp7, tmp8, tmp5)
+    tl.store(out_ptr0 + x0, tmp9, xmask)
 
 
 def call(args):
@@ -39,12 +36,12 @@ def call(args):
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((32768,), (1,), torch.float32)
-        get_raw_stream(0)
-        triton_per_fused_abs_0[grid(32768)](arg1_1, arg0_1, buf0, 32768, 256,
-            num_warps=2, num_stages=1)
+        get_input = buf0
+        triton_poi_fused_abs_add_0[triton.ops._triton_helpers.grid(32768)](arg0_1,
+            arg1_1, get_input, 32768, XBLOCK=128, num_warps=4, num_stages=1)
         del arg0_1
         del arg1_1
-    return buf0,
+    return get_input,
 
 
 class ModelNew(nn.Module):
