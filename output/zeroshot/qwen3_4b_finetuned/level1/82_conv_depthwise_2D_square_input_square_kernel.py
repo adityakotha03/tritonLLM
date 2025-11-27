@@ -1,17 +1,17 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK:
-    tl.constexpr, XBLOCK: tl.constexpr):
-    ynumel = 16
+def triton_poi_fused_convolution_0(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    ynumel = 4096
     xnumel = 9
     yoffset = tl.program_id(1) * YBLOCK
     yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
@@ -20,28 +20,54 @@ def triton_poi_fused_convolution_0(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK:
     xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
     x2 = xindex
-    y0 = yindex % 4
-    y1 = yindex // 4
     y3 = yindex
-    tmp0 = tl.load(in_ptr0 + (y0 + 4 * x2 + 36 * y1), xmask & ymask,
+    y0 = yindex % 64
+    y1 = yindex // 64
+    tmp0 = tl.load(in_ptr0 + (x2 + 9 * y3), xmask & ymask, eviction_policy=
+        'evict_last')
+    tl.store(out_ptr0 + (y0 + 64 * x2 + 576 * y1), tmp0, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_1(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    ynumel = 4096
+    xnumel = 512
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y3 = yindex
+    y0 = yindex % 64
+    y1 = yindex // 64
+    tmp0 = tl.load(in_ptr0 + (x2 + 512 * y3), xmask & ymask,
         eviction_policy='evict_last')
-    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask & ymask)
+    tl.store(out_ptr0 + (y0 + 64 * x2 + 32768 * y1), tmp0, xmask & ymask)
 
 
 def call(args):
     primals_1, primals_2 = args
     args.clear()
-    assert_size_stride(primals_1, (64, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_2, (16, 64, 512, 512), (2097152, 32768, 64,
+    assert_size_stride(primals_1, (64, 1, 3, 3), (9, 9, 3, 1))
+    assert_size_stride(primals_2, (16, 64, 512, 512), (2097152, 32768, 512,
         1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 64, 512, 512), (2097152, 32768, 64, 
-            1), torch.float32)
+        buf0 = empty_strided_cuda((16, 64, 512, 512), (2097152, 1, 4096, 8),
+            torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(16, 9)](primals_1, buf0,
-            16, 9, XBLOCK=8, YBLOCK=8, num_warps=4, num_stages=1)
-    return buf0, primals_1, primals_2
+        triton_poi_fused_convolution_0[grid(4096, 9)](primals_2, buf0, 4096,
+            9, XBLOCK=16, YBLOCK=64, num_warps=4, num_stages=1)
+        del primals_2
+        buf1 = empty_strided_cuda((64, 64, 512, 512), (2097152, 1, 4096, 8),
+            torch.float32)
+        triton_poi_fused_convolution_1[grid(4096, 512)](primals_1, buf1, 
+            4096, 512, XBLOCK=32, YBLOCK=32, num_warps=4, num_stages=1)
+        del primals_1
+    return buf0, buf1
 
 
 class ModelNew(nn.Module):
@@ -55,11 +81,9 @@ class ModelNew(nn.Module):
         padding (int, optional): Padding applied to the input. Defaults to 0.
         bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
     """
-    def __init__(self, in_channels: int, kernel_size: int, stride: int = 1, 
-        padding: int = 0, bias: bool = False):
+    def __init__(self, in_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, bias: bool = False):
         super(ModelNew, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels, in_channels, kernel_size,
-            stride=stride, padding=padding, groups=in_channels, bias=bias)
+        self.conv2d = nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding, groups=in_channels, bias=bias)
         
     def forward(self, input_0):
         primals_1 = self.conv2d.weight

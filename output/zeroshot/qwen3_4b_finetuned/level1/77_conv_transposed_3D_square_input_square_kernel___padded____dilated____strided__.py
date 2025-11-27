@@ -1,22 +1,22 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
 def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
-    constexpr):
-    xnumel = 18065536
+    .constexpr):
+    xnumel = 294912
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 16384 % 64
+    x1 = xindex // 2304 % 64
     tmp0 = tl.load(in_out_ptr0 + x3, xmask)
     tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
@@ -26,19 +26,20 @@ def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
 def call(args):
     primals_1, primals_2 = args
     args.clear()
-    assert_size_stride(primals_1, (64, 32, 3, 3, 3), (81, 27, 9, 3, 1))
-    assert_size_stride(primals_2, (16, 64, 3, 3, 3), (1728, 27, 9, 3, 1))
+    assert_size_stride(primals_1, (64, 32, 3, 3, 3), (864, 27, 9, 3, 1))
+    assert_size_stride(primals_2, (16, 32, 16, 32, 32), (524288, 16384, 1024,
+        32, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 64, 16, 32, 32), (32768, 512, 2048, 
-            64, 1), torch.float32)
+        buf0 = empty_strided_cuda((16, 64, 16, 32, 32), (524288, 8192, 512,
+            16, 1), torch.float32)
         buf1 = buf0
         del buf0
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(18065536)](buf1, primals_2, 
-            18065536, XBLOCK=1024, num_warps=4, num_stages=1)
-        del primals_2
-    return buf1, primals_1
+        triton_poi_fused_convolution_0[grid(294912)](buf1, primals_1, 294912,
+            XBLOCK=512, num_warps=4, num_stages=1)
+        del primals_1
+    return buf1, primals_2
 
 
 class ModelNew(nn.Module):
@@ -60,7 +61,7 @@ class ModelNew(nn.Module):
         self.conv_transpose3d = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=(kernel_size, kernel_size, kernel_size), stride=stride, padding=padding, dilation=dilation, bias=bias)
 
     def forward(self, input_0):
-        primals_2 = self.conv_transpose3d.weight
-        primals_1 = self.conv_transpose3d.bias
-        output = call([input_0, primals_2])
+        primals_1 = self.conv_transpose3d.weight
+        primals_2 = input_0
+        output = call([primals_1, primals_2])
         return output[0]

@@ -1,270 +1,686 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_avg_pool2d_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 16384
+def triton_per_fused_avg_pool3d_0(in_ptr0, out_ptr0, xnumel, rnumel):
+    XBLOCK: tl.constexpr = 1
+    RBLOCK: tl.constexpr = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    tl.full([1], xoffset, tl.int32)
+    tl.full([RBLOCK], True, tl.int1)
+    rindex = tl.arange(0, RBLOCK)[:]
+    tl.full([RBLOCK], True, tl.int1)
+    r0 = rindex
+    tmp0 = tl.load(in_ptr0 + r0, None)
+    tmp1 = 1.0
+    tmp2 = tmp0 * tmp1
+    tl.store(out_ptr0 + tl.broadcast_to(r0, [RBLOCK]), tmp2, None)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_1(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex % 16
-    x1 = xindex // 16
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 256 * x1), xmask)
-    tmp1 = tl.load(in_ptr0 + (64 + x0 + 256 * x1), xmask)
-    tmp3 = tl.load(in_ptr0 + (128 + x0 + 256 * x1), xmask)
-    tmp5 = tl.load(in_ptr0 + (192 + x0 + 256 * x1), xmask)
-    tmp7 = tl.load(in_ptr0 + (256 + x0 + 256 * x1), xmask)
-    tmp9 = tl.load(in_ptr0 + (320 + x0 + 256 * x1), xmask)
-    tmp11 = tl.load(in_ptr0 + (384 + x0 + 256 * x1), xmask)
-    tmp13 = tl.load(in_ptr0 + (448 + x0 + 256 * x1), xmask)
-    tmp15 = tl.load(in_ptr0 + (512 + x0 + 256 * x1), xmask)
-    tmp17 = tl.load(in_ptr0 + (576 + x0 + 256 * x1), xmask)
-    tmp19 = tl.load(in_ptr0 + (640 + x0 + 256 * x1), xmask)
-    tmp21 = tl.load(in_ptr0 + (704 + x0 + 256 * x1), xmask)
-    tmp23 = tl.load(in_ptr0 + (768 + x0 + 256 * x1), xmask)
-    tmp25 = tl.load(in_ptr0 + (832 + x0 + 256 * x1), xmask)
-    tmp27 = tl.load(in_ptr0 + (896 + x0 + 256 * x1), xmask)
-    tmp29 = tl.load(in_ptr0 + (960 + x0 + 256 * x1), xmask)
-    tmp31 = tl.load(in_ptr0 + (1024 + x0 + 256 * x1), xmask)
-    tmp33 = tl.load(in_ptr0 + (1088 + x0 + 256 * x1), xmask)
-    tmp35 = tl.load(in_ptr0 + (1152 + x0 + 256 * x1), xmask)
-    tmp37 = tl.load(in_ptr0 + (1216 + x0 + 256 * x1), xmask)
-    tmp39 = tl.load(in_ptr0 + (1280 + x0 + 256 * x1), xmask)
-    tmp41 = tl.load(in_ptr0 + (1344 + x0 + 256 * x1), xmask)
-    tmp43 = tl.load(in_ptr0 + (1408 + x0 + 256 * x1), xmask)
-    tmp45 = tl.load(in_ptr0 + (1472 + x0 + 256 * x1), xmask)
-    tmp47 = tl.load(in_ptr0 + (1536 + x0 + 256 * x1), xmask)
-    tmp49 = tl.load(in_ptr0 + (1600 + x0 + 256 * x1), xmask)
-    tmp51 = tl.load(in_ptr0 + (1664 + x0 + 256 * x1), xmask)
-    tmp53 = tl.load(in_ptr0 + (1728 + x0 + 256 * x1), xmask)
-    tmp55 = tl.load(in_ptr0 + (1792 + x0 + 256 * x1), xmask)
-    tmp57 = tl.load(in_ptr0 + (1856 + x0 + 256 * x1), xmask)
-    tmp59 = tl.load(in_ptr0 + (1920 + x0 + 256 * x1), xmask)
-    tmp61 = tl.load(in_ptr0 + (1984 + x0 + 256 * x1), xmask)
-    tmp63 = tl.load(in_ptr0 + (2048 + x0 + 256 * x1), xmask)
-    tmp65 = tl.load(in_ptr0 + (2112 + x0 + 256 * x1), xmask)
-    tmp67 = tl.load(in_ptr0 + (2176 + x0 + 256 * x1), xmask)
-    tmp69 = tl.load(in_ptr0 + (2240 + x0 + 256 * x1), xmask)
-    tmp71 = tl.load(in_ptr0 + (2304 + x0 + 256 * x1), xmask)
-    tmp73 = tl.load(in_ptr0 + (2368 + x0 + 256 * x1), xmask)
-    tmp75 = tl.load(in_ptr0 + (2432 + x0 + 256 * x1), xmask)
-    tmp77 = tl.load(in_ptr0 + (2496 + x0 + 256 * x1), xmask)
-    tmp79 = tl.load(in_ptr0 + (2560 + x0 + 256 * x1), xmask)
-    tmp81 = tl.load(in_ptr0 + (2624 + x0 + 256 * x1), xmask)
-    tmp83 = tl.load(in_ptr0 + (2688 + x0 + 256 * x1), xmask)
-    tmp85 = tl.load(in_ptr0 + (2752 + x0 + 256 * x1), xmask)
-    tmp87 = tl.load(in_ptr0 + (2816 + x0 + 256 * x1), xmask)
-    tmp89 = tl.load(in_ptr0 + (2880 + x0 + 256 * x1), xmask)
-    tmp91 = tl.load(in_ptr0 + (2944 + x0 + 256 * x1), xmask)
-    tmp93 = tl.load(in_ptr0 + (3008 + x0 + 256 * x1), xmask)
-    tmp95 = tl.load(in_ptr0 + (3072 + x0 + 256 * x1), xmask)
-    tmp97 = tl.load(in_ptr0 + (3136 + x0 + 256 * x1), xmask)
-    tmp99 = tl.load(in_ptr0 + (3200 + x0 + 256 * x1), xmask)
-    tmp101 = tl.load(in_ptr0 + (3264 + x0 + 256 * x1), xmask)
-    tmp103 = tl.load(in_ptr0 + (3328 + x0 + 256 * x1), xmask)
-    tmp105 = tl.load(in_ptr0 + (3392 + x0 + 256 * x1), xmask)
-    tmp107 = tl.load(in_ptr0 + (3456 + x0 + 256 * x1), xmask)
-    tmp109 = tl.load(in_ptr0 + (3520 + x0 + 256 * x1), xmask)
-    tmp111 = tl.load(in_ptr0 + (3584 + x0 + 256 * x1), xmask)
-    tmp113 = tl.load(in_ptr0 + (3648 + x0 + 256 * x1), xmask)
-    tmp115 = tl.load(in_ptr0 + (3712 + x0 + 256 * x1), xmask)
-    tmp117 = tl.load(in_ptr0 + (3776 + x0 + 256 * x1), xmask)
-    tmp119 = tl.load(in_ptr0 + (3840 + x0 + 256 * x1), xmask)
-    tmp121 = tl.load(in_ptr0 + (3904 + x0 + 256 * x1), xmask)
-    tmp123 = tl.load(in_ptr0 + (3968 + x0 + 256 * x1), xmask)
-    tmp125 = tl.load(in_ptr0 + (4032 + x0 + 256 * x1), xmask)
-    tmp127 = tl.load(in_ptr0 + (4096 + x0 + 256 * x1), xmask)
-    tmp129 = tl.load(in_ptr0 + (4160 + x0 + 256 * x1), xmask)
-    tmp131 = tl.load(in_ptr0 + (4224 + x0 + 256 * x1), xmask)
-    tmp133 = tl.load(in_ptr0 + (4288 + x0 + 256 * x1), xmask)
-    tmp135 = tl.load(in_ptr0 + (4352 + x0 + 256 * x1), xmask)
-    tmp137 = tl.load(in_ptr0 + (4416 + x0 + 256 * x1), xmask)
-    tmp139 = tl.load(in_ptr0 + (4480 + x0 + 256 * x1), xmask)
-    tmp141 = tl.load(in_ptr0 + (4544 + x0 + 256 * x1), xmask)
-    tmp143 = tl.load(in_ptr0 + (4608 + x0 + 256 * x1), xmask)
-    tmp145 = tl.load(in_ptr0 + (4672 + x0 + 256 * x1), xmask)
-    tmp147 = tl.load(in_ptr0 + (4736 + x0 + 256 * x1), xmask)
-    tmp149 = tl.load(in_ptr0 + (4800 + x0 + 256 * x1), xmask)
-    tmp151 = tl.load(in_ptr0 + (4864 + x0 + 256 * x1), xmask)
-    tmp153 = tl.load(in_ptr0 + (4928 + x0 + 256 * x1), xmask)
-    tmp155 = tl.load(in_ptr0 + (4992 + x0 + 256 * x1), xmask)
-    tmp157 = tl.load(in_ptr0 + (5056 + x0 + 256 * x1), xmask)
-    tmp159 = tl.load(in_ptr0 + (5120 + x0 + 256 * x1), xmask)
-    tmp161 = tl.load(in_ptr0 + (5184 + x0 + 256 * x1), xmask)
-    tmp163 = tl.load(in_ptr0 + (5248 + x0 + 256 * x1), xmask)
-    tmp165 = tl.load(in_ptr0 + (5312 + x0 + 256 * x1), xmask)
-    tmp167 = tl.load(in_ptr0 + (5376 + x0 + 256 * x1), xmask)
-    tmp169 = tl.load(in_ptr0 + (5440 + x0 + 256 * x1), xmask)
-    tmp171 = tl.load(in_ptr0 + (5504 + x0 + 256 * x1), xmask)
-    tmp173 = tl.load(in_ptr0 + (5568 + x0 + 256 * x1), xmask)
-    tmp175 = tl.load(in_ptr0 + (5632 + x0 + 256 * x1), xmask)
-    tmp177 = tl.load(in_ptr0 + (5696 + x0 + 256 * x1), xmask)
-    tmp179 = tl.load(in_ptr0 + (5760 + x0 + 256 * x1), xmask)
-    tmp181 = tl.load(in_ptr0 + (5824 + x0 + 256 * x1), xmask)
-    tmp183 = tl.load(in_ptr0 + (5888 + x0 + 256 * x1), xmask)
-    tmp185 = tl.load(in_ptr0 + (5952 + x0 + 256 * x1), xmask)
-    tmp187 = tl.load(in_ptr0 + (6016 + x0 + 256 * x1), xmask)
-    tmp189 = tl.load(in_ptr0 + (6080 + x0 + 256 * x1), xmask)
-    tmp191 = tl.load(in_ptr0 + (6144 + x0 + 256 * x1), xmask)
-    tmp193 = tl.load(in_ptr0 + (6208 + x0 + 256 * x1), xmask)
-    tmp195 = tl.load(in_ptr0 + (6272 + x0 + 256 * x1), xmask)
-    tmp197 = tl.load(in_ptr0 + (6336 + x0 + 256 * x1), xmask)
-    tmp199 = tl.load(in_ptr0 + (6400 + x0 + 256 * x1), xmask)
-    tmp201 = tl.load(in_ptr0 + (6464 + x0 + 256 * x1), xmask)
-    tmp203 = tl.load(in_ptr0 + (6528 + x0 + 256 * x1), xmask)
-    tmp205 = tl.load(in_ptr0 + (6592 + x0 + 256 * x1), xmask)
-    tmp207 = tl.load(in_ptr0 + (6656 + x0 + 256 * x1), xmask)
-    tmp209 = tl.load(in_ptr0 + (6720 + x0 + 256 * x1), xmask)
-    tmp211 = tl.load(in_ptr0 + (6784 + x0 + 256 * x1), xmask)
-    tmp213 = tl.load(in_ptr0 + (6848 + x0 + 256 * x1), xmask)
-    tmp215 = tl.load(in_ptr0 + (6912 + x0 + 256 * x1), xmask)
-    tmp217 = tl.load(in_ptr0 + (6976 + x0 + 256 * x1), xmask)
-    tmp219 = tl.load(in_ptr0 + (7040 + x0 + 256 * x1), xmask)
-    tmp221 = tl.load(in_ptr0 + (7104 + x0 + 256 * x1), xmask)
-    tmp223 = tl.load(in_ptr0 + (7168 + x0 + 256 * x1), xmask)
-    tmp225 = tl.load(in_ptr0 + (7232 + x0 + 256 * x1), xmask)
-    tmp227 = tl.load(in_ptr0 + (7296 + x0 + 256 * x1), xmask)
-    tmp229 = tl.load(in_ptr0 + (7360 + x0 + 256 * x1), xmask)
-    tmp231 = tl.load(in_ptr0 + (7424 + x0 + 256 * x1), xmask)
-    tmp233 = tl.load(in_ptr0 + (7488 + x0 + 256 * x1), xmask)
-    tmp235 = tl.load(in_ptr0 + (7552 + x0 + 256 * x1), xmask)
-    tmp237 = tl.load(in_ptr0 + (7616 + x0 + 256 * x1), xmask)
-    tmp239 = tl.load(in_ptr0 + (7680 + x0 + 256 * x1), xmask)
-    tmp241 = tl.load(in_ptr0 + (7744 + x0 + 256 * x1), xmask)
-    tmp243 = tl.load(in_ptr0 + (7808 + x0 + 256 * x1), xmask)
-    tmp245 = tl.load(in_ptr0 + (7872 + x0 + 256 * x1), xmask)
-    tmp247 = tl.load(in_ptr0 + (7936 + x0 + 256 * x1), xmask)
-    tmp249 = tl.load(in_ptr0 + (8000 + x0 + 256 * x1), xmask)
-    tmp251 = tl.load(in_ptr0 + (8064 + x0 + 256 * x1), xmask)
-    tmp253 = tl.load(in_ptr0 + (8128 + x0 + 256 * x1), xmask)
-    tmp255 = tl.load(in_ptr0 + (8192 + x0 + 256 * x1), xmask)
-    tmp257 = tl.load(in_ptr0 + (8256 + x0 + 256 * x1), xmask)
-    tmp259 = tl.load(in_ptr0 + (8320 + x0 + 256 * x1), xmask)
-    tmp261 = tl.load(in_ptr0 + (8384 + x0 + 256 * x1), xmask)
-    tmp263 = tl.load(in_ptr0 + (8448 + x0 + 256 * x1), xmask)
-    tmp265 = tl.load(in_ptr0 + (8512 + x0 + 256 * x1), xmask)
-    tmp267 = tl.load(in_ptr0 + (8576 + x0 + 256 * x1), xmask)
-    tmp269 = tl.load(in_ptr0 + (8640 + x0 + 256 * x1), xmask)
-    tmp271 = tl.load(in_ptr0 + (8704 + x0 + 256 * x1), xmask)
-    tmp273 = tl.load(in_ptr0 + (8768 + x0 + 256 * x1), xmask)
-    tmp275 = tl.load(in_ptr0 + (8832 + x0 + 256 * x1), xmask)
-    tmp277 = tl.load(in_ptr0 + (8896 + x0 + 256 * x1), xmask)
-    tmp279 = tl.load(in_ptr0 + (8960 + x0 + 256 * x1), xmask)
-    tmp281 = tl.load(in_ptr0 + (9024 + x0 + 256 * x1), xmask)
-    tmp283 = tl.load(in_ptr0 + (9088 + x0 + 256 * x1), xmask)
-    tmp285 = tl.load(in_ptr0 + (9152 + x0 + 256 * x1), xmask)
-    tmp287 = tl.load(in_ptr0 + (9216 + x0 + 256 * x1), xmask)
-    tmp289 = tl.load(in_ptr0 + (9280 + x0 + 256 * x1), xmask)
-    tmp291 = tl.load(in_ptr0 + (9344 + x0 + 256 * x1), xmask)
-    tmp293 = tl.load(in_ptr0 + (9408 + x0 + 256 * x1), xmask)
-    tmp295 = tl.load(in_ptr0 + (9472 + x0 + 256 * x1), xmask)
-    tmp297 = tl.load(in_ptr0 + (9536 + x0 + 256 * x1), xmask)
-    tmp299 = tl.load(in_ptr0 + (9600 + x0 + 256 * x1), xmask)
-    tmp301 = tl.load(in_ptr0 + (9664 + x0 + 256 * x1), xmask)
-    tmp303 = tl.load(in_ptr0 + (9728 + x0 + 256 * x1), xmask)
-    tmp305 = tl.load(in_ptr0 + (9792 + x0 + 256 * x1), xmask)
-    tmp307 = tl.load(in_ptr0 + (9856 + x0 + 256 * x1), xmask)
-    tmp309 = tl.load(in_ptr0 + (9920 + x0 + 256 * x1), xmask)
-    tmp311 = tl.load(in_ptr0 + (9984 + x0 + 256 * x1), xmask)
-    tmp313 = tl.load(in_ptr0 + (10048 + x0 + 256 * x1), xmask)
-    tmp315 = tl.load(in_ptr0 + (10112 + x0 + 256 * x1), xmask)
-    tmp317 = tl.load(in_ptr0 + (10176 + x0 + 256 * x1), xmask)
-    tmp319 = tl.load(in_ptr0 + (10240 + x0 + 256 * x1), xmask)
-    tmp321 = tl.load(in_ptr0 + (10304 + x0 + 256 * x1), xmask)
-    tmp323 = tl.load(in_ptr0 + (10368 + x0 + 256 * x1), xmask)
-    tmp325 = tl.load(in_ptr0 + (10432 + x0 + 256 * x1), xmask)
-    tmp327 = tl.load(in_ptr0 + (10496 + x0 + 256 * x1), xmask)
-    tmp329 = tl.load(in_ptr0 + (10560 + x0 + 256 * x1), xmask)
-    tmp331 = tl.load(in_ptr0 + (10624 + x0 + 256 * x1), xmask)
-    tmp333 = tl.load(in_ptr0 + (10688 + x0 + 256 * x1), xmask)
-    tmp335 = tl.load(in_ptr0 + (10752 + x0 + 256 * x1), xmask)
-    tmp337 = tl.load(in_ptr0 + (10816 + x0 + 256 * x1), xmask)
-    tmp339 = tl.load(in_ptr0 + (10880 + x0 + 256 * x1), xmask)
-    tmp341 = tl.load(in_ptr0 + (10944 + x0 + 256 * x1), xmask)
-    tmp343 = tl.load(in_ptr0 + (11008 + x0 + 256 * x1), xmask)
-    tmp345 = tl.load(in_ptr0 + (11072 + x0 + 256 * x1), xmask)
-    tmp347 = tl.load(in_ptr0 + (11136 + x0 + 256 * x1), xmask)
-    tmp349 = tl.load(in_ptr0 + (11200 + x0 + 256 * x1), xmask)
-    tmp351 = tl.load(in_ptr0 + (11264 + x0 + 256 * x1), xmask)
-    tmp353 = tl.load(in_ptr0 + (11328 + x0 + 256 * x1), xmask)
-    tmp355 = tl.load(in_ptr0 + (11392 + x0 + 256 * x1), xmask)
-    tmp357 = tl.load(in_ptr0 + (11456 + x0 + 256 * x1), xmask)
-    tmp359 = tl.load(in_ptr0 + (11520 + x0 + 256 * x1), xmask)
-    tmp361 = tl.load(in_ptr0 + (11584 + x0 + 256 * x1), xmask)
-    tmp363 = tl.load(in_ptr0 + (11648 + x0 + 256 * x1), xmask)
-    tmp365 = tl.load(in_ptr0 + (11712 + x0 + 256 * x1), xmask)
-    tmp367 = tl.load(in_ptr0 + (11776 + x0 + 256 * x1), xmask)
-    tmp369 = tl.load(in_ptr0 + (11840 + x0 + 256 * x1), xmask)
-    tmp371 = tl.load(in_ptr0 + (11904 + x0 + 256 * x1), xmask)
-    tmp373 = tl.load(in_ptr0 + (11968 + x0 + 256 * x1), xmask)
-    tmp375 = tl.load(in_ptr0 + (12032 + x0 + 256 * x1), xmask)
-    tmp377 = tl.load(in_ptr0 + (12096 + x0 + 256 * x1), xmask)
-    tmp379 = tl.load(in_ptr0 + (12160 + x0 + 256 * x1), xmask)
-    tmp381 = tl.load(in_ptr0 + (12224 + x0 + 256 * x1), xmask)
-    tmp383 = tl.load(in_ptr0 + (12288 + x0 + 256 * x1), xmask)
-    tmp385 = tl.load(in_ptr0 + (12352 + x0 + 256 * x1), xmask)
-    tmp387 = tl.load(in_ptr0 + (12416 + x0 + 256 * x1), xmask)
-    tmp389 = tl.load(in_ptr0 + (12480 + x0 + 256 * x1), xmask)
-    tmp391 = tl.load(in_ptr0 + (12544 + x0 + 256 * x1), xmask)
-    tmp393 = tl.load(in_ptr0 + (12608 + x0 + 256 * x1), xmask)
-    tmp395 = tl.load(in_ptr0 + (12672 + x0 + 256 * x1), xmask)
-    tmp397 = tl.load(in_ptr0 + (12736 + x0 + 256 * x1), xmask)
-    tmp399 = tl.load(in_ptr0 + (12800 + x0 + 256 * x1), xmask)
-    tmp401 = tl.load(in_ptr0 + (12864 + x0 + 256 * x1), xmask)
-    tmp403 = tl.load(in_ptr0 + (12928 + x0 + 256 * x1), xmask)
-    tmp405 = tl.load(in_ptr0 + (12992 + x0 + 256 * x1), xmask)
-    tmp407 = tl.load(in_ptr0 + (13056 + x0 + 256 * x1), xmask)
-    tmp409 = tl.load(in_ptr0 + (13120 + x0 + 256 * x1), xmask)
-    tmp411 = tl.load(in_ptr0 + (13184 + x0 + 256 * x1), xmask)
-    tmp413 = tl.load(in_ptr0 + (13248 + x0 + 256 * x1), xmask)
-    tmp415 = tl.load(in_ptr0 + (13312 + x0 + 256 * x1), xmask)
-    tmp417 = tl.load(in_ptr0 + (13376 + x0 + 256 * x1), xmask)
-    tmp419 = tl.load(in_ptr0 + (13440 + x0 + 256 * x1), xmask)
-    tmp421 = tl.load(in_ptr0 + (13504 + x0 + 256 * x1), xmask)
-    tmp423 = tl.load(in_ptr0 + (13568 + x0 + 256 * x1), xmask)
-    tmp425 = tl.load(in_ptr0 + (13632 + x0 + 256 * x1), xmask)
-    tmp427 = tl.load(in_ptr0 + (13696 + x0 + 256 * x1), xmask)
-    tmp429 = tl.load(in_ptr0 + (13760 + x0 + 256 * x1), xmask)
-    tmp431 = tl.load(in_ptr0 + (13824 + x0 + 256 * x1), xmask)
-    tmp433 = tl.load(in_ptr0 + (13888 + x0 + 256 * x1), xmask)
-    tmp435 = tl.load(in_ptr0 + (13952 + x0 + 256 * x1), xmask)
-    tmp437 = tl.load(in_ptr0 + (14016 + x0 + 256 * x1), xmask)
-    tmp439 = tl.load(in_ptr0 + (14080 + x0 + 256 * x1), xmask)
-    tmp441 = tl.load(in_ptr0 + (14144 + x0 + 256 * x1), xmask)
-    tmp443 = tl.load(in_ptr0 + (14208 + x0 + 256 * x1), xmask)
-    tmp445 = tl.load(in_ptr0 + (14272 + x0 + 256 * x1), xmask)
-    tmp447 = tl.load(in_ptr0 + (14336 + x0 + 256 * x1), xmask)
-    tmp449 = tl.load(in_ptr0 + (14400 + x0 + 256 * x1), xmask)
-    tmp451 = tl.load(in_ptr0 + (14464 + x0 + 256 * x1), xmask)
-    tmp453 = tl.load(in_ptr0 + (14528 + x0 + 256 * x1), xmask)
-    tmp455 = tl.load(in_ptr0 + (14592 + x0 + 256 * x1), xmask)
-    tmp457 = tl.load(in_ptr0 + (14656 + x0 + 256 * x1), xmask)
-    tmp459 = tl.load(in_ptr0 + (14720 + x0 + 256 * x1), xmask)
-    tmp461 = tl.load(in_ptr0 + (14784 + x0 + 256 * x1), xmask)
-    tmp463 = tl.load(in_ptr0 + (14848 + x0 + 256 * x1), xmask)
-    tmp465 = tl.load(in_ptr0 + (14912 + x0 + 256 * x1), xmask)
-    tmp467 = tl.load(in_ptr0 + (14976 + x0 + 256 * x1), xmask)
-    tmp469 = tl.load(in_ptr0 + (15040 + x0 + 256 * x1), xmask)
-    tmp471 = tl.load(in_ptr0 + (15104 + x0 + 256 * x1), xmask)
-    tmp473 = tl.load(in_ptr0 + (15168 + x0 + 256 * x1), xmask)
-    tmp475 = tl.load(in_ptr0 + (15232 + x0 + 256 * x1), xmask)
-    tmp477 = tl.load(in_ptr0 + (15296 + x0 + 256 * x1), xmask)
-    tmp479 = tl.load(in_ptr0 + (15360 + x0 + 256 * x1), xmask)
-    tmp481 = tl.load(in_ptr0 + (15424 + x0 + 256 * x1), xmask)
-    tmp483 = tl.load(in_ptr0 + (15488 + x0 + 256 * x1), xmask)
-    tmp485 = tl.load(in_ptr0 + (15552 + x0 + 256 * x1), xmask)
-    tmp487 = tl.load(in_ptr0 + (15616 + x0 + 256 * x1), xmask)
-    tmp489 = tl.load(in_ptr0 + (15680 + x0 + 256 * x1), xmask)
-    tmp491 = tl.load(in_ptr0 + (15744 + x0 + 256 * x1), xmask)
-    tmp493 = tl.load(in_ptr0 + (15808 + x0 + 256 * x1), xmask)
-    tmp495 = tl.load(in_ptr0 + (15872
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_2(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_3(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_convolution_4(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, in_ptr6, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tl.store(out_ptr0 + x3, tmp11, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_5(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_6(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_7(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_8(in_ptr0, in_ptr1, in_ptr2, in_ptr3,
+    in_ptr4, in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr7 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tmp12 = tmp11 + tmp15
+    tl.store(out_ptr0 + x3, tmp12, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_9(out_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_10(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_11(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_12(in_ptr0, in_ptr1, in_ptr2, in_ptr3,
+    in_ptr4, in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr7 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tmp12 = tmp11 + tmp15
+    tl.store(out_ptr0 + x3, tmp12, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_13(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_14(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_15(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_16(in_ptr0, in_ptr1, in_ptr2, in_ptr3,
+    in_ptr4, in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr7 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tmp12 = tmp11 + tmp15
+    tl.store(out_ptr0 + x3, tmp12, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_17(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_18(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_19(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_20(in_ptr0, in_ptr1, in_ptr2, in_ptr3,
+    in_ptr4, in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr7 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tmp12 = tmp11 + tmp15
+    tl.store(out_ptr0 + x3, tmp12, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_21(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_22(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_23(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__unsafe_index_24(in_ptr0, in_ptr1, in_ptr2, in_ptr3,
+    in_ptr4, in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 2097152
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x1 = xindex // 1024 % 128
+    x0 = xindex % 1024
+    x2 = xindex // 131072
+    x3 = xindex
+    tmp0 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + x0, xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + x2, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr5 + x2, xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr6 + x2, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr7 + x2, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp6 = tmp4 + tmp5
+    tmp7 = tmp6 + tmp8
+    tmp9 = tmp7 + tmp10
+    tmp11 = tmp9 + tmp13
+    tmp12 = tmp11 + tmp15
+    tl.store(out_ptr0 + x3, tmp12, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_25(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x0
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_26(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x1
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int32)
+    tl.store(out_ptr0 + x3, tmp8, xmask)
+
+
+@triton.jit
+def triton_poi_fused__to_copy_add_arange_mul_27(out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 32
+    x1 = xindex // 32 % 32
+    x2 = xindex // 1024
+    x3 = xindex
+    tmp0 = x2
+    tmp1 = tmp0.to(tl.float32)
+    tmp2 = 0.5
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 * tmp2
+    tmp5 = tmp4 - tmp2
+    tmp6 = 0.0
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = tmp7.to(tl.int

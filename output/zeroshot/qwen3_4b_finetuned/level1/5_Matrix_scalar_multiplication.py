@@ -2,15 +2,13 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
-from torch._inductor.runtime.triton_heuristics import grid
-from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
 def triton_poi_fused_mul_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 262144
+    xnumel = 65536
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
@@ -28,9 +26,8 @@ def call(args):
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((16384, 4096), (4096, 1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_mul_0[grid(262144)](arg0_1, buf0, 262144, XBLOCK=
-            256, num_warps=4, num_stages=1)
+        triton_poi_fused_mul_0[grid=(65536,)](arg0_1, buf0, 65536, XBLOCK=
+            512, num_warps=4, num_stages=1)
         del arg0_1
     return buf0,
 

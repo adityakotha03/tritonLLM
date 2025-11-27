@@ -1,16 +1,17 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import libdevice
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
 def triton_poi_fused_gelu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 16026624
+    xnumel = 158856064
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
@@ -18,15 +19,13 @@ def triton_poi_fused_gelu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
     tmp0 = tl.load(in_ptr0 + x0, xmask)
     tmp1 = 0.5
     tmp2 = tmp0 * tmp1
-    tmp3 = 1.0
-    tmp4 = tmp3 - tmp2
-    tmp5 = tmp2 * tmp4
-    tmp6 = 0.7978845608028654
-    tmp7 = tmp2 * tmp6
-    tmp8 = tmp5 * tmp7
-    tmp9 = tl.sigmoid(tmp8)
-    tmp10 = tmp2 * tmp9
-    tl.store(out_ptr0 + x0, tmp10, xmask)
+    tmp3 = 0.7071067811865476
+    tmp4 = tmp0 * tmp3
+    tmp5 = libdevice.erf(tmp4)
+    tmp6 = 1.0
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp2 * tmp7
+    tl.store(out_ptr0 + x0, tmp8, xmask)
 
 
 def call(args):
@@ -37,7 +36,7 @@ def call(args):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_gelu_0[grid(16026624)](arg0_1, buf0, 16026624,
+        triton_poi_fused_gelu_0[grid(158856064)](arg0_1, buf0, 158856064,
             XBLOCK=1024, num_warps=4, num_stages=1)
         del arg0_1
     return buf0,

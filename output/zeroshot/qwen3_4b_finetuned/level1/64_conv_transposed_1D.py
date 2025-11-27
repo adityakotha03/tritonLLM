@@ -1,47 +1,49 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused__unsafe_index_convolution_relu_0(in_ptr0, in_ptr1,
-    out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2097152
+def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 131072
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex % 128
-    x1 = xindex // 128
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 128 * x1), xmask)
-    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
+    x3 = xindex
+    x1 = xindex // 65536 % 128
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = tmp3 == tmp2
-    tl.store(out_ptr0 + x2, tmp4, xmask)
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
 
 
 def call(args):
-    primals_1, primals_2, primals_3 = args
+    primals_1, primals_2 = args
     args.clear()
     assert_size_stride(primals_1, (128, 128, 3), (384, 3, 1))
-    assert_size_stride(primals_2, (128,), (1,))
-    assert_size_stride(primals_3, (64, 128, 65536), (8192000, 65536, 1))
+    assert_size_stride(primals_2, (64, 128, 65536), (8388608, 65536, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((64, 128, 65536), (8192000, 65536, 1),
-            torch.bool)
+        buf0 = extern_kernels.convolution(reinterpret_tensor(primals_2, (1,
+            128, 65536), (8388608, 65536, 1), 0), primals_1, stride=(1,),
+            padding=(0,), dilation=(1,), transposed=True, output_padding=(
+            0,), groups=1, bias=None)
+        assert_size_stride(buf0, (1, 128, 65536), (8388608, 65536, 1))
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused__unsafe_index_convolution_relu_0[grid(2097152)](primals_1, primals_2, buf0, 2097152, XBLOCK=1024, num_warps=4,
-            num_stages=1)
+        triton_poi_fused_convolution_0[grid(131072)](buf1, primals_1, 
+            131072, XBLOCK=1024, num_warps=4, num_stages=1)
         del primals_1
-        del primals_2
-    return buf0, primals_3, buf0
+    return buf1, reinterpret_tensor(primals_2, (1, 128, 65536), (8388608, 
+        65536, 1), 0)
 
 
 class ModelNew(nn.Module):
@@ -64,7 +66,6 @@ class ModelNew(nn.Module):
         
     def forward(self, input_0):
         primals_1 = self.conv1d_transpose.weight
-        primals_2 = self.conv1d_transpose.bias
-        primals_3 = input_0
-        output = call([primals_1, primals_2, primals_3])
+        primals_2 = input_0
+        output = call([primals_1, primals_2])
         return output[0]

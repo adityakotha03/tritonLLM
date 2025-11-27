@@ -1,17 +1,17 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
 def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
-    constexpr):
-    xnumel = 256352
+    .constexpr):
+    xnumel = 1048576
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
@@ -24,20 +24,21 @@ def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
 
 
 def call(args):
-    arg0_1, arg1_1 = args
+    primals_1, primals_2 = args
     args.clear()
-    assert_size_stride(arg0_1, (32, 128, 128, 256), (4194304, 32768, 256,
-        1))
-    assert_size_stride(arg1_1, (128, 128, 3, 7), (2688, 21, 7, 1))
+    assert_size_stride(primals_1, (32, 128, 3, 7), (2688, 21, 7, 1))
+    assert_size_stride(primals_2, (32, 128, 128, 256), (4194304, 32768, 256, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((32, 128, 128, 256), (4194304, 32768, 256,
             1), torch.float32)
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(256352)](buf0, arg1_1, 256352,
-            XBLOCK=512, num_warps=8, num_stages=1)
-        del arg1_1
-    return buf0, arg0_1
+        triton_poi_fused_convolution_0[grid(1048576)](buf1, primals_1, 
+            1048576, XBLOCK=512, num_warps=8, num_stages=1)
+        del primals_1
+    return buf1, primals_2
 
 
 class ModelNew(nn.Module):
@@ -58,18 +59,12 @@ class ModelNew(nn.Module):
         groups (int, optional): Number of blocked connections from input channels to output channels. Defaults to 1.
         bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
     """
-    def __init__(self, in_channels: int, out_channels: int, kernel_size_h: int,
-        kernel_size_w: int, stride_h: int = 1, stride_w: int = 1,
-        padding_h: int = 0, padding_w: int = 0, dilation_h: int = 1,
-        dilation_w: int = 1, groups: int = 1, bias: bool = False):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size_h: int, kernel_size_w: int, stride_h: int = 1, stride_w: int = 1, padding_h: int = 0, padding_w: int = 0, dilation_h: int = 1, dilation_w: int = 1, groups: int = 1, bias: bool = False):
         super(ModelNew, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels, in_channels, (kernel_size_h,
-            kernel_size_w), stride=(stride_h, stride_w), padding=(padding_h,
-            padding_w), dilation=(dilation_h, dilation_w), groups=in_channels,
-            bias=bias)
+        self.conv2d = nn.Conv2d(in_channels, in_channels, (kernel_size_h, kernel_size_w), stride=(stride_h, stride_w), padding=(padding_h, padding_w), dilation=(dilation_h, dilation_w), groups=in_channels, bias=bias)
         
     def forward(self, input_0):
-        arg1_1 = self.conv2d.weight
-        arg0_1 = input_0
-        output = call([arg0_1, arg1_1])
+        primals_1 = self.conv2d.weight
+        primals_2 = input_0
+        output = call([primals_1, primals_2])
         return output[0]

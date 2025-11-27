@@ -1,30 +1,38 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_hardtanh_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 157644864
+def triton_poi_fused_hardtanh_hardtanh_backward_0(in_ptr0, out_ptr0,
+    out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1572864
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
     tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 0.5
-    tmp2 = tmp0 + tmp1
+    tmp1 = 0.0
+    tmp2 = tmp0 > tmp1
     tmp3 = 1.0
-    tmp4 = tmp2 > tmp3
-    tmp5 = tmp2 < 0.0
-    tmp6 = tmp4 | tmp5
-    tmp7 = tl.where(tmp6, tmp2, tmp3)
-    tl.store(out_ptr0 + x0, tmp7, xmask)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tmp2 & tmp4
+    tmp6 = 0.5
+    tmp7 = tmp0 * tmp6
+    tmp8 = tmp7 + tmp3
+    tmp9 = tmp8 * tmp6
+    tmp10 = tl.where(tmp5, tmp9, tmp8)
+    tmp11 = 0.0
+    tmp12 = tmp10 <= tmp11
+    tmp13 = tmp10 >= tmp3
+    tmp14 = tmp12 | tmp13
+    tl.store(out_ptr0 + x0, tmp10, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
 
 
 def call(args):
@@ -34,11 +42,12 @@ def call(args):
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
+        buf1 = empty_strided_cuda((4096, 393216), (393216, 1), torch.bool)
         get_raw_stream(0)
-        triton_poi_fused_hardtanh_0[grid(157644864)](arg0_1, buf0, 157644864,
-            XBLOCK=512, num_warps=8, num_stages=1)
+        triton_poi_fused_hardtanh_hardtanh_backward_0[grid(1572864)](arg0_1,
+            buf0, buf1, 1572864, XBLOCK=512, num_warps=8, num_stages=1)
         del arg0_1
-    return buf0,
+    return buf0, buf1
 
 
 class ModelNew(nn.Module):

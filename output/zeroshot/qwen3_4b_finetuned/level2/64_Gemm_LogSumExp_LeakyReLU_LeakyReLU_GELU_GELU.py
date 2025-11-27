@@ -1,561 +1,138 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_logsumexp_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 1024
+def triton_poi_fused_leaky_relu_leaky_relu_backward_0(in_ptr0, out_ptr0,
+    out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 8192
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + 8192 * x0, xmask, eviction_policy='evict_last')
-    tmp1 = tl.load(in_ptr0 + (1 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp3 = tl.load(in_ptr0 + (2 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp5 = tl.load(in_ptr0 + (3 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp7 = tl.load(in_ptr0 + (4 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp9 = tl.load(in_ptr0 + (5 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp11 = tl.load(in_ptr0 + (6 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp13 = tl.load(in_ptr0 + (7 + 8192 * x0), xmask, eviction_policy=
-        'evict_last')
-    tmp2 = tmp0 + tmp1
-    tmp4 = tmp2 + tmp3
-    tmp6 = tmp4 + tmp5
-    tmp8 = tmp6 + tmp7
-    tmp10 = tmp8 + tmp9
-    tmp12 = tmp10 + tmp11
-    tmp14 = tmp12 + tmp13
-    tmp15 = tl.full([1], 0, tl.int64)
-    tmp16 = tmp14 == tmp15
-    tmp17 = tl.where(tmp16, tmp14, tmp14)
-    tmp18 = tl.where(tmp16, tmp15, tmp14)
-    tmp19 = tmp17 + tmp18
-    tmp20 = tmp14 - tmp19
-    tmp21 = tl.where(tmp16, tmp19, tmp20)
-    tmp22 = tl.where(tmp16, tmp18, tmp20)
-    tmp23 = tmp21 + tmp22
-    tmp24 = tmp23 + tmp18
-    tmp25 = tl.where(tmp16, tmp22, tmp23)
-    tmp26 = tmp25 + tmp22
-    tmp27 = tmp26 + tmp22
-    tmp28 = tmp27 + tmp22
-    tmp29 = tmp28 + tmp22
-    tmp30 = tmp29 + tmp22
-    tmp31 = tmp30 + tmp22
-    tmp32 = tmp31 + tmp22
-    tmp33 = tmp32 + tmp22
-    tmp34 = tmp33 + tmp22
-    tmp35 = tmp34 + tmp22
-    tmp36 = tmp35 + tmp22
-    tmp37 = tmp36 + tmp22
-    tmp38 = tmp37 + tmp22
-    tmp39 = tmp38 + tmp22
-    tmp40 = tmp39 + tmp22
-    tmp41 = tmp40 + tmp22
-    tmp42 = tmp41 + tmp22
-    tmp43 = tmp42 + tmp22
-    tmp44 = tmp43 + tmp22
-    tmp45 = tmp44 + tmp22
-    tmp46 = tmp45 + tmp22
-    tmp47 = tmp46 + tmp22
-    tmp48 = tmp47 + tmp22
-    tmp49 = tmp48 + tmp22
-    tmp50 = tmp49 + tmp22
-    tmp51 = tmp50 + tmp22
-    tmp52 = tmp51 + tmp22
-    tmp53 = tmp52 + tmp22
-    tmp54 = tmp53 + tmp22
-    tmp55 = tmp54 + tmp22
-    tmp56 = tmp55 + tmp22
-    tmp57 = tmp56 + tmp22
-    tmp58 = tmp57 + tmp22
-    tmp59 = tmp58 + tmp22
-    tmp60 = tmp59 + tmp22
-    tmp61 = tmp60 + tmp22
-    tmp62 = tmp61 + tmp22
-    tmp63 = tmp62 + tmp22
-    tmp64 = tmp63 + tmp22
-    tmp65 = tmp64 + tmp22
-    tmp66 = tmp65 + tmp22
-    tmp67 = tmp66 + tmp22
-    tmp68 = tmp67 + tmp22
-    tmp69 = tmp68 + tmp22
-    tmp70 = tmp69 + tmp22
-    tmp71 = tmp70 + tmp22
-    tmp72 = tmp71 + tmp22
-    tmp73 = tmp72 + tmp22
-    tmp74 = tmp73 + tmp22
-    tmp75 = tmp74 + tmp22
-    tmp76 = tmp75 + tmp22
-    tmp77 = tmp76 + tmp22
-    tmp78 = tmp77 + tmp22
-    tmp79 = tmp78 + tmp22
-    tmp80 = tmp79 + tmp22
-    tmp81 = tmp80 + tmp22
-    tmp82 = tmp81 + tmp22
-    tmp83 = tmp82 + tmp22
-    tmp84 = tmp83 + tmp22
-    tmp85 = tmp84 + tmp22
-    tmp86 = tmp85 + tmp22
-    tmp87 = tmp86 + tmp22
-    tmp88 = tmp87 + tmp22
-    tmp89 = tmp88 + tmp22
-    tmp90 = tmp89 + tmp22
-    tmp91 = tmp90 + tmp22
-    tmp92 = tmp91 + tmp22
-    tmp93 = tmp92 + tmp22
-    tmp94 = tmp93 + tmp22
-    tmp95 = tmp94 + tmp22
-    tmp96 = tmp95 + tmp22
-    tmp97 = tmp96 + tmp22
-    tmp98 = tmp97 + tmp22
-    tmp99 = tmp98 + tmp22
-    tmp100 = tmp99 + tmp22
-    tmp101 = tmp100 + tmp22
-    tmp102 = tmp101 + tmp22
-    tmp103 = tmp102 + tmp22
-    tmp104 = tmp103 + tmp22
-    tmp105 = tmp104 + tmp22
-    tmp106 = tmp105 + tmp22
-    tmp107 = tmp106 + tmp22
-    tmp108 = tmp107 + tmp22
-    tmp109 = tmp108 + tmp22
-    tmp110 = tmp109 + tmp22
-    tmp111 = tmp110 + tmp22
-    tmp112 = tmp111 + tmp22
-    tmp113 = tmp112 + tmp22
-    tmp114 = tmp113 + tmp22
-    tmp115 = tmp114 + tmp22
-    tmp116 = tmp115 + tmp22
-    tmp117 = tmp116 + tmp22
-    tmp118 = tmp117 + tmp22
-    tmp119 = tmp118 + tmp22
-    tmp120 = tmp119 + tmp22
-    tmp121 = tmp120 + tmp22
-    tmp122 = tmp121 + tmp22
-    tmp123 = tmp122 + tmp22
-    tmp124 = tmp123 + tmp22
-    tmp125 = tmp124 + tmp22
-    tmp126 = tmp125 + tmp22
-    tmp127 = tmp126 + tmp22
-    tmp128 = tmp127 + tmp22
-    tmp129 = tmp128 + tmp22
-    tmp130 = tmp129 + tmp22
-    tmp131 = tmp130 + tmp22
-    tmp132 = tmp131 + tmp22
-    tmp133 = tmp132 + tmp22
-    tmp134 = tmp133 + tmp22
-    tmp135 = tmp134 + tmp22
-    tmp136 = tmp135 + tmp22
-    tmp137 = tmp136 + tmp22
-    tmp138 = tmp137 + tmp22
-    tmp139 = tmp138 + tmp22
-    tmp140 = tmp139 + tmp22
-    tmp141 = tmp140 + tmp22
-    tmp142 = tmp141 + tmp22
-    tmp143 = tmp142 + tmp22
-    tmp144 = tmp143 + tmp22
-    tmp145 = tmp144 + tmp22
-    tmp146 = tmp145 + tmp22
-    tmp147 = tmp146 + tmp22
-    tmp148 = tmp147 + tmp22
-    tmp149 = tmp148 + tmp22
-    tmp150 = tmp149 + tmp22
-    tmp151 = tmp150 + tmp22
-    tmp152 = tmp151 + tmp22
-    tmp153 = tmp152 + tmp22
-    tmp154 = tmp153 + tmp22
-    tmp155 = tmp154 + tmp22
-    tmp156 = tmp155 + tmp22
-    tmp157 = tmp156 + tmp22
-    tmp158 = tmp157 + tmp22
-    tmp159 = tmp158 + tmp22
-    tmp160 = tmp159 + tmp22
-    tmp161 = tmp160 + tmp22
-    tmp162 = tmp161 + tmp22
-    tmp163 = tmp162 + tmp22
-    tmp164 = tmp163 + tmp22
-    tmp165 = tmp164 + tmp22
-    tmp166 = tmp165 + tmp22
-    tmp167 = tmp166 + tmp22
-    tmp168 = tmp167 + tmp22
-    tmp169 = tmp168 + tmp22
-    tmp170 = tmp169 + tmp22
-    tmp171 = tmp170 + tmp22
-    tmp172 = tmp171 + tmp22
-    tmp173 = tmp172 + tmp22
-    tmp174 = tmp173 + tmp22
-    tmp175 = tmp174 + tmp22
-    tmp176 = tmp175 + tmp22
-    tmp177 = tmp176 + tmp22
-    tmp178 = tmp177 + tmp22
-    tmp179 = tmp178 + tmp22
-    tmp180 = tmp179 + tmp22
-    tmp181 = tmp180 + tmp22
-    tmp182 = tmp181 + tmp22
-    tmp183 = tmp182 + tmp22
-    tmp184 = tmp183 + tmp22
-    tmp185 = tmp184 + tmp22
-    tmp186 = tmp185 + tmp22
-    tmp187 = tmp186 + tmp22
-    tmp188 = tmp187 + tmp22
-    tmp189 = tmp188 + tmp22
-    tmp190 = tmp189 + tmp22
-    tmp191 = tmp190 + tmp22
-    tmp192 = tmp191 + tmp22
-    tmp193 = tmp192 + tmp22
-    tmp194 = tmp193 + tmp22
-    tmp195 = tmp194 + tmp22
-    tmp196 = tmp195 + tmp22
-    tmp197 = tmp196 + tmp22
-    tmp198 = tmp197 + tmp22
-    tmp199 = tmp198 + tmp22
-    tmp200 = tmp199 + tmp22
-    tmp201 = tmp200 + tmp22
-    tmp202 = tmp201 + tmp22
-    tmp203 = tmp202 + tmp22
-    tmp204 = tmp203 + tmp22
-    tmp205 = tmp204 + tmp22
-    tmp206 = tmp205 + tmp22
-    tmp207 = tmp206 + tmp22
-    tmp208 = tmp207 + tmp22
-    tmp209 = tmp208 + tmp22
-    tmp210 = tmp209 + tmp22
-    tmp211 = tmp210 + tmp22
-    tmp212 = tmp211 + tmp22
-    tmp213 = tmp212 + tmp22
-    tmp214 = tmp213 + tmp22
-    tmp215 = tmp214 + tmp22
-    tmp216 = tmp215 + tmp22
-    tmp217 = tmp216 + tmp22
-    tmp218 = tmp217 + tmp22
-    tmp219 = tmp218 + tmp22
-    tmp220 = tmp219 + tmp22
-    tmp221 = tmp220 + tmp22
-    tmp222 = tmp221 + tmp22
-    tmp223 = tmp222 + tmp22
-    tmp224 = tmp223 + tmp22
-    tmp225 = tmp224 + tmp22
-    tmp226 = tmp225 + tmp22
-    tmp227 = tmp226 + tmp22
-    tmp228 = tmp227 + tmp22
-    tmp229 = tmp228 + tmp22
-    tmp230 = tmp229 + tmp22
-    tmp231 = tmp230 + tmp22
-    tmp232 = tmp231 + tmp22
-    tmp233 = tmp232 + tmp22
-    tmp234 = tmp233 + tmp22
-    tmp235 = tmp234 + tmp22
-    tmp236 = tmp235 + tmp22
-    tmp237 = tmp236 + tmp22
-    tmp238 = tmp237 + tmp22
-    tmp239 = tmp238 + tmp22
-    tmp240 = tmp239 + tmp22
-    tmp241 = tmp240 + tmp22
-    tmp242 = tmp241 + tmp22
-    tmp243 = tmp242 + tmp22
-    tmp244 = tmp243 + tmp22
-    tmp245 = tmp244 + tmp22
-    tmp246 = tmp245 + tmp22
-    tmp247 = tmp246 + tmp22
-    tmp248 = tmp247 + tmp22
-    tmp249 = tmp248 + tmp22
-    tmp250 = tmp249 + tmp22
-    tmp251 = tmp250 + tmp22
-    tmp252 = tmp251 + tmp22
-    tmp253 = tmp252 + tmp22
-    tmp254 = tmp253 + tmp22
-    tmp255 = tmp254 + tmp22
-    tmp256 = tmp255 + tmp22
-    tmp257 = tmp256 + tmp22
-    tmp258 = tmp257 + tmp22
-    tmp259 = tmp258 + tmp22
-    tmp260 = tmp259 + tmp22
-    tmp261 = tmp260 + tmp22
-    tmp262 = tmp261 + tmp22
-    tmp263 = tmp262 + tmp22
-    tmp264 = tmp263 + tmp22
-    tmp265 = tmp264 + tmp22
-    tmp266 = tmp265 + tmp22
-    tmp267 = tmp266 + tmp22
-    tmp268 = tmp267 + tmp22
-    tmp269 = tmp268 + tmp22
-    tmp270 = tmp269 + tmp22
-    tmp271 = tmp270 + tmp22
-    tmp272 = tmp271 + tmp22
-    tmp273 = tmp272 + tmp22
-    tmp274 = tmp273 + tmp22
-    tmp275 = tmp274 + tmp22
-    tmp276 = tmp275 + tmp22
-    tmp277 = tmp276 + tmp22
-    tmp278 = tmp277 + tmp22
-    tmp279 = tmp278 + tmp22
-    tmp280 = tmp279 + tmp22
-    tmp281 = tmp280 + tmp22
-    tmp282 = tmp281 + tmp22
-    tmp283 = tmp282 + tmp22
-    tmp284 = tmp283 + tmp22
-    tmp285 = tmp284 + tmp22
-    tmp286 = tmp285 + tmp22
-    tmp287 = tmp286 + tmp22
-    tmp288 = tmp287 + tmp22
-    tmp289 = tmp288 + tmp22
-    tmp290 = tmp289 + tmp22
-    tmp291 = tmp290 + tmp22
-    tmp292 = tmp291 + tmp22
-    tmp293 = tmp292 + tmp22
-    tmp294 = tmp293 + tmp22
-    tmp295 = tmp294 + tmp22
-    tmp296 = tmp295 + tmp22
-    tmp297 = tmp296 + tmp22
-    tmp298 = tmp297 + tmp22
-    tmp299 = tmp298 + tmp22
-    tmp300 = tmp299 + tmp22
-    tmp301 = tmp300 + tmp22
-    tmp302 = tmp301 + tmp22
-    tmp303 = tmp302 + tmp22
-    tmp304 = tmp303 + tmp22
-    tmp305 = tmp304 + tmp22
-    tmp306 = tmp305 + tmp22
-    tmp307 = tmp306 + tmp22
-    tmp308 = tmp307 + tmp22
-    tmp309 = tmp308 + tmp22
-    tmp310 = tmp309 + tmp22
-    tmp311 = tmp310 + tmp22
-    tmp312 = tmp311 + tmp22
-    tmp313 = tmp312 + tmp22
-    tmp314 = tmp313 + tmp22
-    tmp315 = tmp314 + tmp22
-    tmp316 = tmp315 + tmp22
-    tmp317 = tmp316 + tmp22
-    tmp318 = tmp317 + tmp22
-    tmp319 = tmp318 + tmp22
-    tmp320 = tmp319 + tmp22
-    tmp321 = tmp320 + tmp22
-    tmp322 = tmp321 + tmp22
-    tmp323 = tmp322 + tmp22
-    tmp324 = tmp323 + tmp22
-    tmp325 = tmp324 + tmp22
-    tmp326 = tmp325 + tmp22
-    tmp327 = tmp326 + tmp22
-    tmp328 = tmp327 + tmp22
-    tmp329 = tmp328 + tmp22
-    tmp330 = tmp329 + tmp22
-    tmp331 = tmp330 + tmp22
-    tmp332 = tmp331 + tmp22
-    tmp333 = tmp332 + tmp22
-    tmp334 = tmp333 + tmp22
-    tmp335 = tmp334 + tmp22
-    tmp336 = tmp335 + tmp22
-    tmp337 = tmp336 + tmp22
-    tmp338 = tmp337 + tmp22
-    tmp339 = tmp338 + tmp22
-    tmp340 = tmp339 + tmp22
-    tmp341 = tmp340 + tmp22
-    tmp342 = tmp341 + tmp22
-    tmp343 = tmp342 + tmp22
-    tmp344 = tmp343 + tmp22
-    tmp345 = tmp344 + tmp22
-    tmp346 = tmp345 + tmp22
-    tmp347 = tmp346 + tmp22
-    tmp348 = tmp347 + tmp22
-    tmp349 = tmp348 + tmp22
-    tmp350 = tmp349 + tmp22
-    tmp351 = tmp350 + tmp22
-    tmp352 = tmp351 + tmp22
-    tmp353 = tmp352 + tmp22
-    tmp354 = tmp353 + tmp22
-    tmp355 = tmp354 + tmp22
-    tmp356 = tmp355 + tmp22
-    tmp357 = tmp356 + tmp22
-    tmp358 = tmp357 + tmp22
-    tmp359 = tmp358 + tmp22
-    tmp360 = tmp359 + tmp22
-    tmp361 = tmp360 + tmp22
-    tmp362 = tmp361 + tmp22
-    tmp363 = tmp362 + tmp22
-    tmp364 = tmp363 + tmp22
-    tmp365 = tmp364 + tmp22
-    tmp366 = tmp365 + tmp22
-    tmp367 = tmp366 + tmp22
-    tmp368 = tmp367 + tmp22
-    tmp369 = tmp368 + tmp22
-    tmp370 = tmp369 + tmp22
-    tmp371 = tmp370 + tmp22
-    tmp372 = tmp371 + tmp22
-    tmp373 = tmp372 + tmp22
-    tmp374 = tmp373 + tmp22
-    tmp375 = tmp374 + tmp22
-    tmp376 = tmp375 + tmp22
-    tmp377 = tmp376 + tmp22
-    tmp378 = tmp377 + tmp22
-    tmp379 = tmp378 + tmp22
-    tmp380 = tmp379 + tmp22
-    tmp381 = tmp380 + tmp22
-    tmp382 = tmp381 + tmp22
-    tmp383 = tmp382 + tmp22
-    tmp384 = tmp383 + tmp22
-    tmp385 = tmp384 + tmp22
-    tmp386 = tmp385 + tmp22
-    tmp387 = tmp386 + tmp22
-    tmp388 = tmp387 + tmp22
-    tmp389 = tmp388 + tmp22
-    tmp390 = tmp389 + tmp22
-    tmp391 = tmp390 + tmp22
-    tmp392 = tmp391 + tmp22
-    tmp393 = tmp392 + tmp22
-    tmp394 = tmp393 + tmp22
-    tmp395 = tmp394 + tmp22
-    tmp396 = tmp395 + tmp22
-    tmp397 = tmp396 + tmp22
-    tmp398 = tmp397 + tmp22
-    tmp399 = tmp398 + tmp22
-    tmp400 = tmp399 + tmp22
-    tmp401 = tmp400 + tmp22
-    tmp402 = tmp401 + tmp22
-    tmp403 = tmp402 + tmp22
-    tmp404 = tmp403 + tmp22
-    tmp405 = tmp404 + tmp22
-    tmp406 = tmp405 + tmp22
-    tmp407 = tmp406 + tmp22
-    tmp408 = tmp407 + tmp22
-    tmp409 = tmp408 + tmp22
-    tmp410 = tmp409 + tmp22
-    tmp411 = tmp410 + tmp22
-    tmp412 = tmp411 + tmp22
-    tmp413 = tmp412 + tmp22
-    tmp414 = tmp413 + tmp22
-    tmp415 = tmp414 + tmp22
-    tmp416 = tmp415 + tmp22
-    tmp417 = tmp416 + tmp22
-    tmp418 = tmp417 + tmp22
-    tmp419 = tmp418 + tmp22
-    tmp420 = tmp419 + tmp22
-    tmp421 = tmp420 + tmp22
-    tmp422 = tmp421 + tmp22
-    tmp423 = tmp422 + tmp22
-    tmp424 = tmp423 + tmp22
-    tmp425 = tmp424 + tmp22
-    tmp426 = tmp425 + tmp22
-    tmp427 = tmp426 + tmp22
-    tmp428 = tmp427 + tmp22
-    tmp429 = tmp428 + tmp22
-    tmp430 = tmp429 + tmp22
-    tmp431 = tmp430 + tmp22
-    tmp432 = tmp431 + tmp22
-    tmp433 = tmp432 + tmp22
-    tmp434 = tmp433 + tmp22
-    tmp435 = tmp434 + tmp22
-    tmp436 = tmp435 + tmp22
-    tmp437 = tmp436 + tmp22
-    tmp438 = tmp437 + tmp22
-    tmp439 = tmp438 + tmp22
-    tmp440 = tmp439 + tmp22
-    tmp441 = tmp440 + tmp22
-    tmp442 = tmp441 + tmp22
-    tmp443 = tmp442 + tmp22
-    tmp444 = tmp443 + tmp22
-    tmp445 = tmp444 + tmp22
-    tmp446 = tmp445 + tmp22
-    tmp447 = tmp446 + tmp22
-    tmp448 = tmp447 + tmp22
-    tmp449 = tmp448 + tmp22
-    tmp450 = tmp449 + tmp22
-    tmp451 = tmp450 + tmp22
-    tmp452 = tmp451 + tmp22
-    tmp453 = tmp452 + tmp22
-    tmp454 = tmp453 + tmp22
-    tmp455 = tmp454 + tmp22
-    tmp456 = tmp455 + tmp22
-    tmp457 = tmp456 + tmp22
-    tmp458 = tmp457 + tmp22
-    tmp459 = tmp458 + tmp22
-    tmp460 = tmp459 + tmp22
-    tmp461 = tmp460 + tmp22
-    tmp462 = tmp461 + tmp22
-    tmp463 = tmp462 + tmp22
-    tmp464 = tmp463 + tmp22
-    tmp465 = tmp464 + tmp22
-    tmp466 = tmp465 + tmp22
-    tmp467 = tmp466 + tmp22
-    tmp468 = tmp467 + tmp22
-    tmp469 = tmp468 + tmp22
-    tmp470 = tmp469 + tmp22
-    tmp471 = tmp470 + tmp22
-    tmp472 = tmp471 + tmp22
-    tmp473 = tmp472 + tmp22
-    tmp474 = tmp473 + tmp22
-    tmp475 = tmp474 + tmp22
-    tmp476 = tmp475 + tmp22
-    tmp477 = tmp476 + tmp22
-    tmp478 = tmp477 + tmp22
-    tmp479 = tmp478 + tmp22
-    tmp480 = tmp479 + tmp22
-    tmp481 = tmp480 + tmp22
-    tmp482 = tmp481 + tmp22
-    tmp483 = tmp482 + tmp22
-    tmp484 = tmp483 + tmp22
-    tmp485 = tmp484 + tmp22
-    tmp486 = tmp485 + tmp22
-    tmp487 = tmp486 + tmp22
-    tmp488 = tmp487 + tmp22
-    tmp489 = tmp488 + tmp22
-    tmp490 = tmp489 + tmp22
-    tmp491 = tmp490 + tmp22
-    tmp492 = tmp491 + tmp22
-    tmp493 = tmp492 + tmp22
-    tmp494 = tmp493 + tmp22
-    tmp495 = tmp494 + tmp22
-    tmp496 = tmp495 + tmp22
-    tmp497 = tmp496 + tmp22
-    tmp498 = tmp497 + tmp22
-    tmp499 = tmp498 + tmp22
-    tmp500 = tmp499 + tmp22
-    tmp501 = tmp500 + tmp22
-    tmp502 = tmp501 + tmp22
-    tmp503 = tmp502 + tmp22
-    tmp504 = tmp503 + tmp22
-    tmp505 = tmp504 + tmp22
-    tmp506 = tmp505 + tmp22
-    tmp507 = tmp506 + tmp22
-    tmp508 = tmp507 + tmp22
-    tmp509 = tmp508 + tmp22
-    tmp510 = tmp509 + tmp22
-    tmp511 = tmp510 + tmp22
-    tmp512 = tmp511 + tmp22
-    tmp513 = tmp512 + tmp22
-    tmp514 = tmp513 + tmp22
-    tmp515 = tmp514 + tmp22
-    tmp516 = tmp515 + tmp22
-    tmp517 = tmp516 + tmp22
-    tmp518 = tmp517 + tmp22
-    tmp519 = tmp518 + tmp22
-    tmp520 = tmp519 + tmp22
-    tmp521 = tmp520 + tmp22
-    tmp522 = tmp521 + tmp22
-    tmp523 = tmp522 + tmp22
-    tmp524 = tmp523 + tmp22
-    tmp525 = tmp524 + tmp22
-    tmp526 = tmp525 + tmp22
-    tmp527 = tmp526 + tmp22
-    tmp528 = tmp527 + tmp22
-    tmp529 = tmp528 + tmp22
-    tmp530 = tmp529 + tmp22
-    tmp531 = tmp530 + tmp22
-    tmp532 = tmp531 + tmp22
-    tmp533 = tmp532 + tmp22
-    tmp534 = tmp533 + tmp22
-    tmp535 = tmp534 + tmp22
-    tmp53
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 > tmp1
+    tmp3 = 0.01
+    tmp4 = tmp0 * tmp3
+    tmp5 = tl.where(tmp2, tmp0, tmp4)
+    tmp6 = tmp5 > tmp1
+    tl.store(out_ptr0 + x0, tmp6, xmask)
+    tl.store(out_ptr1 + x0, tmp5, xmask)
+
+
+@triton.jit
+def triton_poi_fused_gelu_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 8192
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.5
+    tmp2 = tmp0 * tmp1
+    tmp3 = 0.7071067811865476
+    tmp4 = tmp0 * tmp3
+    tmp5 = libdevice.erf(tmp4)
+    tmp6 = 1.0
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp2 * tmp7
+    tl.store(out_ptr0 + x0, tmp8, xmask)
+
+
+@triton.jit
+def triton_per_fused__logsumexp_2(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    RBLOCK: tl.constexpr = 8192
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 8192 * x0), xmask, other=0.0)
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, RBLOCK])
+    tmp3 = tl.where(xmask, tmp1, float('-inf'))
+    tmp4 = triton_helpers.max2(tmp3, 1)[:, None]
+    tmp5 = tmp0 - tmp4
+    tmp6 = tl_math.exp(tmp5)
+    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, RBLOCK])
+    tmp9 = tl.where(xmask, tmp7, 0)
+    tmp10 = tl.sum(tmp9, 1)[:, None]
+    tmp11 = tl_math.log(tmp10)
+    tl.store(out_ptr0 + x0, tmp11, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_gelu_3(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
+    ):
+    xnumel = 8192
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.5
+    tmp2 = tmp0 * tmp1
+    tmp3 = 0.7071067811865476
+    tmp4 = tmp0 * tmp3
+    tmp5 = libdevice.erf(tmp4)
+    tmp6 = 1.0
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp2 * tmp7
+    tmp9 = tmp8 + tmp0
+    tl.store(out_ptr0 + x0, tmp9, xmask)
+
+
+def call(args):
+    primals_1, primals_2, primals_3 = args
+    args.clear()
+    assert_size_stride(primals_1, (8192, 8192), (8192, 1))
+    assert_size_stride(primals_2, (8192,), (1,))
+    assert_size_stride(primals_3, (1024, 8192), (8192, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((1024, 8192), (8192, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_leaky_relu_leaky_relu_backward_0[grid(8192)](primals_1
+            , buf0, primals_2, 8192, XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        del primals_2
+        buf1 = empty_strided_cuda((1024, 8192), (8192, 1), torch.float32)
+        triton_poi_fused_gelu_1[grid(8192)](buf0, buf1, 8192, XBLOCK=256,
+            num_warps=4, num_stages=1)
+        buf2 = empty_strided_cuda((1024, 1), (1, 1024), torch.float32)
+        triton_per_fused__logsumexp_2[grid(1024)](buf1, buf2, 1024, 8192,
+            XBLOCK=1, num_warps=2, num_stages=1)
+        buf3 = empty_strided_cuda((1024, 8192), (8192, 1), torch.float32)
+        triton_poi_fused_add_gelu_3[grid(8192)](buf2, buf3, 8192, XBLOCK=
+            128, num_warps=4, num_stages=1)
+        del buf2
+    return buf3, buf0, primals_3, buf1
+
+
+class ModelNew(nn.Module):
+    """
+    Model that performs a matrix multiplication (Gemm), followed by LogSumExp, LeakyReLU, 
+    LeakyReLU, GELU, and GELU activations.
+    """
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
+    def forward(self, input_0):
+        primals_1 = self.linear.weight
+        primals_2 = self.linear.bias
+        primals_3 = input_0
+        output = call([primals_1, primals_2, primals_3])
+        return output[0]

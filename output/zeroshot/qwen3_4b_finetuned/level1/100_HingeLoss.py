@@ -9,19 +9,28 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_clamp_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 32768
+def triton_per_fused_clamp_mean_mul_sub_0(in_out_ptr0, in_ptr0, in_ptr1,
+    xnumel, rnumel, XBLOCK: tl.constexpr):
+    RBLOCK: tl.constexpr = 32768
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    xoffset + tl.arange(0, XBLOCK)[:, None]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r0 = rindex
+    tmp0 = tl.load(in_ptr0 + r0, None)
+    tmp3 = tl.load(in_ptr1 + r0, None)
     tmp1 = 1.0
-    tmp2 = tmp0 * tmp1
-    tmp3 = 0.0
-    tmp4 = triton_helpers.maximum(tmp2, tmp3)
-    tmp5 = triton_helpers.minimum(tmp4, tmp1)
-    tl.store(out_ptr0 + x0, tmp5, xmask)
+    tmp2 = tmp1 - tmp0
+    tmp4 = tmp2 * tmp3
+    tmp5 = 0.0
+    tmp6 = triton_helpers.maximum(tmp4, tmp5)
+    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, RBLOCK])
+    tmp9 = tl.sum(tmp7, 1)[:, None]
+    tmp10 = 32768.0
+    tmp11 = tmp9 / tmp10
+    tl.debug_barrier()
+    tl.store(in_out_ptr0 + tl.full([XBLOCK, 1], 0, tl.int32), tmp11, None)
 
 
 def call(args):
@@ -31,12 +40,15 @@ def call(args):
     assert_size_stride(arg1_1, (32768,), (1,))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((32768,), (1,), torch.float32)
+        buf0 = empty_strided_cuda((), (), torch.float32)
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused_clamp_0[grid(32768)](arg1_1, buf0, 32768, XBLOCK=
-            128, num_warps=4, num_stages=1)
+        triton_per_fused_clamp_mean_mul_sub_0[grid(1)](buf1, arg0_1, arg1_1,
+            1, 32768, XBLOCK=1, num_warps=8, num_stages=1)
+        del arg0_1
         del arg1_1
-    return buf0, arg0_1
+    return buf1,
 
 
 class ModelNew(nn.Module):
@@ -49,7 +61,8 @@ class ModelNew(nn.Module):
     def __init__(self):
         super(ModelNew, self).__init__()
 
-    def forward(self, input_0):
-        arg1_1 = input_0
-        output = call([arg1_1])
+    def forward(self, input_0, input_1):
+        arg0_1 = input_0
+        arg1_1 = input_1
+        output = call([arg0_1, arg1_1])
         return output[0]

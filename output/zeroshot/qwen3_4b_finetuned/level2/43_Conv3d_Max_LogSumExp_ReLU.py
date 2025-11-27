@@ -1,507 +1,144 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_convolution_max_pool3d_relu_0(in_out_ptr0, in_ptr0,
-    xnumel, XBLOCK: tl.constexpr):
-    xnumel = 131072
+def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 1536000
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 16384 % 64
+    x1 = xindex // 160000 % 64
     tmp0 = tl.load(in_out_ptr0 + x3, xmask)
     tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = tmp3 < tmp2
-    tmp5 = tl.load(in_out_ptr0 + (16384 + x3), xmask, eviction_policy=
-        'evict_last')
-    tmp6 = tmp5 + tmp1
-    tmp7 = tmp3 < tmp6
-    tmp8 = tl.load(in_out_ptr0 + (32768 + x3), xmask, eviction_policy=
-        'evict_last')
-    tmp9 = tmp8 + tmp1
-    tmp10 = tmp3 < tmp9
-    tmp11 = tl.load(in_out_ptr0 + (49152 + x3), xmask, eviction_policy=
-        'evict_last')
-    tmp12 = tmp11 + tmp1
-    tmp13 = tmp3 < tmp12
-    tmp14 = tmp4 | tmp7
-    tmp15 = tmp14 | tmp10
-    tmp16 = tmp15 | tmp13
-    tmp17 = tl.full(tmp16.shape, 0.0, tmp16.dtype)
-    tmp18 = tl.where(tmp16, tmp2, tmp17)
-    tmp19 = tl.full(tmp18.shape, 1.0, tmp18.dtype)
-    tmp20 = tmp18 + tmp19
-    tmp21 = tl.full(tmp20.shape, 0.0, tmp20.dtype)
-    tmp22 = tl.where(tmp16, tmp20, tmp21)
-    tl.store(in_out_ptr0 + x3, tmp22, xmask)
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
 
 
 @triton.jit
-def triton_poi_fused_logsumexp_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 131072
+def triton_poi_fused_max_pool3d_with_indices_1(in_ptr0, out_ptr0, out_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 384000
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex % 64
-    x1 = xindex // 64
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 16384 * x1), xmask, eviction_policy=
-        'evict_last')
-    tmp1 = tl.load(in_ptr0 + (64 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp3 = tl.load(in_ptr0 + (128 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp5 = tl.load(in_ptr0 + (192 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp7 = tl.load(in_ptr0 + (256 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp9 = tl.load(in_ptr0 + (320 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp11 = tl.load(in_ptr0 + (384 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp13 = tl.load(in_ptr0 + (448 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp15 = tl.load(in_ptr0 + (512 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp17 = tl.load(in_ptr0 + (576 + x0 + 16384 * x1), xmask, eviction_policy
-        ='evict_last')
-    tmp2 = tmp1 + tmp0
-    tmp4 = tmp3 + tmp2
-    tmp6 = tmp5 + tmp4
-    tmp8 = tmp7 + tmp6
-    tmp10 = tmp9 + tmp8
-    tmp12 = tmp11 + tmp10
-    tmp14 = tmp13 + tmp12
-    tmp16 = tmp15 + tmp14
-    tmp18 = tmp17 + tmp16
-    tmp19 = tl.where(tmp13 < tmp14, tmp13, tmp14)
-    tmp20 = tl.where(tmp12 < tmp19, tmp12, tmp19)
-    tmp21 = tl.where(tmp11 < tmp20, tmp11, tmp20)
-    tmp22 = tl.where(tmp10 < tmp21, tmp10, tmp21)
-    tmp23 = tl.where(tmp9 < tmp22, tmp9, tmp22)
-    tmp24 = tl.where(tmp8 < tmp23, tmp8, tmp23)
-    tmp25 = tl.where(tmp7 < tmp24, tmp7, tmp24)
-    tmp26 = tl.where(tmp6 < tmp25, tmp6, tmp25)
-    tmp27 = tl.where(tmp5 < tmp26, tmp5, tmp26)
-    tmp28 = tl.where(tmp4 < tmp27, tmp4, tmp27)
-    tmp29 = tl.where(tmp3 < tmp28, tmp3, tmp28)
-    tmp30 = tl.where(tmp2 < tmp29, tmp2, tmp29)
-    tmp31 = tl.where(tmp1 < tmp30, tmp1, tmp30)
-    tmp32 = tl.where(tmp0 < tmp31, tmp0, tmp31)
-    tmp33 = tmp22 - tmp32
-    tmp34 = tl.full([1], 0, tl.int32)
-    tmp35 = tl.full([1], 64, tl.int32)
-    tmp36 = tmp34 < tmp35
-    tmp37 = tmp34 >= tmp33
-    tmp38 = tmp36 & tmp37
-    tmp39 = tl.load(in_ptr0 + (64 + x0 + 16384 * x1), tmp38 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp40 = tmp21 - tmp32
-    tmp41 = tl.full([1], 0, tl.int32)
-    tmp42 = tl.full([1], 32, tl.int32)
-    tmp43 = tmp40 < tmp42
-    tmp44 = tmp40 >= tmp33
-    tmp45 = tmp43 & tmp44
-    tmp46 = tl.load(in_ptr0 + (128 + x0 + 16384 * x1), tmp45 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp47 = tmp20 - tmp32
-    tmp48 = tl.full([1], 0, tl.int32)
-    tmp49 = tl.full([1], 16, tl.int32)
-    tmp50 = tmp47 < tmp49
-    tmp51 = tmp47 >= tmp33
-    tmp52 = tmp50 & tmp51
-    tmp53 = tl.load(in_ptr0 + (192 + x0 + 16384 * x1), tmp52 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp54 = tmp19 - tmp32
-    tmp55 = tl.full([1], 0, tl.int32)
-    tmp56 = tl.full([1], 8, tl.int32)
-    tmp57 = tmp54 < tmp56
-    tmp58 = tmp54 >= tmp33
-    tmp59 = tmp57 & tmp58
-    tmp60 = tl.load(in_ptr0 + (256 + x0 + 16384 * x1), tmp59 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp61 = tmp18 - tmp32
-    tmp62 = tl.full([1], 0, tl.int32)
-    tmp63 = tl.full([1], 4, tl.int32)
-    tmp64 = tmp61 < tmp63
-    tmp65 = tmp61 >= tmp33
-    tmp66 = tmp64 & tmp65
-    tmp67 = tl.load(in_ptr0 + (320 + x0 + 16384 * x1), tmp66 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp68 = tmp17 - tmp32
-    tmp69 = tl.full([1], 0, tl.int32)
-    tmp70 = tl.full([1], 2, tl.int32)
-    tmp71 = tmp68 < tmp70
-    tmp72 = tmp68 >= tmp33
-    tmp73 = tmp71 & tmp72
-    tmp74 = tl.load(in_ptr0 + (384 + x0 + 16384 * x1), tmp73 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp75 = tmp16 - tmp32
-    tmp76 = tl.full([1], 0, tl.int32)
-    tmp77 = tl.full([1], 1, tl.int32)
-    tmp78 = tmp75 < tmp77
-    tmp79 = tmp75 >= tmp33
-    tmp80 = tmp78 & tmp79
-    tmp81 = tl.load(in_ptr0 + (448 + x0 + 16384 * x1), tmp80 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp82 = tmp15 - tmp32
-    tmp83 = tl.full([1], 0, tl.int32)
-    tmp84 = tl.full([1], 0, tl.int32)
-    tmp85 = tmp82 < tmp84
-    tmp86 = tmp82 >= tmp33
-    tmp87 = tmp85 & tmp86
-    tmp88 = tl.load(in_ptr0 + (512 + x0 + 16384 * x1), tmp87 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp89 = tmp14 - tmp32
-    tmp90 = tl.full([1], 0, tl.int32)
-    tmp91 = tl.full([1], 0, tl.int32)
-    tmp92 = tmp89 < tmp91
-    tmp93 = tmp89 >= tmp33
-    tmp94 = tmp92 & tmp93
-    tmp95 = tl.load(in_ptr0 + (576 + x0 + 16384 * x1), tmp94 & xmask,
-        eviction_policy='evict_last', other=0.0)
-    tmp96 = tmp33 + tmp32
-    tmp97 = tl.where(tmp38, tmp39, tmp96)
-    tmp98 = tl.where(tmp45, tmp46, tmp97)
-    tmp99 = tl.where(tmp52, tmp53, tmp98)
-    tmp100 = tl.where(tmp59, tmp60, tmp99)
-    tmp101 = tl.where(tmp66, tmp67, tmp100)
-    tmp102 = tl.where(tmp73, tmp74, tmp101)
-    tmp103 = tl.where(tmp80, tmp81, tmp102)
-    tmp104 = tl.where(tmp87, tmp88, tmp103)
-    tmp105 = tl.where(tmp94, tmp95, tmp104)
-    tmp106 = tl.where(tmp80, tmp81, tmp105)
-    tmp107 = tl.where(tmp73, tmp74, tmp106)
-    tmp108 = tl.where(tmp66, tmp67, tmp107)
-    tmp109 = tl.where(tmp59, tmp60, tmp108)
-    tmp110 = tl.where(tmp52, tmp53, tmp109)
-    tmp111 = tl.where(tmp45, tmp46, tmp110)
-    tmp112 = tl.where(tmp38, tmp39, tmp111)
-    tmp113 = tl.where(tmp38, tmp39, tmp112)
-    tmp114 = tmp105 - tmp113
-    tmp115 = tmp104 - tmp113
-    tmp116 = tmp103 - tmp113
-    tmp117 = tmp102 - tmp113
-    tmp118 = tmp101 - tmp113
-    tmp119 = tmp100 - tmp113
-    tmp120 = tmp99 - tmp113
-    tmp121 = tmp98 - tmp113
-    tmp122 = tmp97 - tmp113
-    tmp123 = tmp96 - tmp113
-    tmp124 = tmp114 + tmp115
-    tmp125 = tmp124 + tmp116
-    tmp126 = tmp125 + tmp117
-    tmp127 = tmp126 + tmp118
-    tmp128 = tmp127 + tmp119
-    tmp129 = tmp128 + tmp120
-    tmp130 = tmp129 + tmp121
-    tmp131 = tmp130 + tmp122
-    tmp132 = tmp131 + tmp123
-    tmp133 = tmp132 + tmp124
-    tmp134 = tmp133 + tmp125
-    tmp135 = tmp134 + tmp126
-    tmp136 = tmp135 + tmp127
-    tmp137 = tmp136 + tmp128
-    tmp138 = tmp137 + tmp129
-    tmp139 = tmp138 + tmp130
-    tmp140 = tmp139 + tmp131
-    tmp141 = tmp140 + tmp132
-    tmp142 = tmp141 + tmp133
-    tmp143 = tmp142 + tmp134
-    tmp144 = tmp143 + tmp135
-    tmp145 = tmp144 + tmp136
-    tmp146 = tmp145 + tmp137
-    tmp147 = tmp146 + tmp138
-    tmp148 = tmp147 + tmp139
-    tmp149 = tmp148 + tmp140
-    tmp150 = tmp149 + tmp141
-    tmp151 = tmp150 + tmp142
-    tmp152 = tmp151 + tmp143
-    tmp153 = tmp152 + tmp144
-    tmp154 = tmp153 + tmp145
-    tmp155 = tmp154 + tmp146
-    tmp156 = tmp155 + tmp147
-    tmp157 = tmp156 + tmp148
-    tmp158 = tmp157 + tmp149
-    tmp159 = tmp158 + tmp150
-    tmp160 = tmp159 + tmp151
-    tmp161 = tmp160 + tmp152
-    tmp162 = tmp161 + tmp153
-    tmp163 = tmp162 + tmp154
-    tmp164 = tmp163 + tmp155
-    tmp165 = tmp164 + tmp156
-    tmp166 = tmp165 + tmp157
-    tmp167 = tmp166 + tmp158
-    tmp168 = tmp167 + tmp159
-    tmp169 = tmp168 + tmp160
-    tmp170 = tmp169 + tmp161
-    tmp171 = tmp170 + tmp162
-    tmp172 = tmp171 + tmp163
-    tmp173 = tmp172 + tmp164
-    tmp174 = tmp173 + tmp165
-    tmp175 = tmp174 + tmp166
-    tmp176 = tmp175 + tmp167
-    tmp177 = tmp176 + tmp168
-    tmp178 = tmp177 + tmp169
-    tmp179 = tmp178 + tmp170
-    tmp180 = tmp179 + tmp171
-    tmp181 = tmp180 + tmp172
-    tmp182 = tmp181 + tmp173
-    tmp183 = tmp182 + tmp174
-    tmp184 = tmp183 + tmp175
-    tmp185 = tmp184 + tmp176
-    tmp186 = tmp185 + tmp177
-    tmp187 = tmp186 + tmp178
-    tmp188 = tmp187 + tmp179
-    tmp189 = tmp188 + tmp180
-    tmp190 = tmp189 + tmp181
-    tmp191 = tmp190 + tmp182
-    tmp192 = tmp191 + tmp183
-    tmp193 = tmp192 + tmp184
-    tmp194 = tmp193 + tmp185
-    tmp195 = tmp194 + tmp186
-    tmp196 = tmp195 + tmp187
-    tmp197 = tmp196 + tmp188
-    tmp198 = tmp197 + tmp189
-    tmp199 = tmp198 + tmp190
-    tmp200 = tmp199 + tmp191
-    tmp201 = tmp200 + tmp192
-    tmp202 = tmp201 + tmp193
-    tmp203 = tmp202 + tmp194
-    tmp204 = tmp203 + tmp195
-    tmp205 = tmp204 + tmp196
-    tmp206 = tmp205 + tmp197
-    tmp207 = tmp206 + tmp198
-    tmp208 = tmp207 + tmp199
-    tmp209 = tmp208 + tmp200
-    tmp210 = tmp209 + tmp201
-    tmp211 = tmp210 + tmp202
-    tmp212 = tmp211 + tmp203
-    tmp213 = tmp212 + tmp204
-    tmp214 = tmp213 + tmp205
-    tmp215 = tmp214 + tmp206
-    tmp216 = tmp215 + tmp207
-    tmp217 = tmp216 + tmp208
-    tmp218 = tmp217 + tmp209
-    tmp219 = tmp218 + tmp210
-    tmp220 = tmp219 + tmp211
-    tmp221 = tmp220 + tmp212
-    tmp222 = tmp221 + tmp213
-    tmp223 = tmp222 + tmp214
-    tmp224 = tmp223 + tmp215
-    tmp225 = tmp224 + tmp216
-    tmp226 = tmp225 + tmp217
-    tmp227 = tmp226 + tmp218
-    tmp228 = tmp227 + tmp219
-    tmp229 = tmp228 + tmp220
-    tmp230 = tmp229 + tmp221
-    tmp231 = tmp230 + tmp222
-    tmp232 = tmp231 + tmp223
-    tmp233 = tmp232 + tmp224
-    tmp234 = tmp233 + tmp225
-    tmp235 = tmp234 + tmp226
-    tmp236 = tmp235 + tmp227
-    tmp237 = tmp236 + tmp228
-    tmp238 = tmp237 + tmp229
-    tmp239 = tmp238 + tmp230
-    tmp240 = tmp239 + tmp231
-    tmp241 = tmp240 + tmp232
-    tmp242 = tmp241 + tmp233
-    tmp243 = tmp242 + tmp234
-    tmp244 = tmp243 + tmp235
-    tmp245 = tmp244 + tmp236
-    tmp246 = tmp245 + tmp237
-    tmp247 = tmp246 + tmp238
-    tmp248 = tmp247 + tmp239
-    tmp249 = tmp248 + tmp240
-    tmp250 = tmp249 + tmp241
-    tmp251 = tmp250 + tmp242
-    tmp252 = tmp251 + tmp243
-    tmp253 = tmp252 + tmp244
-    tmp254 = tmp253 + tmp245
-    tmp255 = tmp254 + tmp246
-    tmp256 = tmp255 + tmp247
-    tmp257 = tmp256 + tmp248
-    tmp258 = tmp257 + tmp249
-    tmp259 = tmp258 + tmp250
-    tmp260 = tmp259 + tmp251
-    tmp261 = tmp260 + tmp252
-    tmp262 = tmp261 + tmp253
-    tmp263 = tmp262 + tmp254
-    tmp264 = tmp263 + tmp255
-    tmp265 = tmp264 + tmp256
-    tmp266 = tmp265 + tmp257
-    tmp267 = tmp266 + tmp258
-    tmp268 = tmp267 + tmp259
-    tmp269 = tmp268 + tmp260
-    tmp270 = tmp269 + tmp261
-    tmp271 = tmp270 + tmp262
-    tmp272 = tmp271 + tmp263
-    tmp273 = tmp272 + tmp264
-    tmp274 = tmp273 + tmp265
-    tmp275 = tmp274 + tmp266
-    tmp276 = tmp275 + tmp267
-    tmp277 = tmp276 + tmp268
-    tmp278 = tmp277 + tmp269
-    tmp279 = tmp278 + tmp270
-    tmp280 = tmp279 + tmp271
-    tmp281 = tmp280 + tmp272
-    tmp282 = tmp281 + tmp273
-    tmp283 = tmp282 + tmp274
-    tmp284 = tmp283 + tmp275
-    tmp285 = tmp284 + tmp276
-    tmp286 = tmp285 + tmp277
-    tmp287 = tmp286 + tmp278
-    tmp288 = tmp287 + tmp279
-    tmp289 = tmp288 + tmp280
-    tmp290 = tmp289 + tmp281
-    tmp291 = tmp290 + tmp282
-    tmp292 = tmp291 + tmp283
-    tmp293 = tmp292 + tmp284
-    tmp294 = tmp293 + tmp285
-    tmp295 = tmp294 + tmp286
-    tmp296 = tmp295 + tmp287
-    tmp297 = tmp296 + tmp288
-    tmp298 = tmp297 + tmp289
-    tmp299 = tmp298 + tmp290
-    tmp300 = tmp299 + tmp291
-    tmp301 = tmp300 + tmp292
-    tmp302 = tmp301 + tmp293
-    tmp303 = tmp302 + tmp294
-    tmp304 = tmp303 + tmp295
-    tmp305 = tmp304 + tmp296
-    tmp306 = tmp305 + tmp297
-    tmp307 = tmp306 + tmp298
-    tmp308 = tmp307 + tmp299
-    tmp309 = tmp308 + tmp300
-    tmp310 = tmp309 + tmp301
-    tmp311 = tmp310 + tmp302
-    tmp312 = tmp311 + tmp303
-    tmp313 = tmp312 + tmp304
-    tmp314 = tmp313 + tmp305
-    tmp315 = tmp314 + tmp306
-    tmp316 = tmp315 + tmp307
-    tmp317 = tmp316 + tmp308
-    tmp318 = tmp317 + tmp309
-    tmp319 = tmp318 + tmp310
-    tmp320 = tmp319 + tmp311
-    tmp321 = tmp320 + tmp312
-    tmp322 = tmp321 + tmp313
-    tmp323 = tmp322 + tmp314
-    tmp324 = tmp323 + tmp315
-    tmp325 = tmp324 + tmp316
-    tmp326 = tmp325 + tmp317
-    tmp327 = tmp326 + tmp318
-    tmp328 = tmp327 + tmp319
-    tmp329 = tmp328 + tmp320
-    tmp330 = tmp329 + tmp321
-    tmp331 = tmp330 + tmp322
-    tmp332 = tmp331 + tmp323
-    tmp333 = tmp332 + tmp324
-    tmp334 = tmp333 + tmp325
-    tmp335 = tmp334 + tmp326
-    tmp336 = tmp335 + tmp327
-    tmp337 = tmp336 + tmp328
-    tmp338 = tmp337 + tmp329
-    tmp339 = tmp338 + tmp330
-    tmp340 = tmp339 + tmp331
-    tmp341 = tmp340 + tmp332
-    tmp342 = tmp341 + tmp333
-    tmp343 = tmp342 + tmp334
-    tmp344 = tmp343 + tmp335
-    tmp345 = tmp344 + tmp336
-    tmp346 = tmp345 + tmp337
-    tmp347 = tmp346 + tmp338
-    tmp348 = tmp347 + tmp339
-    tmp349 = tmp348 + tmp340
-    tmp350 = tmp349 + tmp341
-    tmp351 = tmp350 + tmp342
-    tmp352 = tmp351 + tmp343
-    tmp353 = tmp352 + tmp344
-    tmp354 = tmp353 + tmp345
-    tmp355 = tmp354 + tmp346
-    tmp356 = tmp355 + tmp347
-    tmp357 = tmp356 + tmp348
-    tmp358 = tmp357 + tmp349
-    tmp359 = tmp358 + tmp350
-    tmp360 = tmp359 + tmp351
-    tmp361 = tmp360 + tmp352
-    tmp362 = tmp361 + tmp353
-    tmp363 = tmp362 + tmp354
-    tmp364 = tmp363 + tmp355
-    tmp365 = tmp364 + tmp356
-    tmp366 = tmp365 + tmp357
-    tmp367 = tmp366 + tmp358
-    tmp368 = tmp367 + tmp359
-    tmp369 = tmp368 + tmp360
-    tmp370 = tmp369 + tmp361
-    tmp371 = tmp370 + tmp362
-    tmp372 = tmp371 + tmp363
-    tmp373 = tmp372 + tmp364
-    tmp374 = tmp373 + tmp365
-    tmp375 = tmp374 + tmp366
-    tmp376 = tmp375 + tmp367
-    tmp377 = tmp376 + tmp368
-    tmp378 = tmp377 + tmp369
-    tmp379 = tmp378 + tmp370
-    tmp380 = tmp379 + tmp371
-    tmp381 = tmp380 + tmp372
-    tmp382 = tmp381 + tmp373
-    tmp383 = tmp382 + tmp374
-    tmp384 = tmp383 + tmp375
-    tmp385 = tmp384 + tmp376
-    tmp386 = tmp385 + tmp377
-    tmp387 = tmp386 + tmp378
-    tmp388 = tmp387 + tmp379
-    tmp389 = tmp388 + tmp380
-    tmp390 = tmp389 + tmp381
-    tmp391 = tmp390 + tmp382
-    tmp392 = tmp391 + tmp383
-    tmp393 = tmp392 + tmp384
-    tmp394 = tmp393 + tmp385
-    tmp395 = tmp394 + tmp386
-    tmp396 = tmp395 + tmp387
-    tmp397 = tmp396 + tmp388
-    tmp398 = tmp397 + tmp389
-    tmp399 = tmp398 + tmp390
-    tmp400 = tmp399 + tmp391
-    tmp401 = tmp400 + tmp392
-    tmp402 = tmp401 + tmp393
-    tmp403 = tmp402 + tmp394
-    tmp404 = tmp403 + tmp395
-    tmp405 = tmp404 + tmp396
-    tmp406 = tmp405 + tmp397
-    tmp407 = tmp406 + tmp398
-    tmp408 = tmp407 + tmp399
-    tmp409 = tmp408 + tmp400
-    tmp410 = tmp409 + tmp401
-    tmp411 = tmp410 + tmp402
-    tmp412 = tmp411 + tmp403
-    tmp413 = tmp412 + tmp404
-    tmp414 = tmp413 + tmp405
-    tmp415 = tmp414 + tmp406
-    tmp416 = tmp415 + tmp407
-    tmp417 = tmp416 + tmp408
-    tmp418 = tmp417 + tmp409
-    tmp419 = tmp418 + tmp410
-    tmp420 = tmp419 + tmp411
-    tmp421 = tmp420 + tmp412
-    tmp422 = tmp421 + tmp413
-    tmp423 = tmp422 + tmp414
-    tmp424 = tmp423 + tmp415
-    tmp425 = tmp424 + tmp416
-    tmp426 = tmp425 + tmp417
-    tmp427 = tmp426 + tmp418
-    tmp428 = tmp42
+    x0 = xindex % 128
+    x1 = xindex // 128 % 64
+    x2 = xindex // 8192 % 16
+    x3 = xindex // 131072
+    x4 = xindex
+    tmp0 = tl.load(in_ptr0 + (2 * x0 + 512 * x2 + 8192 * x1 + 524288 * x3),
+        xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 2 * x0 + 512 * x2 + 8192 * x1 + 524288 *
+        x3), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (256 + 2 * x0 + 512 * x2 + 8192 * x1 + 524288 *
+        x3), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (257 + 2 * x0 + 512 * x2 + 8192 * x1 + 524288 *
+        x3), xmask, eviction_policy='evict_last')
+    tmp2 = triton_helpers.maximum(tmp1, tmp0)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tmp6 = triton_helpers.maximum(tmp5, tmp4)
+    tmp7 = tmp1 > tmp0
+    tmp8 = tl.full([1], 1, tl.int8)
+    tmp9 = tl.full([1], 0, tl.int8)
+    tmp10 = tl.where(tmp7, tmp8, tmp9)
+    tmp11 = tmp3 > tmp2
+    tmp12 = tl.full([1], 2, tl.int8)
+    tmp13 = tl.where(tmp11, tmp12, tmp10)
+    tmp14 = tmp5 > tmp4
+    tmp15 = tl.full([1], 3, tl.int8)
+    tmp16 = tl.where(tmp14, tmp15, tmp13)
+    tl.store(out_ptr0 + x4, tmp6, xmask)
+    tl.store(out_ptr1 + x4, tmp16, xmask)
+
+
+@triton.jit
+def triton_per_fused_logsumexp_relu_2(in_ptr0, out_ptr0, xnumel, rnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 4
+    rnumel = 384000
+    RBLOCK: tl.constexpr = 512
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    rmask = rindex < rnumel
+    r1 = rindex
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 384000 * x0), rmask & xmask,
+        eviction_policy='evict_first', other=0.0)
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, RBLOCK])
+    tmp3 = tl.where(rmask & xmask, tmp1, float('-inf'))
+    tmp4 = triton_helpers.max2(tmp3, 1)[:, None]
+    tmp5 = tmp0 - tmp4
+    tmp6 = tl_math.exp(tmp5)
+    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, RBLOCK])
+    tmp9 = tl.where(rmask & xmask, tmp7, 0)
+    tmp10 = tl.sum(tmp9, 1)[:, None]
+    tmp11 = tl_math.log(tmp10)
+    tmp12 = tmp4 - tmp11
+    tmp13 = tl.full([1, 1], 0, tl.int32)
+    tmp14 = triton_helpers.maximum(tmp13, tmp12)
+    tl.store(out_ptr0 + x0, tmp14, xmask)
+
+
+def call(args):
+    primals_1, primals_2, primals_3 = args
+    args.clear()
+    assert_size_stride(primals_1, (64, 32, 3, 3, 3), (864, 27, 9, 3, 1))
+    assert_size_stride(primals_2, (64,), (1,))
+    assert_size_stride(primals_3, (4, 32, 32, 128, 128), (1638400, 51200, 
+        1600, 128, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = torch.ops.aten.convolution.default(primals_3, primals_1, [1,
+            1, 1], [1, 1, 1], bias=None)
+        buf1 = buf0
+        del buf0
+        buf2 = reinterpret_tensor(buf1, (4, 64, 32, 128, 128), (3276800, 
+            51200, 1600, 128, 1), 0)
+        del buf1
+        get_raw_stream(0)
+        triton_poi_fused_convolution_0[grid(1536000)](buf2, primals_2, 
+            1536000, XBLOCK=1024, num_warps=4, num_stages=1)
+        del primals_2
+        buf3 = empty_strided_cuda((4, 64, 32, 128, 128), (3276800, 51200, 
+            1600, 128, 1), torch.float32)
+        buf4 = empty_strided_cuda((4, 64, 32, 128, 128), (3276800, 51200, 
+            1600, 128, 1), torch.int8)
+        triton_poi_fused_max_pool3d_with_indices_1[grid(384000)](buf2, buf3,
+            buf4, 384000, XBLOCK=512, num_warps=8, num_stages=1)
+        del buf2
+        buf5 = empty_strided_cuda((4, 1, 32, 128, 128), (524288, 524288, 
+            16384, 128, 1), torch.float32)
+        triton_per_fused_logsumexp_relu_2[grid(4)](buf3, buf5, 4, 384000,
+            XBLOCK=1, num_warps=2, num_stages=1)
+    return buf5, primals_1, primals_3, buf3, buf4
+
+
+class ModelNew(nn.Module):
+    """
+    Model that performs a 3D convolution, max pooling, log sum exp, and ReLU activation.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.max_pool = nn.MaxPool3d(kernel_size=2, stride=2)
+
+    def forward(self, input_0):
+        primals_1 = self.conv.weight
+        primals_2 = self.conv.bias
+        primals_3 = input_0
+        output = call([primals_1, primals_2, primals_3])
+        return output[0]

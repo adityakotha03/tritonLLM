@@ -1,10 +1,9 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
@@ -12,20 +11,17 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 @triton.jit
 def triton_poi_fused_hardtanh_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
     ):
-    xnumel = 163288896
+    xnumel = 1572864
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex
     tmp0 = tl.load(in_ptr0 + x0, xmask)
     tmp1 = -1.0
-    tmp2 = tmp0 > tmp1
+    tmp2 = triton_helpers.maximum(tmp0, tmp1)
     tmp3 = 1.0
-    tmp4 = tmp0 < tmp3
-    tmp5 = tmp2 & tmp4
-    tmp6 = 0.0
-    tmp7 = tl.where(tmp5, tmp0, tmp6)
-    tl.store(out_ptr0 + x0, tmp7, xmask)
+    tmp4 = triton_helpers.minimum(tmp2, tmp3)
+    tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
 def call(args):
@@ -36,7 +32,7 @@ def call(args):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_hardtanh_0[grid(163288896)](arg0_1, buf0, 163288896,
+        triton_poi_fused_hardtanh_0[grid(1572864)](arg0_1, buf0, 1572864,
             XBLOCK=1024, num_warps=4, num_stages=1)
         del arg0_1
     return buf0,

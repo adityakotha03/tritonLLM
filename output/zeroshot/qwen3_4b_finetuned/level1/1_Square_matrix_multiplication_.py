@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
@@ -9,19 +9,15 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
+def triton_poi_fused_mul_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
     xnumel = 4194304
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex % 2048
-    x1 = xindex // 2048
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 2048 * x1), xmask)
-    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x2, tmp2, xmask)
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tmp0 * tmp0
+    tl.store(out_ptr0 + x0, tmp1, xmask)
 
 
 def call(args):
@@ -33,11 +29,14 @@ def call(args):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((2048, 2048), (2048, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_add_0[grid(4194304)](arg0_1, arg1_1, buf0, 4194304,
-            XBLOCK=1024, num_warps=4, num_stages=1)
-        del arg0_1
+        triton_poi_fused_mul_0[grid(4194304)](arg1_1, buf0, 4194304, XBLOCK
+            =512, num_warps=4, num_stages=1)
         del arg1_1
-    return buf0,
+        buf1 = empty_strided_cuda((2048, 2048), (2048, 1), torch.float32)
+        extern_kernels.mm(arg0_1, buf0, out=buf1)
+        del arg0_1
+        del buf0
+    return buf1,
 
 
 class ModelNew(nn.Module):

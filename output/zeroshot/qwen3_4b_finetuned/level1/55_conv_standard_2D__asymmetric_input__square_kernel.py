@@ -1,18 +1,19 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.convolution import triton_poi_fused_convolution_0
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, ynumel,
-    xnumel, YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
-    ynumel = 64
-    xnumel = 36864
+def triton_poi_fused_convolution_1(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 9
     yoffset = tl.program_id(1) * YBLOCK
     yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
     ymask = yindex < ynumel
@@ -20,53 +21,594 @@ def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, ynumel,
     xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
     x2 = xindex
-    y0 = yindex % 8
-    y1 = yindex // 8
+    y0 = yindex % 512
+    y1 = yindex // 512
     y3 = yindex
-    tmp0 = tl.load(in_ptr0 + (x2 + 36864 * y0 + 36864 * 8 * y1), xmask & ymask,
+    tmp0 = tl.load(in_ptr0 + (y0 + 512 * x2 + 4608 * y1), xmask & ymask,
         eviction_policy='evict_last')
-    tmp1 = tl.load(in_ptr1 + y3, ymask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + (x2 + 36864 * y3), tmp2, xmask & ymask)
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask & ymask)
 
 
-def call(args):
-    primals_1, primals_2, primals_3 = args
-    args.clear()
-    assert_size_stride(primals_1, (8, 128, 3, 3), (1152, 9, 3, 1))
-    assert_size_stride(primals_2, (8, 64, 512, 1024), (32768, 512, 1024, 1))
-    assert_size_stride(primals_3, (128,), (1,))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((8, 128, 510, 1021), (6553600, 51000, 1021,
-            1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(64, 36864)](primals_2, primals_1,
-            buf0, 64, 36864, XBLOCK=256, YBLOCK=32, num_warps=4, num_stages=1)
-    return buf0, primals_1, primals_2, primals_3
+@triton.jit
+def triton_poi_fused_convolution_2(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    ynumel = 8192
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 512
+    y1 = yindex // 512
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 512 * x2 + 524288 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask & ymask)
 
 
-class ModelNew(nn.Module):
-    """
-    Performs a standard 2D convolution operation with an asymmetric input and a square kernel.
+@triton.jit
+def triton_poi_fused_convolution_3(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
 
-    Args:
-        in_channels (int): Number of channels in the input tensor.
-        out_channels (int): Number of channels produced by the convolution.
-        kernel_size (int): Size of the square convolution kernel.
-        stride (int, optional): Stride of the convolution. Defaults to 1.
-        padding (int, optional): Padding applied to the input. Defaults to 0.
-        dilation (int, optional): Spacing between kernel elements. Defaults to 1.
-        groups (int, optional): Number of blocked connections from input channels to output channels. Defaults to 1.
-        bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
-    """
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False):
-        super(ModelNew, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels, out_channels, (kernel_size, kernel_size), stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias)
-        
-    def forward(self, input_0):
-        primals_1 = self.conv2d.weight
-        primals_3 = self.conv2d.bias
-        primals_2 = input_0
-        output = call([primals_1, primals_2, primals_3])
-        return output[0]
+
+@triton.jit
+def triton_poi_fused_convolution_4(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_5(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_6(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_7(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_8(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_9(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_10(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_11(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_12(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_13(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_14(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_15(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_16(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_17(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_18(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_19(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_20(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_21(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_22(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_23(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_24(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_25(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_26(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_27(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_28(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_29(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_30(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 131072 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 1024 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_31(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 9
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 128
+    y1 = yindex // 128
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 1152 * y1), xmask,
+        eviction_policy='evict_last')
+    tl.store(out_ptr0 + (x2 + 9 * y3), tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_32(in_ptr0, out_ptr0, ynumel, xnumel,
+    YBLOCK: tl.constexpr, XBLOCK: tl.constexpr):
+    xnumel = 1024
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    tl.full([XBLOCK, YBLOCK], True, tl.int1)
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = y

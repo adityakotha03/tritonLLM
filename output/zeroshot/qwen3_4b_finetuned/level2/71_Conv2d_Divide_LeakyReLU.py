@@ -1,44 +1,39 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_div_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 524288
+def triton_poi_fused_convolution_div_leaky_relu_leaky_relu_backward_0(
+    in_out_ptr0, in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 589824
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 0.5
-    tmp2 = tmp0 * tmp1
-    tl.store(out_ptr0 + x0, tmp2, xmask)
-
-
-@triton.jit
-def triton_poi_fused_leaky_relu_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 524288
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 0.01
-    tmp2 = tmp0 > tmp1
-    tmp3 = tl.full([1], 0, tl.int32)
-    tmp4 = tl.full([1], 1, tl.int32)
-    tmp5 = tl.where(tmp2, tmp3, tmp4)
-    tmp6 = 0.0
-    tmp7 = tl.where(tmp2, tmp0, tmp6)
-    tl.store(out_ptr0 + x0, tmp5, xmask)
-    tl.store(out_ptr0 + (128 * 1024 + x0), tmp7, xmask)
+    x3 = xindex
+    x1 = xindex // 1600 % 64
+    x0 = xindex % 1600
+    x4 = xindex // 1600
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp3 = 0.5
+    tmp4 = tmp2 * tmp3
+    tmp5 = 0.0
+    tmp6 = tmp4 > tmp5
+    tmp7 = 0.01
+    tmp8 = tmp4 * tmp7
+    tmp9 = tl.where(tmp6, tmp4, tmp8)
+    tmp10 = tmp9 > tmp5
+    tl.store(in_out_ptr0 + x3, tmp9, xmask)
+    tl.store(out_ptr0 + (x0 + 1664 * x4), tmp10, xmask)
 
 
 def call(args):
@@ -50,23 +45,19 @@ def call(args):
         1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((128, 64, 126, 126), (1036800, 16384, 126,
-            1), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_div_0[grid(524288)](primals_1, buf0, 524288,
-            XBLOCK=1024, num_warps=4, num_stages=1)
-        del primals_1
-        buf1 = empty_strided_cuda((131072, 64), (8192, 1), torch.float32)
-        triton_poi_fused_convolution_2[grid(1048576)](primals_3, buf0, buf1,
-            1048576, XBLOCK=1024, num_warps=4, num_stages=1)
+        buf0 = torch.ops.aten.convolution.default(primals_3, primals_1, [1,
+            1, 1], dilation=[1, 1], transposed=False, output_padding=[0, 0],
+            groups=1, bias=None)
+        buf1 = buf0
         del buf0
-        del primals_3
-        buf2 = empty_strided_cuda((128, 64, 126, 126), (1036800, 16384, 126,
-            1), torch.int32)
-        triton_poi_fused_leaky_relu_1[grid(524288)](buf1, buf2, 524288,
-            XBLOCK=1024, num_warps=4, num_stages=1)
-        del buf1
-    return buf2, primals_2, buf2
+        buf2 = empty_strided_cuda((128, 64, 126, 126), (10077696, 157921, 
+            126, 1), torch.bool)
+        get_raw_stream(0)
+        triton_poi_fused_convolution_div_leaky_relu_leaky_relu_backward_0[grid
+            (589824)](buf1, primals_2, buf2, 589824, XBLOCK=1024, num_warps
+            =4, num_stages=1)
+        del primals_2
+    return buf1, primals_1, primals_3, buf2
 
 
 class ModelNew(nn.Module):

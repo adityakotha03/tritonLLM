@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
@@ -9,35 +9,59 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 262144
+def triton_poi_fused_constant_pad_nd_0(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 819200
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 131072
+    x1 = xindex // 131072
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 327680 * x1), xmask, eviction_policy=
+        'evict_last')
+    tl.store(out_ptr0 + x2, tmp0, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_1(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 5242880
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
     x1 = xindex // 131072 % 64
-    tmp0 = tl.load(in_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x3, tmp2, xmask)
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
 
 
 def call(args):
-    primals_1, primals_2 = args
+    primals_1, primals_2, primals_3 = args
     args.clear()
     assert_size_stride(primals_1, (64, 32, 3), (96, 3, 1))
-    assert_size_stride(primals_2, (16, 32, 131072), (4194304, 131072, 1))
+    assert_size_stride(primals_2, (64,), (1,))
+    assert_size_stride(primals_3, (16, 32, 131072), (4192672, 131072, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 64, 131072), (8388608, 131072, 1),
+        buf0 = empty_strided_cuda((16, 64, 131072), (819200, 131072, 1),
             torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(262144)](primals_2, primals_1,
-            buf0, 262144, XBLOCK=1024, num_warps=4, num_stages=1)
-        del primals_1
+        triton_poi_fused_constant_pad_nd_0[grid(819200)](primals_3, buf0, 
+            819200, XBLOCK=512, num_warps=8, num_stages=1)
+        del primals_3
+        buf1 = extern_kernels.convolution(buf0, primals_1, stride=(2,),
+            padding=(1,), dilation=(2,), transposed=True, output_padding=(
+            0,), groups=1, bias=None)
+        assert_size_stride(buf1, (16, 64, 131072), (819200, 131072, 1))
+        buf2 = buf1
+        del buf1
+        triton_poi_fused_convolution_1[grid(5242880)](buf2, primals_2, 
+            5242880, XBLOCK=1024, num_warps=4, num_stages=1)
         del primals_2
-    return buf0,
+    return buf2, primals_1, buf0
 
 
 class ModelNew(nn.Module):
@@ -60,6 +84,7 @@ class ModelNew(nn.Module):
         
     def forward(self, input_0):
         primals_1 = self.conv1d_transpose.weight
-        primals_2 = input_0
-        output = call([primals_1, primals_2])
+        primals_2 = self.conv1d_transpose.bias
+        primals_3 = input_0
+        output = call([primals_1, primals_2, primals_3])
         return output[0]

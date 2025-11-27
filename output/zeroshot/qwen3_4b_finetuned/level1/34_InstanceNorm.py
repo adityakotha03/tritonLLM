@@ -1,116 +1,201 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import libdevice
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_clone_0(in_ptr0, out_ptr0, ynumel, xnumel, YBLOCK: tl.
-    constexpr, XBLOCK: tl.constexpr):
-    ynumel = 32768
-    xnumel = 128
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
+def triton_per_fused__native_batch_norm_legit_0(in_ptr0, out_ptr0, out_ptr1,
+    out_ptr2, out_ptr3, xnumel, rnumel, XBLOCK: tl.constexpr):
+    xnumel = 112
+    RBLOCK: tl.constexpr = 64
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x2 = xindex
-    y0 = yindex % 128
-    y1 = yindex // 128
-    y3 = yindex
-    tmp0 = tl.load(in_ptr0 + (y0 + 128 * x2 + 16384 * y1), xmask & ymask,
-        eviction_policy='evict_last')
-    tl.store(out_ptr0 + (x2 + 128 * y3), tmp0, xmask & ymask)
-
-
-@triton.jit
-def triton_poi_fused_add_mean_sub_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 32768
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 1.0
-    tmp2 = tmp0 * tmp1
-    tmp3 = tl.broadcast_to(tmp2, [XBLOCK])
-    tmp5 = tl.sum(tmp3, 0)[:, None]
-    tmp6 = 128.0
-    tmp7 = tmp5 / tmp6
-    tmp8 = tmp2 - tmp7
-    tl.store(out_ptr0 + x0, tmp8, xmask)
+    x2 = xindex % 14
+    x3 = xindex // 14
+    tmp0 = tl.load(in_ptr0 + (r1 + 64 * x0), xmask, other=0.0)
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, RBLOCK])
+    tl.where(xmask, tmp1, 0)
+    tmp4 = tl.broadcast_to(tmp1, [XBLOCK, RBLOCK])
+    tmp6 = tl.where(xmask, tmp4, 0)
+    tmp7 = tl.sum(tmp6, 1)[:, None]
+    tmp8 = tl.full([XBLOCK, 1], 64, tl.int32)
+    tmp9 = tmp8.to(tl.float32)
+    tmp10 = tmp7 / tmp9
+    tmp11 = tmp1 - tmp10
+    tmp12 = tmp11 * tmp11
+    tmp13 = tl.broadcast_to(tmp12, [XBLOCK, RBLOCK])
+    tmp15 = tl.where(xmask, tmp13, 0)
+    tmp16 = tl.sum(tmp15, 1)[:, None]
+    tmp17 = tmp0 - tmp10
+    tmp18 = 64.0
+    tmp19 = tmp16 / tmp18
+    tmp20 = 1e-05
+    tmp21 = tmp19 + tmp20
+    tmp22 = libdevice.rsqrt(tmp21)
+    tl.store(out_ptr2 + (r1 + 64 * x2 + 4096 * x3), tmp17, xmask)
+    tl.store(out_ptr3 + (r1 + 64 * x2 + 4096 * x3), tmp22, xmask)
+    tl.store(out_ptr0 + x0, tmp10, xmask)
+    tl.store(out_ptr1 + x0, tmp16, xmask)
 
 
 @triton.jit
-def triton_poi_fused_add_div_mul_pow_rsub_sqrt_2(in_out_ptr0, in_ptr0,
-    in_ptr1, in_ptr2, in_ptr3, in_ptr4, in_ptr5, in_ptr6, in_ptr7, xnumel,
-    XBLOCK: tl.constexpr):
-    xnumel = 32768
+def triton_per_fused__native_batch_norm_legit_1(in_out_ptr0, in_ptr0,
+    in_ptr1, in_ptr2, out_ptr0, xnumel, rnumel, XBLOCK: tl.constexpr):
+    xnumel = 7168
+    RBLOCK: tl.constexpr = 64
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x2 = xindex
-    x1 = xindex // 128
-    x0 = xindex % 128
-    tmp0 = tl.load(in_ptr0 + x2, xmask)
-    tmp3 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
-    tmp5 = tl.load(in_ptr2 + x1, xmask, eviction_policy='evict_last')
-    tmp7 = tl.load(in_ptr3 + x0, xmask, eviction_policy='evict_last')
-    tmp9 = tl.load(in_ptr4 + x0, xmask, eviction_policy='evict_last')
-    tmp11 = tl.load(in_ptr5 + x0, xmask, eviction_policy='evict_last')
-    tmp13 = tl.load(in_ptr6 + x0, xmask, eviction_policy='evict_last')
-    tmp15 = tl.load(in_ptr7 + x0, xmask, eviction_policy='evict_last')
-    tmp1 = tmp0 + tmp3
-    tmp2 = 1.0
-    tmp4 = tmp1 * tmp2
-    tmp6 = tmp4 - tmp5
-    tmp8 = tmp6 * tmp7
-    tmp10 = tmp8 * tmp9
-    tmp12 = tmp10 * tmp11
-    tmp14 = tmp12 * tmp13
-    tmp16 = tmp14 * tmp15
-    tmp17 = tmp6 * tmp2
-    tmp18 = tmp17 * tmp17
-    tmp19 = 127.0
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x0 = xindex % 14
+    x2 = xindex // 14 % 512
+    x3 = xindex // 7168
+    x4 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp2 = tl.load(in_ptr2 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp3 = tl.load(in_out_ptr0 + (r1 + 64 * x2 + 32768 * x3), xmask,
+        eviction_policy='evict_last')
+    tmp4 = tl.load(in_ptr0 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp5 = tl.load(in_ptr1 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp6 = tl.load(in_ptr2 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp7 = tmp4 + tmp5
+    tmp8 = tmp7 + tmp6
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK, RBLOCK])
+    tl.where(xmask, tmp9, 0)
+    tmp12 = tl.broadcast_to(tmp9, [XBLOCK, RBLOCK])
+    tmp14 = tl.where(xmask, tmp12, 0)
+    tmp15 = tl.sum(tmp14, 1)[:, None]
+    tmp16 = tmp1 + tmp2
+    tmp17 = tmp16 + tmp3
+    tmp18 = tmp17 - tmp15
+    tmp19 = 64.0
     tmp20 = tmp18 / tmp19
-    tmp21 = 1e-05
-    tmp22 = tmp20 + tmp21
-    tmp23 = tl.sqrt(tmp22)
-    tmp24 = tmp16 / tmp23
-    tl.store(in_out_ptr0 + x2, tmp24, xmask)
+    tmp21 = tmp0 - tmp20
+    tmp22 = tmp21 * tmp21
+    tmp23 = tl.broadcast_to(tmp22, [XBLOCK, RBLOCK])
+    tmp25 = tl.where(xmask, tmp23, 0)
+    tmp26 = tl.sum(tmp25, 1)[:, None]
+    tmp27 = 64.0
+    tmp28 = tmp26 / tmp27
+    tmp29 = 1e-05
+    tmp30 = tmp28 + tmp29
+    tmp31 = libdevice.rsqrt(tmp30)
+    tl.store(in_out_ptr0 + (r1 + 64 * x2 + 32768 * x3), tmp17, xmask)
+    tl.store(out_ptr0 + x4, tmp31, xmask)
+
+
+@triton.jit
+def triton_per_fused__native_batch_norm_legit_2(in_out_ptr0, in_ptr0,
+    in_ptr1, in_ptr2, out_ptr0, xnumel, rnumel, XBLOCK: tl.constexpr):
+    xnumel = 7168
+    RBLOCK: tl.constexpr = 64
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x0 = xindex % 14
+    x2 = xindex // 14 % 512
+    x3 = xindex // 7168
+    x4 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp2 = tl.load(in_ptr2 + (r1 + 64 * x0), None, eviction_policy=
+        'evict_last')
+    tmp3 = tl.load(in_out_ptr0 + (r1 + 64 * x2 + 32768 * x3), xmask,
+        eviction_policy='evict_last')
+    tmp4 = tl.load(in_ptr0 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp5 = tl.load(in_ptr1 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp6 = tl.load(in_ptr2 + (64 * x0 + 896 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp7 = tmp4 + tmp5
+    tmp8 = tmp7 + tmp6
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK, RBLOCK])
+    tl.where(xmask, tmp9, 0)
+    tmp12 = tl.broadcast_to(tmp9, [XBLOCK, RBLOCK])
+    tmp14 = tl.where(xmask, tmp12, 0)
+    tmp15 = tl.sum(tmp14, 1)[:, None]
+    tmp16 = tmp1 + tmp2
+    tmp17 = tmp16 + tmp3
+    tmp18 = tmp17 - tmp15
+    tmp19 = 64.0
+    tmp20 = tmp18 / tmp19
+    tmp21 = tmp0 - tmp20
+    tmp22 = tmp21 * tmp21
+    tmp23 = tl.broadcast_to(tmp22, [XBLOCK, RBLOCK])
+    tmp25 = tl.where(xmask, tmp23, 0)
+    tmp26 = tl.sum(tmp25, 1)[:, None]
+    tmp27 = 64.0
+    tmp28 = tmp26 / tmp27
+    tmp29 = 1e-05
+    tmp30 = tmp28 + tmp29
+    tmp31 = libdevice.rsqrt(tmp30)
+    tl.store(in_out_ptr0 + (r1 + 64 * x2 + 32768 * x3), tmp17, xmask)
+    tl.store(out_ptr0 + x4, tmp31, xmask)
 
 
 def call(args):
     arg0_1, = args
     args.clear()
-    assert_size_stride(arg0_1, (112, 64, 512, 512), (16384, 256, 512, 1))
+    assert_size_stride(arg0_1, (112, 64, 512, 512), (16777216, 262144, 512,
+        1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((112, 128, 512, 512), (16384, 128, 256, 1
-            ), torch.float32)
+        buf0 = empty_strided_cuda((112,), (1,), torch.float32)
+        buf1 = empty_strided_cuda((112,), (1,), torch.float32)
+        buf3 = empty_strided_cuda((112, 64, 512, 512), (2097152, 32768, 
+            512, 1), torch.float32)
+        buf4 = empty_strided_cuda((112, 64, 512, 512), (2097152, 32768, 
+            512, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_clone_0[grid(32768, 128)](arg0_1, buf0, 32768, 128,
-            XBLOCK=64, YBLOCK=128, num_warps=8, num_stages=1)
-        buf1 = empty_strided_cuda((112, 128, 512, 512), (16384, 128, 256, 1
-            ), torch.float32)
-        triton_poi_fused_add_mean_sub_1[grid(32768)](buf0, buf1, 32768,
-            XBLOCK=256, num_warps=4, num_stages=1)
+        triton_per_fused__native_batch_norm_legit_0[grid(112)](arg0_1, buf0,
+            buf1, buf3, buf4, 112, 64, XBLOCK=1, num_warps=2, num_stages=1)
+        del arg0_1
+        buf5 = buf4
+        del buf4
+        buf6 = empty_strided_cuda((112, 64, 512, 512), (2097152, 32768, 
+            512, 1), torch.float32)
+        triton_per_fused__native_batch_norm_legit_1[grid(7168)](buf5, buf0,
+            buf1, buf3, buf6, 7168, 64, XBLOCK=64, num_warps=4, num_stages=1)
         del buf0
         del buf1
-        buf2 = empty_strided_cuda((112, 64, 512, 512), (16384, 256, 1, 1),
-            torch.float32)
-        triton_poi_fused_add_div_mul_pow_rsub_sqrt_2[grid(32768)](buf2,
-            arg0_1, buf1, buf1, buf1, buf1, buf1, buf1, buf1, 32768, XBLOCK=
-            256, num_warps=4, num_stages=1)
-        del arg0_1
+        del buf3
+        buf7 = buf5
+        del buf5
+        buf8 = empty_strided_cuda((112, 64, 512, 512), (2097152, 32768, 
+            512, 1), torch.float32)
+        triton_per_fused__native_batch_norm_legit_2[grid(7168)](buf7, buf0,
+            buf1, buf6, buf8, 7168, 64, XBLOCK=64, num_warps=4, num_stages=1)
+        del buf0
         del buf1
-    return buf2,
+        del buf6
+    return buf8,
 
 
 class ModelNew(nn.Module):

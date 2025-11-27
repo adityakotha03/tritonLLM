@@ -1,29 +1,434 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+from torch._inductor.runtime.triton_helpers import libdevice
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 1048576
+def triton_poi_fused__native_batch_norm_legit_relu_0(in_ptr0, out_ptr0,
+    out_ptr1, out_ptr2, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1024
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x3 = xindex
-    x1 = xindex // 4096 % 32
-    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
-    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 + tmp1
-    tl.store(in_out_ptr0 + x3, tmp2, xmask)
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 32 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 32 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp3 = tl.load(in_ptr0 + (2 + 32 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp5 = tl.load(in_ptr0 + (3 + 32 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp7 = tl.load(in_ptr0 + (4 + 32 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp9 = tl.load(in_ptr0 + (5 + 32 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp11 = tl.load(in_ptr0 + (6 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp13 = tl.load(in_ptr0 + (7 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp15 = tl.load(in_ptr0 + (8 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp17 = tl.load(in_ptr0 + (9 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp19 = tl.load(in_ptr0 + (10 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp21 = tl.load(in_ptr0 + (11 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp23 = tl.load(in_ptr0 + (12 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp25 = tl.load(in_ptr0 + (13 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp27 = tl.load(in_ptr0 + (14 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp29 = tl.load(in_ptr0 + (15 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp31 = tl.load(in_ptr0 + (16 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp33 = tl.load(in_ptr0 + (17 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp35 = tl.load(in_ptr0 + (18 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp37 = tl.load(in_ptr0 + (19 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp39 = tl.load(in_ptr0 + (20 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp41 = tl.load(in_ptr0 + (21 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp43 = tl.load(in_ptr0 + (22 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp45 = tl.load(in_ptr0 + (23 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp47 = tl.load(in_ptr0 + (24 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp49 = tl.load(in_ptr0 + (25 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp51 = tl.load(in_ptr0 + (26 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp53 = tl.load(in_ptr0 + (27 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp55 = tl.load(in_ptr0 + (28 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp57 = tl.load(in_ptr0 + (29 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp59 = tl.load(in_ptr0 + (30 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp61 = tl.load(in_ptr0 + (31 + 32 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp3 + tmp2
+    tmp6 = tmp5 + tmp4
+    tmp8 = tmp7 + tmp6
+    tmp10 = tmp9 + tmp8
+    tmp12 = tmp11 + tmp10
+    tmp14 = tmp13 + tmp12
+    tmp16 = tmp15 + tmp14
+    tmp18 = tmp17 + tmp16
+    tmp20 = tmp19 + tmp18
+    tmp22 = tmp21 + tmp20
+    tmp24 = tmp23 + tmp22
+    tmp26 = tmp25 + tmp24
+    tmp28 = tmp27 + tmp26
+    tmp30 = tmp29 + tmp28
+    tmp32 = tmp31 + tmp30
+    tmp34 = tmp33 + tmp32
+    tmp36 = tmp35 + tmp34
+    tmp38 = tmp37 + tmp36
+    tmp40 = tmp39 + tmp38
+    tmp42 = tmp41 + tmp40
+    tmp44 = tmp43 + tmp42
+    tmp46 = tmp45 + tmp44
+    tmp48 = tmp47 + tmp46
+    tmp50 = tmp49 + tmp48
+    tmp52 = tmp51 + tmp50
+    tmp54 = tmp53 + tmp52
+    tmp56 = tmp55 + tmp54
+    tmp58 = tmp57 + tmp56
+    tmp60 = tmp59 + tmp58
+    tmp62 = tmp61 + tmp60
+    tmp63 = 32.0
+    tmp64 = tmp62 / tmp63
+    tmp65 = tmp0 - tmp64
+    tmp66 = tmp65 * tmp65
+    tmp67 = tmp1 - tmp64
+    tmp68 = tmp67 * tmp67
+    tmp69 = tmp66 + tmp68
+    tmp70 = tmp3 - tmp64
+    tmp71 = tmp70 * tmp70
+    tmp72 = tmp69 + tmp71
+    tmp73 = tmp5 - tmp64
+    tmp74 = tmp73 * tmp73
+    tmp75 = tmp72 + tmp74
+    tmp76 = tmp7 + tmp64
+    tmp77 = tmp76 * tmp76
+    tmp78 = tmp75 + tmp77
+    tmp79 = tmp9 + tmp64
+    tmp80 = tmp79 * tmp79
+    tmp81 = tmp78 + tmp80
+    tmp82 = tmp11 + tmp64
+    tmp83 = tmp82 * tmp82
+    tmp84 = tmp81 + tmp83
+    tmp85 = tmp13 + tmp64
+    tmp86 = tmp85 * tmp85
+    tmp87 = tmp84 + tmp86
+    tmp88 = tmp15 + tmp64
+    tmp89 = tmp88 * tmp88
+    tmp90 = tmp87 + tmp89
+    tmp91 = tmp17 + tmp64
+    tmp92 = tmp91 * tmp91
+    tmp93 = tmp90 + tmp92
+    tmp94 = tmp19 + tmp64
+    tmp95 = tmp94 * tmp94
+    tmp96 = tmp93 + tmp95
+    tmp97 = tmp21 + tmp64
+    tmp98 = tmp97 * tmp97
+    tmp99 = tmp96 + tmp98
+    tmp100 = tmp23 + tmp64
+    tmp101 = tmp100 * tmp100
+    tmp102 = tmp99 + tmp101
+    tmp103 = tmp25 + tmp64
+    tmp104 = tmp103 * tmp103
+    tmp105 = tmp102 + tmp104
+    tmp106 = tmp27 + tmp64
+    tmp107 = tmp106 * tmp106
+    tmp108 = tmp105 + tmp107
+    tmp109 = tmp29 + tmp64
+    tmp110 = tmp109 * tmp109
+    tmp111 = tmp108 + tmp110
+    tmp112 = tmp31 + tmp64
+    tmp113 = tmp112 * tmp112
+    tmp114 = tmp111 + tmp113
+    tmp115 = tmp33 + tmp64
+    tmp116 = tmp115 * tmp115
+    tmp117 = tmp114 + tmp116
+    tmp118 = tmp35 + tmp64
+    tmp119 = tmp118 * tmp118
+    tmp120 = tmp117 + tmp119
+    tmp121 = tmp37 + tmp64
+    tmp122 = tmp121 * tmp121
+    tmp123 = tmp120 + tmp122
+    tmp124 = tmp39 + tmp64
+    tmp125 = tmp124 * tmp124
+    tmp126 = tmp123 + tmp125
+    tmp127 = tmp41 + tmp64
+    tmp128 = tmp127 * tmp127
+    tmp129 = tmp126 + tmp128
+    tmp130 = tmp43 + tmp64
+    tmp131 = tmp130 * tmp130
+    tmp132 = tmp129 + tmp131
+    tmp133 = tmp45 + tmp64
+    tmp134 = tmp133 * tmp133
+    tmp135 = tmp132 + tmp134
+    tmp136 = tmp47 + tmp64
+    tmp137 = tmp136 * tmp136
+    tmp138 = tmp135 + tmp137
+    tmp139 = tmp49 + tmp64
+    tmp140 = tmp139 * tmp139
+    tmp141 = tmp138 + tmp140
+    tmp142 = tmp51 + tmp64
+    tmp143 = tmp142 * tmp142
+    tmp144 = tmp141 + tmp143
+    tmp145 = tmp53 + tmp64
+    tmp146 = tmp145 * tmp145
+    tmp147 = tmp144 + tmp146
+    tmp148 = tmp55 + tmp64
+    tmp149 = tmp148 * tmp148
+    tmp150 = tmp147 + tmp149
+    tmp151 = tmp57 + tmp64
+    tmp152 = tmp151 * tmp151
+    tmp153 = tmp150 + tmp152
+    tmp154 = tmp59 + tmp64
+    tmp155 = tmp154 * tmp154
+    tmp156 = tmp153 + tmp155
+    tmp157 = tmp61 + tmp64
+    tmp158 = tmp157 * tmp157
+    tmp159 = tmp156 + tmp158
+    tmp160 = 30.0
+    tmp161 = tmp159 / tmp160
+    tmp162 = tmp65 / tmp161
+    tmp163 = 1e-05
+    tmp164 = tmp162 + tmp163
+    tmp165 = libdevice.rsqrt(tmp164)
+    tmp166 = tmp0 * tmp165
+    tmp167 = tmp1 * tmp165
+    tmp168 = tmp166 + tmp167
+    tmp169 = tmp3 * tmp165
+    tmp170 = tmp168 + tmp169
+    tmp171 = tmp5 * tmp165
+    tmp172 = tmp170 + tmp171
+    tmp173 = tmp7 * tmp165
+    tmp174 = tmp172 + tmp173
+    tmp175 = tmp9 * tmp165
+    tmp176 = tmp174 + tmp175
+    tmp177 = tmp11 * tmp165
+    tmp178 = tmp176 + tmp177
+    tmp179 = tmp13 * tmp165
+    tmp180 = tmp178 + tmp179
+    tmp181 = tmp15 * tmp165
+    tmp182 = tmp180 + tmp181
+    tmp183 = tmp17 * tmp165
+    tmp184 = tmp182 + tmp183
+    tmp185 = tmp19 * tmp165
+    tmp186 = tmp184 + tmp185
+    tmp187 = tmp21 * tmp165
+    tmp188 = tmp186 + tmp187
+    tmp189 = tmp23 * tmp165
+    tmp190 = tmp188 + tmp189
+    tmp191 = tmp25 * tmp165
+    tmp192 = tmp190 + tmp191
+    tmp193 = tmp27 * tmp165
+    tmp194 = tmp192 + tmp193
+    tmp195 = tmp29 * tmp165
+    tmp196 = tmp194 + tmp195
+    tmp197 = tmp31 * tmp165
+    tmp198 = tmp196 + tmp197
+    tmp199 = tmp165 * tmp198
+    tmp200 = tl.full([1], 0, tl.int32)
+    tmp201 = triton_helpers.maximum(tmp200, tmp199)
+    tl.store(out_ptr0 + x0, tmp201, xmask)
+    tl.store(out_ptr1 + x0, tmp165, xmask)
+    tl.store(out_ptr2 + x0, tmp161, xmask)
 
 
 @triton.jit
-def triton_poi_fused_cat_1(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+def triton_poi_fused__native_batch_norm_legit_relu_1(in_ptr0, in_ptr1,
+    in_ptr2, in_ptr3, in_ptr4, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 32 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + 32 * x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp2 - tmp3
+    tmp5 = 32.0
+    tmp6 = tmp4 / tmp5
+    tmp7 = tmp0 - tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
+    tmp11 = tl.sum(tmp9, 0) / tmp5
+    tmp12 = 1e-05
+    tmp13 = tmp11 + tmp12
+    tmp14 = libdevice.rsqrt(tmp13)
+    tmp15 = tmp6 * tmp14
+    tmp16 = tmp15 * tmp14
+    tmp17 = tl.full([1], 0, tl.int32)
+    tmp18 = triton_helpers.maximum(tmp17, tmp16)
+    tl.store(out_ptr0 + x0, tmp18, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
+    tl.store(out_ptr2 + x0, tmp13, xmask)
+
+
+@triton.jit
+def triton_poi_fused__native_batch_norm_legit_relu_2(in_ptr0, in_ptr1,
+    in_ptr2, in_ptr3, in_ptr4, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 96 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + 96 * x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + 96 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp2 - tmp3
+    tmp5 = 32.0
+    tmp6 = tmp4 / tmp5
+    tmp7 = tmp0 - tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
+    tmp11 = tl.sum(tmp9, 0) / tmp5
+    tmp12 = 1e-05
+    tmp13 = tmp11 + tmp12
+    tmp14 = libdevice.rsqrt(tmp13)
+    tmp15 = tmp6 * tmp14
+    tmp16 = tmp15 * tmp14
+    tmp17 = tl.full([1], 0, tl.int32)
+    tmp18 = triton_helpers.maximum(tmp17, tmp16)
+    tl.store(out_ptr0 + x0, tmp18, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
+    tl.store(out_ptr2 + x0, tmp13, xmask)
+
+
+@triton.jit
+def triton_poi_fused__native_batch_norm_legit_relu_3(in_ptr0, in_ptr1,
+    in_ptr2, in_ptr3, in_ptr4, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 128 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 96 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + 96 * x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + 128 * x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + 128 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp2 - tmp3
+    tmp5 = 32.0
+    tmp6 = tmp4 / tmp5
+    tmp7 = tmp0 - tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
+    tmp11 = tl.sum(tmp9, 0) / tmp5
+    tmp12 = 1e-05
+    tmp13 = tmp11 + tmp12
+    tmp14 = libdevice.rsqrt(tmp13)
+    tmp15 = tmp6 * tmp14
+    tmp16 = tmp15 * tmp14
+    tmp17 = tl.full([1], 0, tl.int32)
+    tmp18 = triton_helpers.maximum(tmp17, tmp16)
+    tl.store(out_ptr0 + x0, tmp18, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
+    tl.store(out_ptr2 + x0, tmp13, xmask)
+
+
+@triton.jit
+def triton_poi_fused__native_batch_norm_legit_relu_4(in_ptr0, in_ptr1,
+    in_ptr2, in_ptr3, in_ptr4, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 160 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 128 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + 128 * x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + 160 * x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + 160 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp2 - tmp3
+    tmp5 = 32.0
+    tmp6 = tmp4 / tmp5
+    tmp7 = tmp0 - tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
+    tmp11 = tl.sum(tmp9, 0) / tmp5
+    tmp12 = 1e-05
+    tmp13 = tmp11 + tmp12
+    tmp14 = libdevice.rsqrt(tmp13)
+    tmp15 = tmp6 * tmp14
+    tmp16 = tmp15 * tmp14
+    tmp17 = tl.full([1], 0, tl.int32)
+    tmp18 = triton_helpers.maximum(tmp17, tmp16)
+    tl.store(out_ptr0 + x0, tmp18, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
+    tl.store(out_ptr2 + x0, tmp13, xmask)
+
+
+@triton.jit
+def triton_poi_fused__native_batch_norm_legit_relu_5(in_ptr0, in_ptr1,
+    in_ptr2, in_ptr3, in_ptr4, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 192 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 160 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + 160 * x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + 192 * x0, xmask, eviction_policy='evict_last')
+    tmp8 = tl.load(in_ptr4 + 192 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp2 - tmp3
+    tmp5 = 32.0
+    tmp6 = tmp4 / tmp5
+    tmp7 = tmp0 - tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tl.broadcast_to(tmp8, [XBLOCK])
+    tmp11 = tl.sum(tmp9, 0) / tmp5
+    tmp12 = 1e-05
+    tmp13 = tmp11 + tmp12
+    tmp14 = libdevice.rsqrt(tmp13)
+    tmp15 = tmp6 * tmp14
+    tmp16 = tmp15 * tmp14
+    tmp17 = tl.full([1], 0, tl.int32)
+    tmp18 = triton_helpers.maximum(tmp17, tmp16)
+    tl.store(out_ptr0 + x0, tmp18, xmask)
+    tl.store(out_ptr1 + x0, tmp14, xmask)
+    tl.store(out_ptr2 + x0, tmp13, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_6(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
     in_ptr5, in_ptr6, in_ptr7, in_ptr8, in_ptr9, in_ptr10, in_ptr11,
     in_ptr12, in_ptr13, in_ptr14, in_ptr15, in_ptr16, in_ptr17, in_ptr18,
     in_ptr19, in_ptr20, in_ptr21, in_ptr22, in_ptr23, in_ptr24, in_ptr25,
@@ -74,161 +479,4 @@ def triton_poi_fused_cat_1(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
     in_ptr301, in_ptr302, in_ptr303, in_ptr304, in_ptr305, in_ptr306,
     in_ptr307, in_ptr308, in_ptr309, in_ptr310, in_ptr311, in_ptr312,
     in_ptr313, in_ptr314, in_ptr315, in_ptr316, in_ptr317, in_ptr318,
-    in_ptr319, in_ptr320, in_ptr321, in_ptr322, in_ptr323, in_ptr324,
-    in_ptr325, in_ptr326, in_ptr327, in_ptr328, in_ptr329, in_ptr330,
-    in_ptr331, in_ptr332, in_ptr333, in_ptr334, in_ptr335, in_ptr336,
-    in_ptr337, in_ptr338, in_ptr339, in_ptr340, in_ptr341, in_ptr342,
-    in_ptr343, in_ptr344, in_ptr345, in_ptr346, in_ptr347, in_ptr348,
-    in_ptr349, in_ptr350, in_ptr351, in_ptr352, in_ptr353, in_ptr354,
-    in_ptr355, in_ptr356, in_ptr357, in_ptr358, in_ptr359, in_ptr360,
-    in_ptr361, in_ptr362, in_ptr363, in_ptr364, in_ptr365, in_ptr366,
-    in_ptr367, in_ptr368, in_ptr369, in_ptr370, in_ptr371, in_ptr372,
-    in_ptr373, in_ptr374, in_ptr375, in_ptr376, in_ptr377, in_ptr378,
-    in_ptr379, in_ptr380, in_ptr381, in_ptr382, in_ptr383, in_ptr384,
-    in_ptr385, in_ptr386, in_ptr387, in_ptr388, in_ptr389, in_ptr390,
-    in_ptr391, in_ptr392, in_ptr393, in_ptr394, in_ptr395, in_ptr396,
-    in_ptr397, in_ptr398, in_ptr399, in_ptr400, in_ptr401, in_ptr402,
-    in_ptr403, in_ptr404, in_ptr405, in_ptr406, in_ptr407, in_ptr408,
-    in_ptr409, in_ptr410, in_ptr411, in_ptr412, in_ptr413, in_ptr414,
-    in_ptr415, in_ptr416, in_ptr417, in_ptr418, in_ptr419, in_ptr420,
-    in_ptr421, in_ptr422, in_ptr423, in_ptr424, in_ptr425, in_ptr426,
-    in_ptr427, in_ptr428, in_ptr429, in_ptr430, in_ptr431, in_ptr432,
-    in_ptr433, in_ptr434, in_ptr435, in_ptr436, in_ptr437, in_ptr438,
-    in_ptr439, in_ptr440, in_ptr441, in_ptr442, in_ptr443, in_ptr444,
-    in_ptr445, in_ptr446, in_ptr447, in_ptr448, in_ptr449, in_ptr450,
-    in_ptr451, in_ptr452, in_ptr453, in_ptr454, in_ptr455, in_ptr456,
-    in_ptr457, in_ptr458, in_ptr459, in_ptr460, in_ptr461, in_ptr462,
-    in_ptr463, in_ptr464, in_ptr465, in_ptr466, in_ptr467, in_ptr468,
-    in_ptr469, in_ptr470, in_ptr471, in_ptr472, in_ptr473, in_ptr474,
-    in_ptr475, in_ptr476, in_ptr477, in_ptr478, in_ptr479, in_ptr480,
-    in_ptr481, in_ptr482, in_ptr483, in_ptr484, in_ptr485, in_ptr486,
-    in_ptr487, in_ptr488, in_ptr489, in_ptr490, in_ptr491, in_ptr492,
-    in_ptr493, in_ptr494, in_ptr495, in_ptr496, in_ptr497, in_ptr498,
-    in_ptr499, in_ptr500, in_ptr501, in_ptr502, in_ptr503, in_ptr504,
-    in_ptr505, in_ptr506, in_ptr507, in_ptr508, in_ptr509, in_ptr510,
-    in_ptr511, in_ptr512, in_ptr513, in_ptr514, in_ptr515, in_ptr516,
-    in_ptr517, in_ptr518, in_ptr519, in_ptr520, in_ptr521, in_ptr522,
-    in_ptr523, in_ptr524, in_ptr525, in_ptr526, in_ptr527, in_ptr528,
-    in_ptr529, in_ptr530, in_ptr531, in_ptr532, in_ptr533, in_ptr534,
-    in_ptr535, in_ptr536, in_ptr537, in_ptr538, in_ptr539, in_ptr540,
-    in_ptr541, in_ptr542, in_ptr543, in_ptr544, in_ptr545, in_ptr546,
-    in_ptr547, in_ptr548, in_ptr549, in_ptr550, in_ptr551, in_ptr552,
-    in_ptr553, in_ptr554, in_ptr555, in_ptr556, in_ptr557, in_ptr558,
-    in_ptr559, in_ptr560, in_ptr561, in_ptr562, in_ptr563, in_ptr564,
-    in_ptr565, in_ptr566, in_ptr567, in_ptr568, in_ptr569, in_ptr570,
-    in_ptr571, in_ptr572, in_ptr573, in_ptr574, in_ptr575, in_ptr576,
-    in_ptr577, in_ptr578, in_ptr579, in_ptr580, in_ptr581, in_ptr582,
-    in_ptr583, in_ptr584, in_ptr585, in_ptr586, in_ptr587, in_ptr588,
-    in_ptr589, in_ptr590, in_ptr591, in_ptr592, in_ptr593, in_ptr594,
-    in_ptr595, in_ptr596, in_ptr597, in_ptr598, in_ptr599, in_ptr600,
-    in_ptr601, in_ptr602, in_ptr603, in_ptr604, in_ptr605, in_ptr606,
-    in_ptr607, in_ptr608, in_ptr609, in_ptr610, in_ptr611, in_ptr612,
-    in_ptr613, in_ptr614, in_ptr615, in_ptr616, in_ptr617, in_ptr618,
-    in_ptr619, in_ptr620, in_ptr621, in_ptr622, in_ptr623, in_ptr624,
-    in_ptr625, in_ptr626, in_ptr627, in_ptr628, in_ptr629, in_ptr630,
-    in_ptr631, in_ptr632, in_ptr633, in_ptr634, in_ptr635, in_ptr636,
-    in_ptr637, in_ptr638, in_ptr639, in_ptr640, in_ptr641, in_ptr642,
-    in_ptr643, in_ptr644, in_ptr645, in_ptr646, in_ptr647, in_ptr648,
-    in_ptr649, in_ptr650, in_ptr651, in_ptr652, in_ptr653, in_ptr654,
-    in_ptr655, in_ptr656, in_ptr657, in_ptr658, in_ptr659, in_ptr660,
-    in_ptr661, in_ptr662, in_ptr663, in_ptr664, in_ptr665, in_ptr666,
-    in_ptr667, in_ptr668, in_ptr669, in_ptr670, in_ptr671, in_ptr672,
-    in_ptr673, in_ptr674, in_ptr675, in_ptr676, in_ptr677, in_ptr678,
-    in_ptr679, in_ptr680, in_ptr681, in_ptr682, in_ptr683, in_ptr684,
-    in_ptr685, in_ptr686, in_ptr687, in_ptr688, in_ptr689, in_ptr690,
-    in_ptr691, in_ptr692, in_ptr693, in_ptr694, in_ptr695, in_ptr696,
-    in_ptr697, in_ptr698, in_ptr699, in_ptr700, in_ptr701, in_ptr702,
-    in_ptr703, in_ptr704, in_ptr705, in_ptr706, in_ptr707, in_ptr708,
-    in_ptr709, in_ptr710, in_ptr711, in_ptr712, in_ptr713, in_ptr714,
-    in_ptr715, in_ptr716, in_ptr717, in_ptr718, in_ptr719, in_ptr720,
-    in_ptr721, in_ptr722, in_ptr723, in_ptr724, in_ptr725, in_ptr726,
-    in_ptr727, in_ptr728, in_ptr729, in_ptr730, in_ptr731, in_ptr732,
-    in_ptr733, in_ptr734, in_ptr735, in_ptr736, in_ptr737, in_ptr738,
-    in_ptr739, in_ptr740, in_ptr741, in_ptr742, in_ptr743, in_ptr744,
-    in_ptr745, in_ptr746, in_ptr747, in_ptr748, in_ptr749, in_ptr750,
-    in_ptr751, in_ptr752, in_ptr753, in_ptr754, in_ptr755, in_ptr756,
-    in_ptr757, in_ptr758, in_ptr759, in_ptr760, in_ptr761, in_ptr762,
-    in_ptr763, in_ptr764, in_ptr765, in_ptr766, in_ptr767, in_ptr768,
-    in_ptr769, in_ptr770, in_ptr771, in_ptr772, in_ptr773, in_ptr774,
-    in_ptr775, in_ptr776, in_ptr777, in_ptr778, in_ptr779, in_ptr780,
-    in_ptr781, in_ptr782, in_ptr783, in_ptr784, in_ptr785, in_ptr786,
-    in_ptr787, in_ptr788, in_ptr789, in_ptr790, in_ptr791, in_ptr792,
-    in_ptr793, in_ptr794, in_ptr795, in_ptr796, in_ptr797, in_ptr798,
-    in_ptr799, in_ptr800, in_ptr801, in_ptr802, in_ptr803, in_ptr804,
-    in_ptr805, in_ptr806, in_ptr807, in_ptr808, in_ptr809, in_ptr810,
-    in_ptr811, in_ptr812, in_ptr813, in_ptr814, in_ptr815, in_ptr816,
-    in_ptr817, in_ptr818, in_ptr819, in_ptr820, in_ptr821, in_ptr822,
-    in_ptr823, in_ptr824, in_ptr825, in_ptr826, in_ptr827, in_ptr828,
-    in_ptr829, in_ptr830, in_ptr831, in_ptr832, in_ptr833, in_ptr834,
-    in_ptr835, in_ptr836, in_ptr837, in_ptr838, in_ptr839, in_ptr840,
-    in_ptr841, in_ptr842, in_ptr843, in_ptr844, in_ptr845, in_ptr846,
-    in_ptr847, in_ptr848, in_ptr849, in_ptr850, in_ptr851, in_ptr852,
-    in_ptr853, in_ptr854, in_ptr855, in_ptr856, in_ptr857, in_ptr858,
-    in_ptr859, in_ptr860, in_ptr861, in_ptr862, in_ptr863, in_ptr864,
-    in_ptr865, in_ptr866, in_ptr867, in_ptr868, in_ptr869, in_ptr870,
-    in_ptr871, in_ptr872, in_ptr873, in_ptr874, in_ptr875, in_ptr876,
-    in_ptr877, in_ptr878, in_ptr879, in_ptr880, in_ptr881, in_ptr882,
-    in_ptr883, in_ptr884, in_ptr885, in_ptr886, in_ptr887, in_ptr888,
-    in_ptr889, in_ptr890, in_ptr891, in_ptr892, in_ptr893, in_ptr894,
-    in_ptr895, in_ptr896, in_ptr897, in_ptr898, in_ptr899, in_ptr900,
-    in_ptr901, in_ptr902, in_ptr903, in_ptr904, in_ptr905, in_ptr906,
-    in_ptr907, in_ptr908, in_ptr909, in_ptr910, in_ptr911, in_ptr912,
-    in_ptr913, in_ptr914, in_ptr915, in_ptr916, in_ptr917, in_ptr918,
-    in_ptr919, in_ptr920, in_ptr921, in_ptr922, in_ptr923, in_ptr924,
-    in_ptr925, in_ptr926, in_ptr927, in_ptr928, in_ptr929, in_ptr930,
-    in_ptr931, in_ptr932, in_ptr933, in_ptr934, in_ptr935, in_ptr936,
-    in_ptr937, in_ptr938, in_ptr939, in_ptr940, in_ptr941, in_ptr942,
-    in_ptr943, in_ptr944, in_ptr945, in_ptr946, in_ptr947, in_ptr948,
-    in_ptr949, in_ptr950, in_ptr951, in_ptr952, in_ptr953, in_ptr954,
-    in_ptr955, in_ptr956, in_ptr957, in_ptr958, in_ptr959, in_ptr960,
-    in_ptr961, in_ptr962, in_ptr963, in_ptr964, in_ptr965, in_ptr966,
-    in_ptr967, in_ptr968, in_ptr969, in_ptr970, in_ptr971, in_ptr972,
-    in_ptr973, in_ptr974, in_ptr975, in_ptr976, in_ptr977, in_ptr978,
-    in_ptr979, in_ptr980, in_ptr981, in_ptr982, in_ptr983, in_ptr984,
-    in_ptr985, in_ptr986, in_ptr987, in_ptr988, in_ptr989, in_ptr990,
-    in_ptr991, in_ptr992, in_ptr993, in_ptr994, in_ptr995, in_ptr996,
-    in_ptr997, in_ptr998, in_ptr999, in_ptr1000, in_ptr1001, in_ptr1002,
-    in_ptr1003, in_ptr1004, in_ptr1005, in_ptr1006, in_ptr1007, in_ptr1008,
-    in_ptr1009, in_ptr1010, in_ptr1011, in_ptr1012, in_ptr1013, in_ptr1014,
-    in_ptr1015, in_ptr1016, in_ptr1017, in_ptr1018, in_ptr1019, in_ptr1020,
-    in_ptr1021, in_ptr1022, in_ptr1023, in_ptr1024, in_ptr1025, in_ptr1026,
-    in_ptr1027, in_ptr1028, in_ptr1029, in_ptr1030, in_ptr1031, in_ptr1032,
-    in_ptr1033, in_ptr1034, in_ptr1035, in_ptr1036, in_ptr1037, in_ptr1038,
-    in_ptr1039, in_ptr1040, in_ptr1041, in_ptr1042, in_ptr1043, in_ptr1044,
-    in_ptr1045, in_ptr1046, in_ptr1047, in_ptr1048, in_ptr1049, in_ptr1050,
-    in_ptr1051, in_ptr1052, in_ptr1053, in_ptr1054, in_ptr1055, in_ptr1056,
-    in_ptr1057, in_ptr1058, in_ptr1059, in_ptr1060, in_ptr1061, in_ptr1062,
-    in_ptr1063, in_ptr1064, in_ptr1065, in_ptr1066, in_ptr1067, in_ptr1068,
-    in_ptr1069, in_ptr1070, in_ptr1071, in_ptr1072, in_ptr1073, in_ptr1074,
-    in_ptr1075, in_ptr1076, in_ptr1077, in_ptr1078, in_ptr1079, in_ptr1080,
-    in_ptr1081, in_ptr1082, in_ptr1083, in_ptr1084, in_ptr1085, in_ptr1086,
-    in_ptr1087, in_ptr1088, in_ptr1089, in_ptr1090, in_ptr1091, in_ptr1092,
-    in_ptr1093, in_ptr1094, in_ptr1095, in_ptr1096, in_ptr1097, in_ptr1098,
-    in_ptr1099, in_ptr1100, in_ptr1101, in_ptr1102, in_ptr1103, in_ptr1104,
-    in_ptr1105, in_ptr1106, in_ptr1107, in_ptr1108, in_ptr1109, in_ptr1110,
-    in_ptr1111, in_ptr1112, in_ptr1113, in_ptr1114, in_ptr1115, in_ptr1116,
-    in_ptr1117, in_ptr1118, in_ptr1119, in_ptr1120, in_ptr1121, in_ptr1122,
-    in_ptr1123, in_ptr1124, in_ptr1125, in_ptr1126, in_ptr1127, in_ptr1128,
-    in_ptr1129, in_ptr1130, in_ptr1131, in_ptr1132, in_ptr1133, in_ptr1134,
-    in_ptr1135, in_ptr1136, in_ptr1137, in_ptr1138, in_ptr1139, in_ptr1140,
-    in_ptr1141, in_ptr1142, in_ptr1143, in_ptr1144, in_ptr1145, in_ptr1146,
-    in_ptr1147, in_ptr1148, in_ptr1149, in_ptr1150, in_ptr1151, in_ptr1152,
-    in_ptr1153, in_ptr1154, in_ptr1155, in_ptr1156, in_ptr1157, in_ptr1158,
-    in_ptr1159, in_ptr1160, in_ptr1161, in_ptr1162, in_ptr1163, in_ptr1164,
-    in_ptr1165, in_ptr1166, in_ptr1167, in_ptr1168, in_ptr1169, in_ptr1170,
-    in_ptr1171, in_ptr1172, in_ptr1173, in_ptr1174, in_ptr1175, in_ptr1176,
-    in_ptr1177, in_ptr1178, in_ptr1179, in_ptr1180, in_ptr1181, in_ptr1182,
-    in_ptr1183, in_ptr1184, in_ptr1185, in_ptr1186, in_ptr1187, in_ptr1188,
-    in_ptr1189, in_ptr1190, in_ptr1191, in_ptr1192, in_ptr1193, in_ptr1194,
-    in_ptr1195, in_ptr1196, in_ptr1197, in_ptr1198, in_ptr1199, in_ptr1200,
-    in_ptr1201, in_ptr1202, in_ptr1203, in_ptr1204, in_ptr1205, in_ptr1206,
-    in_ptr1207, in_ptr1208, in_ptr1209, in_ptr1210, in_ptr1211, in_ptr1212,
-    in_ptr1213, in_ptr1214, in_ptr1215, in_ptr1216, in_ptr1217, in_ptr1218,
-    in_ptr1219, in_ptr1220, in_ptr1221, in_ptr1222, in_ptr1223, in_ptr1224,
-    in_ptr1225, in_ptr1226, in_ptr1227, in_ptr1228, in_ptr1229, in_ptr1230,
-    in_ptr1231, in_ptr1232, in_ptr1233, in_ptr1234, in_ptr1235, in_ptr1236,
-    in_ptr1237, in_ptr1238, in_ptr1239, in_ptr1240, in_ptr1241, in_ptr1242,
-    in_ptr1243, in_ptr1244, in_ptr1245, in_ptr1246, in_ptr1247, in_ptr1248,
-    in_ptr1249, in_ptr1250, in_ptr1251, in_ptr1252, in_ptr1253, in_ptr1254,
-    in_ptr1255, in_ptr1256, in_ptr1257, in_ptr1258, in_ptr1259, in_ptr1260,
-    in_ptr
+    in_ptr319, in_ptr320, in_ptr321,

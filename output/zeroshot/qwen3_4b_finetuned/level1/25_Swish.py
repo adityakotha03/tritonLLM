@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
@@ -11,7 +10,7 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 @triton.jit
 def triton_poi_fused_mul_sigmoid_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
     constexpr):
-    xnumel = 157286400
+    xnumel = 161440656
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
@@ -30,8 +29,8 @@ def call(args):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_mul_sigmoid_0[grid(157286400)](arg0_1, buf0, 
-            157286400, XBLOCK=1024, num_warps=4, num_stages=1)
+        triton_poi_fused_mul_sigmoid_0[grid(161440656)](arg0_1, buf0, 
+            161440656, XBLOCK=512, num_warps=8, num_stages=1)
         del arg0_1
     return buf0,
 

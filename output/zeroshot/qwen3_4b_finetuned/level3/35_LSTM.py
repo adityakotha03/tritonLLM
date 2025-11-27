@@ -1,754 +1,568 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
 from torch._inductor.runtime.triton_helpers import libdevice
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 15360
+def triton_poi_fused__lstm_cell_forward_0(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x0 = xindex % 6
-    x1 = xindex // 6 % 256
-    x2 = xindex // 1536
-    x3 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 6 * x1 + 384 * x2), xmask, eviction_policy
-        ='evict_last')
-    tmp1 = tl.load(in_ptr1 + (x0 + 6 * x1 + 384 * x2), xmask, eviction_policy
-        ='evict_last')
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x3, tmp2, xmask)
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_1(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_2(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_2(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_3(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_3(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_4(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_4(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_5(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_5(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_6(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_6(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_7(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_7(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_8(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_8(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_9(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_9(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_10(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_10(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_11(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_11(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_12(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_12(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_13(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_13(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_14(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_14(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_15(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_15(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
+    x0 = xindex % 6
+    x1 = xindex // 6
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x1, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr2 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr3 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr4 + x1, xmask, eviction_policy='evict_last')
+    tmp14 = tl.load(in_ptr5 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp4 = tmp2 + tmp3
+    tmp5 = libdevice.tanh(tmp4)
+    tmp7 = tmp5 + tmp6
+    tmp8 = tmp7 * tmp7
+    tmp9 = tmp3 * tmp3
+    tmp11 = tmp8 - tmp9
+    tmp12 = 1.0
+    tmp13 = tmp11 * tmp12
+    tmp15 = tmp10 + tmp14
+    tmp16 = tmp5 + tmp15
+    tl.store(out_ptr0 + x2, tmp7, xmask)
+    tl.store(out_ptr1 + x2, tmp13, xmask)
+    tl.store(out_ptr2 + x2, tmp16, xmask)
+    tl.store(out_ptr3 + x2, tmp13, xmask)
 
 
 @triton.jit
-def triton_poi_fused_clone_16(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
+def triton_poi_fused__lstm_cell_forward_16(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, in_ptr5, out_ptr0, out_ptr1, out_ptr2, out_ptr3,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 3840
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_17(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_18(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_19(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_20(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_21(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_22(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_23(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_24(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_25(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_26(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_27(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_28(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_29(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_30(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_31(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_32(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_33(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_34(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_35(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_36(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_37(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_38(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_39(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_40(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_41(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_42(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_43(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_44(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_45(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_46(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_47(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_48(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_49(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_50(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_51(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_52(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_53(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_54(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_55(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_56(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_57(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_58(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_59(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_60(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def triton_poi_fused_clone_61(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 2048
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tl.store(out_ptr0 + x0, tmp0, xmask)
-
-
-@triton.jit
-def
+    x0 = xindex % 6
+    x1 = xindex //

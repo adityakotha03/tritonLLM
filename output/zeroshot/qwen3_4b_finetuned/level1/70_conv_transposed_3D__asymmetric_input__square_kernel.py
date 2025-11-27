@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
@@ -10,13 +10,13 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 @triton.jit
 def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
-    constexpr):
-    xnumel = 1296000
+    .constexpr):
+    xnumel = 18662400
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
     x3 = xindex
-    x1 = xindex // 9600 % 24
+    x1 = xindex // 671088 % 24
     tmp0 = tl.load(in_out_ptr0 + x3, xmask)
     tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
@@ -26,20 +26,23 @@ def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
 def call(args):
     primals_1, primals_2, primals_3 = args
     args.clear()
-    assert_size_stride(primals_1, (24, 48, 3, 3, 3), (1296, 27, 9, 3, 1),
-        (0, 1296, 1317, 1320, 1323))
-    assert_size_stride(primals_2, (8,), (1,))
-    assert_size_stride(primals_3, (8, 48, 96, 96, 96), (393216, 8192, 8192,
-        8192, 8192), (0, 8192, 131072, 1327104, 1296000))
+    assert_size_stride(primals_1, (24, 48, 3, 3, 3), (1296, 27, 9, 3, 1))
+    assert_size_stride(primals_2, (24,), (1,))
+    assert_size_stride(primals_3, (8, 48, 96, 96, 96), (442368, 96, 96, 96, 
+        1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((8, 24, 96, 96, 96), (1296000, 1320, 1320,
-            1320, 1), torch.float32)
+        buf0 = extern_kernels.convolution(primals_3, primals_1, stride=(1, 
+            1, 1), padding=(0, 0, 0), dilation=(1, 1, 1), transposed=True,
+            output_padding=(0, 0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (8, 24, 96, 96, 96), (221184, 96, 96, 96, 1))
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(1296000)](buf0, primals_1,
-            1296000, XBLOCK=1024, num_warps=4, num_stages=1)
-        del primals_1
-    return buf0, primals_2, primals_3
+        triton_poi_fused_convolution_0[grid(18662400)](buf1, primals_2, 
+            18662400, XBLOCK=1024, num_warps=4, num_stages=1)
+        del primals_2
+    return buf1, primals_1, primals_3
 
 
 class ModelNew(nn.Module):
