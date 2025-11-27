@@ -20,8 +20,8 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 # Configuration
 BASE_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 BATCH_SIZE = 128
-# LEARNING_RATE = 1e-4
-LEARNING_RATE = hyperparam_utils.get_lr(BASE_MODEL, is_lora=True)
+LEARNING_RATE = 1e-4
+# LEARNING_RATE = hyperparam_utils.get_lr(BASE_MODEL, is_lora=True)
 LORA_RANK = 32
 SAVE_EVERY = 50
 MAX_LENGTH = 16384
