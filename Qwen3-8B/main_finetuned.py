@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BASE_MODEL = "Qwen/Qwen3-8B"
-MODEL_PATH = "tinker://8020e885-8536-5303-abea-5d723fb112a7:train:0/sampler_weights/final"
+MODEL_PATH = "tinker://72fb9baa-da81-50c7-94ba-9f16b7218cff:train:0/sampler_weights/final"
 
 
 def get_all_kernelbench_problems():
@@ -45,6 +45,9 @@ def clean_reasoning_output(generated_text):
     code_blocks = re.findall(r'```(?:python)?\s*\n(.*?)```', text, re.DOTALL)
     if code_blocks:
         return code_blocks[0].strip()
+    if '<|im_end|>' in text:
+        text = text.split('<|im_end|>')[0].strip()
+    
     return text.strip()
 
 

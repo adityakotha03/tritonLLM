@@ -1,432 +1,61 @@
-Okay, I need to replace the original PyTorch model with a version that uses Triton kernels for certain operations. The original model does a 3D transposed convolution, adds a bias, adds the original input, multiplies by the original input, adds again, and returns the result. Let me break down each step and see where Triton can be applied.
-
-First, the 3D transposed convolution is a heavy operation. The current PyTorch ConvTranspose3d is already optimized, but maybe I can fuse some parts after it. The bias addition is a simple element-wise addition, which could be a candidate for a Triton kernel. The subsequent additions and multiplications are also element-wise, so those could be fused into a single kernel.
-
-The main goal is to reduce the number of memory transfers and keep the data on the GPU as much as possible. The original model clones the input tensor after the convolution, which creates an extra copy. If I can perform the bias addition, the first residual addition, the multiplication, and the second residual addition all in one kernel, that would eliminate the need for the clone and reduce the memory traffic.
-
-Let me outline the steps:
-
-1. **Convolution**: Keep the original ConvTranspose3d as is because it's already highly optimized. The output of this is a tensor of shape (batch, out_channels, depth, height, width).
-
-2. **Bias Addition**: After the convolution, the bias is added element-wise. The bias has shape (out_channels, 1, 1, 1). I need a Triton kernel that adds the bias to each element of the convolution output. The kernel will take the convolution output and the bias, then compute the sum.
-
-3. **First Residual Add**: The original input (before the convolution) is added to the result of the bias addition. This is another element-wise addition. The original input is a tensor of shape (batch, in_channels, depth, height, width). The Triton kernel here will add the original input to the current tensor, which now has the bias.
-
-4. **Multiplication by Original Input**: The current tensor is multiplied by the original input. This is a pointwise multiplication, which can be done in the same kernel as the previous addition if we can handle both operations in sequence.
-
-5. **Second Residual Add**: The result of the multiplication is added back to the original input. Again, element-wise addition.
-
-6. **Final Result**: The tensor after the second addition is the final output.
-
-So the plan is to replace the three separate element-wise additions and the multiplication with a single Triton kernel that performs all these operations in sequence, thereby eliminating the need to clone the original input and reducing the number of kernel launches.
-
-Now, I need to implement each of these fused operations with Triton. Let's start with the bias addition. The kernel will load the convolution output and the bias, add them, and store the result. The bias is a 4D tensor, so each element of the convolution output needs to be added to the corresponding bias element. Since the bias is broadcast across the batch, depth, height, and width dimensions, the kernel can treat the bias as a scalar per element (because the other dimensions are all 1). The kernel will use a block size that covers the entire tensor, loading each element, adding the bias, and storing the result.
-
-Next, the first residual add. The original input is of shape (batch, in_channels, depth, height, width). The bias-added tensor is of the same shape. The kernel will load both tensors, add them, and store the result. However, the original input is a separate tensor that must be kept in memory. The kernel will read the original input and the current tensor, perform the addition, and write back to the current tensor. This kernel can be the same as the bias addition kernel, just with a different offset for the original input.
-
-Then comes the multiplication. The current tensor (after the first addition) is multiplied by the original input. The kernel will load the current tensor and the original input, multiply them, and store the result. Again, the same block size can be used, with the bias and original input stored in separate pointers.
-
-Finally, the second residual add adds the original input to the result of the multiplication. This is another element-wise addition, so the kernel can be reused, loading the multiplication result and the original input, adding them, and storing.
-
-Each of these kernels will be launched with a grid that covers the entire tensor. The grid size is computed as the ceiling of the total element count divided by the block size. The block size is chosen to be a power of two, such as 128, which fits well with the hardware's warp size and shared memory.
-
-I also need to handle the tensor shapes correctly. The original model uses a batch size of 16, in_channels of 32, out_channels of 64, and spatial dimensions of 16,32,32. The total number of elements after the convolution is 16 * 64 * 16 * 32 * 32 = 5242880 elements. Each kernel will process this many elements, so the block size of 128 results in 5242880 / 128 = 40960 blocks, which is acceptable for the A100's parallelism.
-
-Masking is essential to handle the exact element count, especially when the total number isn't a multiple of the block size. The mask ensures that the last partial block doesn't read out-of-bounds memory.
-
-Data types are all fp32, which is supported by the Tensor Cores on the A100. Using fp32 for all loads and stores is safe and leverages the hardware's capabilities.
-
-Shared memory isn't explicitly needed here because each thread processes a contiguous block of data, and the loads are coalesced. The kernel relies on the implicit shared memory management of Triton for block-level operations.
-
-Testing the kernels involves verifying that each step produces the same result as the original PyTorch model. The final modelNew class replaces the original forward method with calls to the three Triton kernels, each handling a fused operation.
-
-In summary, the key steps are: fuse the bias addition, first residual add, multiplication, and second residual add into three Triton kernels, each launched with a grid covering the entire tensor, using a block size of 128, proper masking, and contiguous memory access to maximize coalescing and minimize memory traffic.
-</think>
-
-```python
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_add_mul_sub_0(in_out_ptr0, in_ptr0, in_ptr1, xnumel,
-    rnumel, XBLOCK: tl.constexpr):
-    RBLOCK: tl.constexpr = 1
+def triton_poi_fused_add_mul_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 524288
     xoffset = tl.program_id(0) * XBLOCK
-    xoffset + tl.arange(0, XBLOCK)[:, None]
-    tl.full([XBLOCK, RBLOCK], True, tl.int1)
-    rindex = tl.arange(0, RBLOCK)[None, :]
-    tl.full([XBLOCK, RBLOCK], xoffset, tl.int64)
-    tl.full([XBLOCK, RBLOCK], rindex, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 0, tl.int64)
-    tl.full([XBLOCK, RBLOCK], 1, tl.int64)
-    tl.full([XBLOCK, RBLOCK],
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tmp3 = tmp2 + tmp0
+    tmp4 = tmp3 * tmp0
+    tmp5 = tmp4 + tmp0
+    tl.store(out_ptr0 + x2, tmp5, xmask)
+
+
+def call(args):
+    primals_1, primals_2 = args
+    args.clear()
+    assert_size_stride(primals_1, (16, 64, 16, 32, 32), (524288, 8192, 512, 
+        16, 1))
+    assert_size_stride(primals_2, (64, 1, 1, 1), (1, 1, 1, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((16, 64, 16, 32, 32), (524288, 8192, 512, 
+            16, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_add_mul_0[grid(524288)](primals_1, primals_2, buf0,
+            524288, XBLOCK=256, num_warps=4, num_stages=1)
+        del primals_1
+        del primals_2
+    return buf0,
+
+
+class ModelNew(nn.Module):
+    """
+    Model that performs a 3D transposed convolution, followed by a sum, 
+    a residual add, a multiplication, and another residual add.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias_shape):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, input_0):
+        primals_2 = self.bias
+        primals_1 = input_0
+        output = call([primals_1, primals_2])
+        return output[0]

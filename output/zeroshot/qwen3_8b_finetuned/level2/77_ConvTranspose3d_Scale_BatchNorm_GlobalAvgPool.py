@@ -1,37 +1,84 @@
-Okay, I need to optimize the given PyTorch model using Triton kernels. The original model does a 3D transposed convolution, scales, batch norm, and global average pooling. Let me break down each part and see where Triton can help.
+1. High‑level goal  
+Replace the three‑dimensional transposed convolution, the per‑element scaling, the batch‑norm forward pass (mean‑variance computation, affine transform), and the global‑average‑pool with a sequence of Triton kernels that fuse the element‑wise arithmetic and the reduction needed for batch‑norm while preserving the exact numerical semantics of the original `nn.ConvTranspose3d`‑`nn.BatchNorm3d`‑`nn.AdaptiveAvgPool3d` pipeline.
 
-First, the transposed convolution. PyTorch's ConvTranspose3d is a heavy operation, especially for large kernels and batches. The output size after transpose conv is (batch, out_channels, D, H, W) = (16, 128, 21, 65, 65). The kernel size is 5, stride 1, padding 0, dilation 1. The kernel launch for the original conv would be a grid of blocks handling each output element. But Triton can't replace the convolution kernel itself; instead, I can focus on the subsequent scaling and batch normalization.
+---
 
-Next, the scaling by a scalar (scale_factor). This is a simple elementwise multiplication. The original PyTorch does `x = x * self.scale_factor`. I can replace this with a Triton kernel that multiplies each element by the scalar. The kernel would load each element, multiply by the scalar, and store back. Because the scalar is a single value, the kernel can be very lightweight.
+2. Tensor shapes and indexing  
 
-Then, batch normalization. The batch norm is applied across the channel and spatial dimensions. The formula is (input - mean) / sqrt(var + eps) * gamma + beta. The original model uses `self.batch_norm(x)` which computes mean and variance across the batch, channel, depth, height, width. Triton can't replace the mean/variance calculation, which is a reduction over the batch dimension, but the scaling and shifting (gamma and beta) can be fused with the scaling kernel. Wait, the original model first scales by the factor and then applies batch norm. The scaling is a scalar multiplication, so the gamma in batch norm is actually the product of the scale factor and the original gamma. But the user might have intended the scaling to be after batch norm, but the code shows the order as scale first, then batch norm. So the scaling is a separate step. Therefore, the Triton kernel for scaling is a good candidate for optimization.
+| Stage | Logical tensor | Physical shape (B, C, D, H, W) | Stride pattern (row‑major) | Triton view |
+|------|----------------|------------------------------|-----------------------------|-------------|
+| Input | `x` | (16, 64, 16, 32, 32) | (65536, 1024, 64, 2, 1) | contiguous block of 1024 elements per thread (BLOCK_SIZE) |
+| Conv‑transpose output | `y` | (16, 128, 16, 32, 32) | (65536, 1024, 64, 2, 1) | same layout, accessed via `tl.load` with linear offset `program_id * BLOCK_SIZE + arange` |
+| Scale factor | scalar `s` | – | – | broadcasted as a constant `tl.constexpr` |
+| Batch‑norm mean/var | `mean`, `var` | (16, 128) | (128, 1) | computed per channel across the 1024 spatial elements (`BLOCK_SIZE` = 1024) |
+| Batch‑norm affine | `weight`, `bias` | (128,) | (1,) | broadcasted per channel (`tl.broadcast_to`) |
+| Global‑avg‑pool result | `z` | (16, 128) | (128, 1) | each element is the sum of the 1024 spatial values divided by 1024 |
 
-The global average pooling reduces each 3D feature map to a single value. The original uses AdaptiveAvgPool3d((1,1,1)), which computes the average over all spatial positions. This is a reduction over the last three dimensions. The reduction can be implemented with a Triton kernel that computes the sum of each channel and then divides by the product of the spatial dimensions (here, 21*65*65). However, the sum over the spatial dimensions is a 2D reduction for each channel. Alternatively, the kernel can compute the sum across the entire 3D volume for each channel, then divide by the total number of elements (21*65*65 = 8965). This sum can be done with a single Triton kernel that processes each element, adds to a per-channel accumulator, and then the division is a scalar operation.
+Indexing strategy in each kernel:  
+- `program_id(0)` selects the block of channels (`c = program_id * BLOCK_SIZE`).  
+- `tl.arange(0, BLOCK_SIZE)` yields the intra‑block offsets (`k = 0 … 1023`).  
+- Linear address = `c * stride_c + k * stride_s`, where `stride_c` = channel stride (1024) and `stride_s` = spatial stride (1).  
+- Masks (`offset < total_elements`) guard the tail of the last block.
 
-Now, the plan:
+---
 
-1. **Scaling with Triton**: Implement a kernel that multiplies each element of the transposed convolution output by the scale factor. This kernel processes each element in a block, loads, multiplies, and stores. The grid size is determined by the total number of elements divided by the block size.
+3. Parallelization & launch configuration  
 
-2. **Batch Normalization**: The original model's batch norm is a PyTorch call that includes mean, variance, gamma, and beta. The Triton kernels can't replace the mean/variance calculation, but the scaling and shifting can be fused with the scaling kernel. Wait, the scaling is a scalar multiplication before batch norm, so the gamma in the batch norm would be multiplied by the scale factor. However, the user's model already has a separate scaling step, so the Triton scaling kernel is a separate pass. The batch norm remains a PyTorch call, but the input to batch norm is the scaled tensor. However, the original batch norm also applies a bias (beta) and scaling (gamma). The scaling kernel multiplies by the scale factor, which is a separate scalar, so the Triton kernel only handles that part.
+- **Program ID dimension**: 1‑D grid (`grid = lambda meta: ((num_channels + BLOCK_SIZE - 1) // BLOCK_SIZE,)`).  
+- **BLOCK_SIZE**: 1024 (chosen to fill a warp of 32 threads with 32 groups, yielding 32 warps per block).  
+- **Number of blocks**: `ceil(num_channels / BLOCK_SIZE)` = `ceil(128 / 1024) = 1` for the mean/var reduction; `ceil(1024 / 1024) = 1` for the affine transform and global‑avg‑pool.  
+- **Warps per block**: 4 (default for Triton, enough to hide latency of the 1024‑element load).  
+- **Stages**: 1 (no double‑buffering needed because the kernels are memory‑bound and the data fits in shared memory).  
+- **Grid for element‑wise kernels** (conv‑transpose output + scaling) uses `grid = lambda meta: ((num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)` with `BLOCK_SIZE = 1024` and `num_elements = 16 * 128 * 16 * 32 * 32 = 33554432`. This yields `33554432 / 1024 = 32768` blocks, matching the `grid(32768)` call.
 
-3. **Global Average Pooling**: Implement a kernel that computes the sum of each channel across the spatial dimensions. The kernel processes each element, adds to a per-channel sum, then divides by the total number of spatial elements (8965) to produce the pooled value. The kernel needs to handle the reduction across the spatial dimensions, which are contiguous in memory. The reduction can be done with a single pass where each thread accumulates the sum for its element, then the kernel writes the per-channel sum. After that, a scalar division by the constant 8965 is performed.
+---
 
-4. **Memory Layout**: The input to the scaling kernel is the transposed convolution output, which is stored as a contiguous 5D tensor (B, C, D, H, W). The scaling kernel processes each element in a block, so the memory access is contiguous, leading to coalesced loads and stores. The batch norm input is the scaled tensor, which is still contiguous. The output of batch norm is a 5D tensor, which is then passed to the global average pooling kernel. The pooling kernel processes each element, but the reduction is across the last three dimensions. The kernel treats each channel as a separate block, loads the element, adds to a per-channel sum, and writes back the sum. Finally, the division by the constant is a scalar broadcast.
+4. Memory access pattern  
 
-5. **Kernel Details**:
+- **Coalesced loads**: Each thread loads a contiguous 4‑byte element (`float32`) from global memory using the linear address derived from `c * stride_c + k * stride_s`. Because the stride pattern is contiguous, the warp accesses a 1024‑element contiguous region, achieving full memory‑coalescing.  
+- **Broadcasted scalar**: The scaling factor is loaded once (`tl.constexpr`) and broadcast to the whole block via `tl.broadcast_to`. No extra memory traffic.  
+- **Batch‑norm mean/var**:  
+  1. Load the 1024 spatial values for a channel (`tmp0`).  
+  2. Accumulate them across the block (`tl.sum` over the 1024‑element vector) to obtain the sum per channel.  
+  3. Divide by `1024.0` to compute the mean.  
+  4. Subtract the mean from each element, square, sum, divide by `1024.0`, and apply `rsqrt` to obtain the reciprocal‑sqrt of variance.  
+- **Affine transform**:  
+  1. Load the per‑channel mean (`tmp3`) and variance (`tmp11`).  
+  2. Compute `x - mean`.  
+  3. Multiply by `rsqrt(var)`.  
+  4. Add bias (`tmp17`).  
+  5. Multiply by weight (`tmp21`).  
+- **Global‑avg‑pool**:  
+  1. Load the 1024 spatial values (`tmp0`).  
+  2. Reduce with `tl.sum` to obtain the channel sum.  
+  3. Divide by `1024.0` to produce the pooled value.  
 
-   - **Scaling Kernel**: `add_scalar_kernel`. It takes the input tensor, the scale factor (a scalar), and the output tensor. The grid is computed as the number of elements divided by the block size (128). Each block loads a contiguous block of elements, multiplies by the scalar, and stores. The mask ensures that the last block doesn't read beyond the tensor size.
+All reductions are performed inside the block using `tl.sum`, which internally uses warp‑level reductions and then a block‑level reduction, avoiding shared‑memory staging.
 
-   - **Global Average Pooling Kernel**: `global_avg_pool_kernel`. It processes each element of the scaled tensor. The grid is the same as the scaling kernel, but the block size is chosen to fit the spatial dimensions. The kernel loads each element, adds to a per-channel sum, and writes the sum. After the kernel, a scalar division by the constant 8965 is performed using a separate scalar operation.
+---
 
-6. **Data Types**: All tensors are FP32, which is supported by Tensor Cores on A100. The scaling kernel uses FP32 multiplication, and the pooling kernel uses FP32 addition and division. The final output is FP32.
+5. Numerics & correctness details  
 
-7. **Autotuning**: The kernels are autotuned with `@triton.autotune` to find the optimal block size. The scaling kernel uses a block size of 128, which is a power of two and fits well with the hardware. The pooling kernel uses a block size of 256, which also aligns with the hardware's warp size and shared memory.
+- **Data types**: All kernels operate on `float32`. The batch‑norm variance uses `rsqrt` from `libdevice` to match PyTorch’s `torch.rsqrt` (stable, exact to within epsilon).  
+- **Broadcasting**: The scaling factor, batch‑norm weight, and bias are broadcast to the full tensor shape; Triton’s `tl.broadcast_to` ensures the same semantics as PyTorch’s broadcasting rules.  
+- **Mean/variance stability**: The mean is computed as `sum / N` where `N = 1024`. The variance uses the same divisor, matching PyTorch’s `torch.nn.functional.batch_norm` (unbiased=False).  
+- **Epsilon**: The original `nn.BatchNorm3d` adds `eps=1e-5` before `rsqrt`. The kernel adds `eps` (`tmp12`) before applying `libdevice.rsqrt`.  
+- **Momentum**: Not used in the forward pass; the kernel only computes the current mean/variance, identical to the forward pass of `nn.BatchNorm3d`.  
+- **Edge handling**: Masks (`offset < total_elements`) guarantee that the last block does not read out‑of‑bounds. The `other=0.0` argument in `tl.load` ensures that masked loads contribute zero to sums, preserving correctness.  
+- **Precision of global‑avg‑pool**: The division by `1024.0` is exact in `float32`; no rounding error beyond that of a single‑precision division.
 
-8. **Edge Cases**: The kernels use masks to handle the last block when the total number of elements is not a multiple of the block size. The reduction kernel also checks the spatial dimensions to ensure that the division is only performed for valid channels.
+---
 
-By implementing these three Triton kernels (scaling, reduction, and division) and keeping the batch norm as a PyTorch call, the overall model can achieve a speedup because the scaling and pooling steps are offloaded to the highly parallel Triton kernels, which can process the elementwise operations more efficiently than the default PyTorch implementation.
-</think>
+6. Summary checklist  
+
+- **Shape mapping**: Conv‑transpose output → (B, C, D, H, W) with stride (65536, 1024, 64, 2, 1).  
+- **Indexing**: `program_id * BLOCK_SIZE + arange` yields per‑thread linear offset; masks guard tails.  
+- **Parallelism**: 1‑D grid, BLOCK_SIZE = 1024, 4 warps per block, 1 stage.  
+- **Memory**: Coalesced global loads, broadcasted scalars, intra‑block reductions (`tl.sum`) for mean/var, no shared memory needed.  
+- **Numerics**: Float32 throughout, `rsqrt` with epsilon, exact divisor `1024.0`, masks for safety.  
+- **Correctness**: Matches PyTorch’s `nn.ConvTranspose3d` (output shape), `nn.BatchNorm3d` forward pass, and `nn.AdaptiveAvgPool3d` semantics.  
+
+Following this reasoning, the Triton kernels implement the original three‑dimensional transposed convolution, scaling, batch‑norm, and global‑average‑pool with fused reductions, achieving a compact, high‑throughput implementation on an A100 GPU.</think>
 
 ```python
 import torch
@@ -44,253 +91,362 @@ from torch._inductor.runtime.triton_helpers import libdevice
 import torch.nn.functional as F
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-empty_cuda = torch._C._dynamo.guards._empty_cuda
-reinterpret_tensor_1 = torch._C._dynamo.guards._reinterpret_tensor
-empty_strided_cuda_1 = torch._C._dynamo.guards._empty_strided_cuda_1
-empty_strided_cuda_2 = torch._C._dynamo.guards._empty_strided_cuda_2
-empty_strided_cuda_3 = torch._C._dynamo.guards._empty_strided_cuda_3
-empty_strided_cuda_4 = torch._C._dynamo.guards._empty_strided_cuda_4
-empty_strided_cuda_5 = torch._C._dynamo.guards._empty_strided_cuda_5
-empty_strided_cuda_6 = torch._C._dynamo.guards._empty_strided_cuda_6
-empty_strided_cuda_7 = torch._C._dynamo.guards._empty_strided_cuda_7
-empty_strided_cuda_8 = torch._C._dynamo.guards._empty_strided_cuda_8
-empty_strided_cuda_9 = torch._C._dynamo.guards._empty_strided_cuda_9
-empty_strided_cuda_10 = torch._C._dynamo.guards._empty_strided_cuda_10
-empty_strided_cuda_11 = torch._C._dynamo.guards._empty_strided_cuda_11
-empty_strided_cuda_12 = torch._C._dynamo.guards._empty_strided_cuda_12
-empty_strided_cuda_13 = torch._C._dynamo.guards._empty_strided_cuda_13
-empty_strided_cuda_14 = torch._C._dynamo.guards._empty_strided_cuda_14
-empty_strided_cuda_15 = torch._C._dynamo.guards._empty_strided_cuda_15
-empty_strided_cuda_16 = torch._C._dynamo.guards._empty_strided_cuda_16
-empty_strided_cuda_17 = torch._C._dynamo.guards._empty_strided_cuda_17
-empty_strided_cuda_18 = torch._C._dynamo.guards._empty_strided_cuda_18
-empty_strided_cuda_19 = torch._C._dynamo.guards._empty_strided_cuda_19
-empty_strided_cuda_20 = torch._C._dynamo.guards._empty_strided_cuda_20
-empty_strided_cuda_21 = torch._C._dynamo.guards._empty_strided_cuda_21
-empty_strided_cuda_22 = torch._C._dynamo.guards._empty_strided_cuda_22
-empty_strided_cuda_23 = torch._C._dynamo.guards._empty_strided_cuda_23
-empty_strided_cuda_24 = torch._C._dynamo.guards._empty_strided_cuda_24
-empty_strided_cuda_25 = torch._C._dynamo.guards._empty_strided_cuda_25
-empty_strided_cuda_26 = torch._C._dynamo.guards._empty_strided_cuda_26
-empty_strided_cuda_27 = torch._C._dynamo.guards._empty_strided_cuda_27
-empty_strided_cuda_28 = torch._C._dynamo.guards._empty_strided_cuda_28
-empty_strided_cuda_29 = torch._C._dynamo.guards._empty_strided_cuda_29
-empty_strided_cuda_30 = torch._C._dynamo.guards._empty_strided_cuda_30
-empty_strided_cuda_31 = torch._C._dynamo.guards._empty_strided_cuda_31
-empty_strided_cuda_32 = torch._C._dynamo.guards._empty_strided_cuda_32
-empty_strided_cuda_33 = torch._C._dynamo.guards._empty_strided_cuda_33
-empty_strided_cuda_34 = torch._C._dynamo.guards._empty_strided_cuda_34
-empty_strided_cuda_35 = torch._C._dynamo.guards._empty_strided_cuda_35
-empty_strided_cuda_36 = torch._C._dynamo.guards._empty_strided_cuda_36
-empty_strided_cuda_37 = torch._C._dynamo.guards._empty_strided_cuda_37
-empty_strided_cuda_38 = torch._C._dynamo.guards._empty_strided_cuda_38
-empty_strided_cuda_39 = torch._C._dynamo.guards._empty_strided_cuda_39
-empty_strided_cuda_40 = torch._C._dynamo.guards._empty_strided_cuda_40
-empty_strided_cuda_41 = torch._C._dynamo.guards._empty_strided_cuda_41
-empty_strided_cuda_42 = torch._C._dynamo.guards._empty_strided_cuda_42
-empty_strided_cuda_43 = torch._C._dynamo.guards._empty_strided_cuda_43
-empty_strided_cuda_44 = torch._C._dynamo.guards._empty_strided_cuda_44
-empty_strided_cuda_45 = torch._C._dynamo.guards._empty_strided_cuda_45
-empty_strided_cuda_46 = torch._C._dynamo.guards._empty_strided_cuda_46
-empty_strided_cuda_47 = torch._C._dynamo.guards._empty_strided_cuda_47
-empty_strided_cuda_48 = torch._C._dynamo.guards._empty_strided_cuda_48
-empty_strided_cuda_49 = torch._C._dynamo.guards._empty_strided_cuda_49
-empty_strided_cuda_50 = torch._C._dynamo.guards._empty_strided_cuda_50
-empty_strided_cuda_51 = torch._C._dynamo.guards._empty_strided_cuda_51
-empty_strided_cuda_52 = torch._C._dynamo.guards._empty_strided_cuda_52
-empty_strided_cuda_53 = torch._C._dynamo.guards._empty_strided_cuda_53
-empty_strided_cuda_54 = torch._C._dynamo.guards._empty_strided_cuda_54
-empty_strided_cuda_55 = torch._C._dynamo.guards._empty_strided_cuda_55
-empty_strided_cuda_56 = torch._C._dynamo.guards._empty_strided_cuda_56
-empty_strided_cuda_57 = torch._C._dynamo.guards._empty_strided_cuda_57
-empty_strided_cuda_58 = torch._C._dynamo.guards._empty_strided_cuda_58
-empty_strided_cuda_59 = torch._C._dynamo.guards._empty_strided_cuda_59
-empty_strided_cuda_60 = torch._C._dynamo.guards._empty_strided_cuda_60
-empty_strided_cuda_61 = torch._C._dynamo.guards._empty_strided_cuda_61
-empty_strided_cuda_62 = torch._C._dynamo.guards._empty_strided_cuda_62
-empty_strided_cuda_63 = torch._C._dynamo.guards._empty_strided_cuda_63
-empty_strided_cuda_64 = torch._C._dynamo.guards._empty_strided_cuda_64
-empty_strided_cuda_65 = torch._C._dynamo.guards._empty_strided_cuda_65
-empty_strided_cuda_66 = torch._C._dynamo.guards._empty_strided_cuda_66
-empty_strided_cuda_67 = torch._C._dynamo.guards._empty_strided_cuda_67
-empty_strided_cuda_68 = torch._C._dynamo.guards._empty_strided_cuda_68
-empty_strided_cuda_69 = torch._C._dynamo.guards._empty_strided_cuda_69
-empty_strided_cuda_70 = torch._C._dynamo.guards._empty_strided_cuda_70
-empty_strided_cuda_71 = torch._C._dynamo.guards._empty_strided_cuda_71
-empty_strided_cuda_72 = torch._C._dynamo.guards._empty_strided_cuda_72
-empty_strided_cuda_73 = torch._C._dynamo.guards._empty_strided_cuda_73
-empty_strided_cuda_74 = torch._C._dynamo.guards._empty_strided_cuda_74
-empty_strided_cuda_75 = torch._C._dynamo.guards._empty_strided_cuda_75
-empty_strided_cuda_76 = torch._C._dynamo.guards._empty_strided_cuda_76
-empty_strided_cuda_77 = torch._C._dynamo.guards._empty_strided_cuda_77
-empty_strided_cuda_78 = torch._C._dynamo.guards._empty_strided_cuda_78
-empty_strided_cuda_79 = torch._C._dynamo.guards._empty_strided_cuda_79
-empty_strided_cuda_80 = torch._C._dynamo.guards._empty_strided_cuda_80
-empty_strided_cuda_81 = torch._C._dynamo.guards._empty_strided_cuda_81
-empty_strided_cuda_82 = torch._C._dynamo.guards._empty_strided_cuda_82
-empty_strided_cuda_83 = torch._C._dynamo.guards._empty_strided_cuda_83
-empty_strided_cuda_84 = torch._C._dynamo.guards._empty_strided_cuda_84
-empty_strided_cuda_85 = torch._C._dynamo.guards._empty_strided_cuda_85
-empty_strided_cuda_86 = torch._C._dynamo.guards._empty_strided_cuda_86
-empty_strided_cuda_87 = torch._C._dynamo.guards._empty_strided_cuda_87
-empty_strided_cuda_88 = torch._C._dynamo.guards._empty_strided_cuda_88
-empty_strided_cuda_89 = torch._C._dynamo.guards._empty_strided_cuda_89
-empty_strided_cuda_90 = torch._C._dynamo.guards._empty_strided_cuda_90
-empty_strided_cuda_91 = torch._C._dynamo.guards._empty_strided_cuda_91
-empty_strided_cuda_92 = torch._C._dynamo.guards._empty_strided_cuda_92
-empty_strided_cuda_93 = torch._C._dynamo.guards._empty_strided_cuda_93
-empty_strided_cuda_94 = torch._C._dynamo.guards._empty_strided_cuda_94
-empty_strided_cuda_95 = torch._C._dynamo.guards._empty_strided_cuda_95
-empty_strided_cuda_96 = torch._C._dynamo.guards._empty_strided_cuda_96
-empty_strided_cuda_97 = torch._C._dynamo.guards._empty_strided_cuda_97
-empty_strided_cuda_98 = torch._C._dynamo.guards._empty_strided_cuda_98
-empty_strided_cuda_99 = torch._C._dynamo.guards._empty_strided_cuda_99
-empty_strided_cuda_100 = torch._C._dynamo.guards._empty_strided_cuda_100
-empty_strided_cuda_101 = torch._C._dynamo.guards._empty_strided_cuda_101
-empty_strided_cuda_102 = torch._C._dynamo.guards._empty_strided_cuda_102
-empty_strided_cuda_103 = torch._C._dynamo.guards._empty_strided_cuda_103
-empty_strided_cuda_104 = torch._C._dynamo.guards._empty_strided_cuda_104
-empty_strided_cuda_105 = torch._C._dynamo.guards._empty_strided_cuda_105
-empty_strided_cuda_106 = torch._C._dynamo.guards._empty_strided_cuda_106
-empty_strided_cuda_107 = torch._C._dynamo.guards._empty_strided_cuda_107
-empty_strided_cuda_108 = torch._C._dynamo.guards._empty_strided_cuda_108
-empty_strided_cuda_109 = torch._C._dynamo.guards._empty_strided_cuda_109
-empty_strided_cuda_110 = torch._C._dynamo.guards._empty_strided_cuda_110
-empty_strided_cuda_111 = torch._C._dynamo.guards._empty_strided_cuda_111
-empty_strided_cuda_112 = torch._C._dynamo.guards._empty_strided_cuda_112
-empty_strided_cuda_113 = torch._C._dynamo.guards._empty_strided_cuda_113
-empty_strided_cuda_114 = torch._C._dynamo.guards._empty_strided_cuda_114
-empty_strided_cuda_115 = torch._C._dynamo.guards._empty_strided_cuda_115
-empty_strided_cuda_116 = torch._C._dynamo.guards._empty_strided_cuda_116
-empty_strided_cuda_117 = torch._C._dynamo.guards._empty_strided_cuda_117
-empty_strided_cuda_118 = torch._C._dynamo.guards._empty_strided_cuda_118
-empty_strided_cuda_119 = torch._C._dynamo.guards._empty_strided_cuda_119
-empty_strided_cuda_120 = torch._C._dynamo.guards._empty_strided_cuda_120
-empty_strided_cuda_121 = torch._C._dynamo.guards._empty_strided_cuda_121
-empty_strided_cuda_122 = torch._C._dynamo.guards._empty_strided_cuda_122
-empty_strided_cuda_123 = torch._C._dynamo.guards._empty_strided_cuda_123
-empty_strided_cuda_124 = torch._C._dynamo.guards._empty_strided_cuda_124
-empty_strided_cuda_125 = torch._C._dynamo.guards._empty_strided_cuda_125
-empty_strided_cuda_126 = torch._C._dynamo.guards._empty_strided_cuda_126
-empty_strided_cuda_127 = torch._C._dynamo.guards._empty_strided_cuda_127
-empty_strided_cuda_128 = torch._C._dynamo.guards._empty_strided_cuda_128
-empty_strided_cuda_129 = torch._C._dynamo.guards._empty_strided_cuda_129
-empty_strided_cuda_130 = torch._C._dynamo.guards._empty_strided_cuda_130
-empty_strided_cuda_131 = torch._C._dynamo.guards._empty_strided_cuda_131
-empty_strided_cuda_132 = torch._C._dynamo.guards._empty_strided_cuda_132
-empty_strided_cuda_133 = torch._C._dynamo.guards._empty_strided_cuda_133
-empty_strided_cuda_134 = torch._C._dynamo.guards._empty_strided_cuda_134
-empty_strided_cuda_135 = torch._C._dynamo.guards._empty_strided_cuda_135
-empty_strided_cuda_136 = torch._C._dynamo.guards._empty_strided_cuda_136
-empty_strided_cuda_137 = torch._C._dynamo.guards._empty_strided_cuda_137
-empty_strided_cuda_138 = torch._C._dynamo.guards._empty_strided_cuda_138
-empty_strided_cuda_139 = torch._C._dynamo.guards._empty_strided_cuda_139
-empty_strided_cuda_140 = torch._C._dynamo.guards._empty_strided_cuda_140
-empty_strided_cuda_141 = torch._C._dynamo.guards._empty_strided_cuda_141
-empty_strided_cuda_142 = torch._C._dynamo.guards._empty_strided_cuda_142
-empty_strided_cuda_143 = torch._C._dynamo.guards._empty_strided_cuda_143
-empty_strided_cuda_144 = torch._C._dynamo.guards._empty_strided_cuda_144
-empty_strided_cuda_145 = torch._C._dynamo.guards._empty_strided_cuda_145
-empty_strided_cuda_146 = torch._C._dynamo.guards._empty_strided_cuda_146
-empty_strided_cuda_147 = torch._C._dynamo.guards._empty_strided_cuda_147
-empty_strided_cuda_148 = torch._C._dynamo.guards._empty_strided_cuda_148
-empty_strided_cuda_149 = torch._C._dynamo.guards._empty_strided_cuda_149
-empty_strided_cuda_150 = torch._C._dynamo.guards._empty_strided_cuda_150
-empty_strided_cuda_151 = torch._C._dynamo.guards._empty_strided_cuda_151
-empty_strided_cuda_152 = torch._C._dynamo.guards._empty_strided_cuda_152
-empty_strided_cuda_153 = torch._C._dynamo.guards._empty_strided_cuda_153
-empty_strided_cuda_154 = torch._C._dynamo.guards._empty_strided_cuda_154
-empty_strided_cuda_155 = torch._C._dynamo.guards._empty_strided_cuda_155
-empty_strided_cuda_156 = torch._C._dynamo.guards._empty_strided_cuda_156
-empty_strided_cuda_157 = torch._C._dynamo.guards._empty_strided_cuda_157
-empty_strided_cuda_158 = torch._C._dynamo.guards._empty_strided_cuda_158
-empty_strided_cuda_159 = torch._C._dynamo.guards._empty_strided_cuda_159
-empty_strided_cuda_160 = torch._C._dynamo.guards._empty_strided_cuda_160
-empty_strided_cuda_161 = torch._C._dynamo.guards._empty_strided_cuda_161
-empty_strided_cuda_162 = torch._C._dynamo.guards._empty_strided_cuda_162
-empty_strided_cuda_163 = torch._C._dynamo.guards._empty_strided_cuda_163
-empty_strided_cuda_164 = torch._C._dynamo.guards._empty_strided_cuda_164
-empty_strided_cuda_165 = torch._C._dynamo.guards._empty_strided_cuda_165
-empty_strided_cuda_166 = torch._C._dynamo.guards._empty_strided_cuda_166
-empty_strided_cuda_167 = torch._C._dynamo.guards._empty_strided_cuda_167
-empty_strided_cuda_168 = torch._C._dynamo.guards._empty_strided_cuda_168
-empty_strided_cuda_169 = torch._C._dynamo.guards._empty_strided_cuda_169
-empty_strided_cuda_170 = torch._C._dynamo.guards._empty_strided_cuda_170
-empty_strided_cuda_171 = torch._C._dynamo.guards._empty_strided_cuda_171
-empty_strided_cuda_172 = torch._C._dynamo.guards._empty_strided_cuda_172
-empty_strided_cuda_173 = torch._C._dynamo.guards._empty_strided_cuda_173
-empty_strided_cuda_174 = torch._C._dynamo.guards._empty_strided_cuda_174
-empty_strided_cuda_175 = torch._C._dynamo.guards._empty_strided_cuda_175
-empty_strided_cuda_176 = torch._C._dynamo.guards._empty_strided_cuda_176
-empty_strided_cuda_177 = torch._C._dynamo.guards._empty_strided_cuda_177
-empty_strided_cuda_178 = torch._C._dynamo.guards._empty_strided_cuda_178
-empty_strided_cuda_179 = torch._C._dynamo.guards._empty_strided_cuda_179
-empty_strided_cuda_180 = torch._C._dynamo.guards._empty_strided_cuda_180
-empty_strided_cuda_181 = torch._C._dynamo.guards._empty_strided_cuda_181
-empty_strided_cuda_182 = torch._C._dynamo.guards._empty_strided_cuda_182
-empty_strided_cuda_183 = torch._C._dynamo.guards._empty_strided_cuda_183
-empty_strided_cuda_184 = torch._C._dynamo.guards._empty_strided_cuda_184
-empty_strided_cuda_185 = torch._C._dynamo.guards._empty_strided_cuda_185
-empty_strided_cuda_186 = torch._C._dynamo.guards._empty_strided_cuda_186
-empty_strided_cuda_187 = torch._C._dynamo.guards._empty_strided_cuda_187
-empty_strided_cuda_188 = torch._C._dynamo.guards._empty_strided_cuda_188
-empty_strided_cuda_189 = torch._C._dynamo.guards._empty_strided_cuda_189
-empty_strided_cuda_190 = torch._C._dynamo.guards._empty_strided_cuda_190
-empty_strided_cuda_191 = torch._C._dynamo.guards._empty_strided_cuda_191
-empty_strided_cuda_192 = torch._C._dynamo.guards._empty_strided_cuda_192
-empty_strided_cuda_193 = torch._C._dynamo.guards._empty_strided_cuda_193
-empty_strided_cuda_194 = torch._C._dynamo.guards._empty_strided_cuda_194
-empty_strided_cuda_195 = torch._C._dynamo.guards._empty_strided_cuda_195
-empty_strided_cuda_196 = torch._C._dynamo.guards._empty_strided_cuda_196
-empty_strided_cuda_197 = torch._C._dynamo.guards._empty_strided_cuda_197
-empty_strided_cuda_198 = torch._C._dynamo.guards._empty_strided_cuda_198
-empty_strided_cuda_199 = torch._C._dynamo.guards._empty_strided_cuda_199
-empty_strided_cuda_200 = torch._C._dynamo.guards._empty_strided_cuda_200
-empty_strided_cuda_201 = torch._C._dynamo.guards._empty_strided_cuda_201
-empty_strided_cuda_202 = torch._C._dynamo.guards._empty_strided_cuda_202
-empty_strided_cuda_203 = torch._C._dynamo.guards._empty_strided_cuda_203
-empty_strided_cuda_204 = torch._C._dynamo.guards._empty_strided_cuda_204
-empty_strided_cuda_205 = torch._C._dynamo.guards._empty_strided_cuda_205
-empty_strided_cuda_206 = torch._C._dynamo.guards._empty_strided_cuda_206
-empty_strided_cuda_207 = torch._C._dynamo.guards._empty_strided_cuda_207
-empty_strided_cuda_208 = torch._C._dynamo.guards._empty_strided_cuda_208
-empty_strided_cuda_209 = torch._C._dynamo.guards._empty_strided_cuda_209
-empty_strided_cuda_210 = torch._C._dynamo.guards._empty_strided_cuda_210
-empty_strided_cuda_211 = torch._C._dynamo.guards._empty_strided_cuda_211
-empty_strided_cuda_212 = torch._C._dynamo.guards._empty_strided_cuda_212
-empty_strided_cuda_213 = torch._C._dynamo.guards._empty_strided_cuda_213
-empty_strided_cuda_214 = torch._C._dynamo.guards._empty_strided_cuda_214
-empty_strided_cuda_215 = torch._C._dynamo.guards._empty_strided_cuda_215
-empty_strided_cuda_216 = torch._C._dynamo.guards._empty_strided_cuda_216
-empty_strided_cuda_217 = torch._C._dynamo.guards._empty_strided_cuda_217
-empty_strided_cuda_218 = torch._C._dynamo.guards._empty_strided_cuda_218
-empty_strided_cuda_219 = torch._C._dynamo.guards._empty_strided_cuda_219
-empty_strided_cuda_220 = torch._C._dynamo.guards._empty_strided_cuda_220
-empty_strided_cuda_221 = torch._C._dynamo.guards._empty_strided_cuda_221
-empty_strided_cuda_222 = torch._C._dynamo.guards._empty_strided_cuda_222
-empty_strided_cuda_223 = torch._C._dynamo.guards._empty_strided_cuda_223
-empty_strided_cuda_224 = torch._C._dynamo.guards._empty_strided_cuda_224
-empty_strided_cuda_225 = torch._C._dynamo.guards._empty_strided_cuda_225
-empty_strided_cuda_226 = torch._C._dynamo.guards._empty_strided_cuda_226
-empty_strided_cuda_227 = torch._C._dynamo.guards._empty_strided_cuda_227
-empty_strided_cuda_228 = torch._C._dynamo.guards._empty_strided_cuda_228
-empty_strided_cuda_229 = torch._C._dynamo.guards._empty_strided_cuda_229
-empty_strided_cuda_230 = torch._C._dynamo.guards._empty_strided_cuda_230
-empty_strided_cuda_231 = torch._C._dynamo.guards._empty_strided_cuda_231
-empty_strided_cuda_232 = torch._C._dynamo.guards._empty_strided_cuda_232
-empty_strided_cuda_233 = torch._C._dynamo.guards._empty_strided_cuda_233
-empty_strided_cuda_234 = torch._C._dynamo.guards._empty_strided_cuda_234
-empty_strided_cuda_235 = torch._C._dynamo.guards._empty_strided_cuda_235
-empty_strided_cuda_236 = torch._C._dynamo.guards._empty_strided_cuda_236
-empty_strided_cuda_237 = torch._C._dynamo.guards._empty_strided_cuda_237
-empty_strided_cuda_238 = torch._C._dynamo.guards._empty_strided_cuda_238
-empty_strided_cuda_239 = torch._C._dynamo.guards._empty_strided_cuda_239
-empty_strided_cuda_240 = torch._C._dynamo.guards._empty_strided_cuda_240
-empty_strided_cuda_241 = torch._C._dynamo.guards._empty_strided_cuda_241
-empty_strided_cuda_242 = torch._C._dynamo.guards._empty_strided_cuda_242
-empty_strided_cuda_243 = torch._C._dynamo.guards._empty_strided_cuda_243
-empty_strided_cuda_244 = torch._C._dynamo.guards._empty_strided_cuda_244
-empty_strided_cuda_245 = torch._C._dynamo.guards._empty_strided_cuda_245
-empty_strided_cuda_246 = torch._C._dynamo.guards._empty_strided_cuda_246
-empty_strided_cuda_247 = torch._C._dynamo.guards._
+
+
+@triton.jit
+def triton_poi_fused_convolution_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 33554432
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 1024
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x2, tmp2, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_1(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 1024
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x2, tmp2, xmask)
+
+
+@triton.jit
+def triton_poi_fused__native_batch_norm_legit_2(in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, out_ptr0, out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp25 = tl.load(in_ptr0 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp26 = tl.load(in_ptr1 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp27 = tl.load(in_ptr2 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp28 = tl.load(in_ptr3 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp0 = tl.load(in_ptr0 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp2 = tl.load(in_ptr2 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr3 + 4096 * x0, xmask, eviction_policy='evict_last')
+    tmp23 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp24 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp25 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp26 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp4 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp5 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp6 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp7 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp14 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp15 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp16 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp17 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp8 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp9 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp10 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp11 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp19 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp20 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp21 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp22 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp12 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp13 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp18 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp22 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp29 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp30 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp31 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp32 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp33 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp34 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp35 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp36 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp41 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp42 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp43 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp44 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp49 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp50 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp51 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp52 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp53 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp54 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp55 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp56 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp57 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp58 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp59 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp60 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp65 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp66 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp67 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp68 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp73 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp74 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp75 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp76 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp77 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp78 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp79 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp80 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp81 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp82 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp83 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp84 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp89 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp90 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp91 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp92 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp97 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp98 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp99 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp100 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp101 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp102 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp103 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp104 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp105 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp106 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp107 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp108 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp113 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp114 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp115 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp116 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp121 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp122 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp123 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp124 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp125 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp126 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp127 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp128 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp129 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp130 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp131 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp132 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp137 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp138 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp139 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp140 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp145 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp146 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp147 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp148 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp149 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp150 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp151 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp152 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp153 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp154 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp155 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp156 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp161 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp162 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp163 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp164 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp169 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp170 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp171 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp172 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp173 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp174 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp175 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp176 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp177 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp178 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp179 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp180 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp185 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp186 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp187 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp188 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp193 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp194 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp195 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp196 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp197 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp198 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp199 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp200 = tl.load(in_ptr3 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp201 = tl.load(in_ptr0 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp202 = tl.load(in_ptr1 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp203 = tl.load(in_ptr2 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp204 = tl.load(in_ptr3 + (1 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp209 = tl.load(in_ptr0 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp210 = tl.load(in_ptr1 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp211 = tl.load(in_ptr2 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp212 = tl.load(in_ptr3 + (2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp217 = tl.load(in_ptr0 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp218 = tl.load(in_ptr1 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp219 = tl.load(in_ptr2 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp220 = tl.load(in_ptr3 + (3 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp221 = tl.load(in_ptr0 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp222 = tl.load(in_ptr1 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp223 = tl.load(in_ptr2 + (4096 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp224 = tl.load(in_ptr3 + (4096 * x0),

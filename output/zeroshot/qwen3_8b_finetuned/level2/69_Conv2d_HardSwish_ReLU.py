@@ -1,58 +1,62 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch.nn.functional as F
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_hardswish_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 1048576
+def triton_poi_fused_hardtanh_mul_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 134217728
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x2 = xindex
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x2, xmask, eviction_policy='evict_last')
-    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
-    tmp3 = tl_math.add(tmp1, 3)
-    tmp4 = tl_math.minimum(tmp3, 6)
-    tmp5 = tl_math.maximum(tmp4, 0)
-    tmp6 = tl_math.multiply(tmp0, tmp5)
-    tmp7 = tl_math.divide(tmp6, 6)
-    tmp8 = tl_math.maximum(tmp7, 0)
-    tl.store(out_ptr0 + x0, tmp8, xmask)
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.full([1], 0, tl.int32)
+    tmp2 = triton_helpers.maximum(tmp0, tmp1)
+    tmp3 = tl.full([1], 6, tl.int32)
+    tmp4 = triton_helpers.minimum(tmp2, tmp3)
+    tmp5 = 3.0
+    tmp6 = tmp4 + tmp5
+    tmp7 = 6.0
+    tmp8 = tmp6 / tmp7
+    tmp9 = tmp4 * tmp8
+    tmp10 = tmp9 * tmp9
+    tmp11 = tl.full([1], 0, tl.int32)
+    tmp12 = triton_helpers.maximum(tmp10, tmp11)
+    tl.store(out_ptr0 + x0, tmp12, xmask)
 
 
-def triton_poi_fused_hardswish_relu_0_cuda(in_out_ptr0, input_0, input_1):
-    arg0_1, arg1_1 = input_0, input_1
+def call(args):
+    arg0_1, = args
     args.clear()
     assert_size_stride(arg0_1, (128, 64, 128, 128), (1048576, 16384, 128, 1))
-    assert_size_stride(arg1_1, (128, 64, 128, 128), (1048576, 16384, 128, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((128, 64, 128, 128), (1048576, 16384, 128, 1),
-            torch.float32)
+        buf0 = extern_kernels.convolution(arg0_1, weight, bias=None,
+            stride=(1, 1), padding=(1, 1), dilation=(1, 1), transposed=False
+            , output_padding=(0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (128, 64, 128, 128), (1048576, 16384, 128, 1
+            ))
+        buf1 = empty_strided_cuda((128, 64, 128, 128), (1048576, 16384, 128, 
+            1), torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_hardswish_relu_0[grid(1048576)](arg1_1, buf0, 1048576
-            , XBLOCK=128, num_warps=4, num_stages=1)
-        del arg1_1
-        del input_0
-        del input_1
-    return buf0, arg0_1
+        triton_poi_fused_hardtanh_mul_relu_0[grid(134217728)](buf0, buf1, 
+            134217728, XBLOCK=128, num_warps=4, num_stages=1)
+        del buf0
+    return buf1, arg0_1, weight
 
 
 class ModelNew(nn.Module):
     """
-    Optimized model that performs a convolution, followed by a custom Triton
-    kernel that implements the combined hardswish + ReLU operation.
+    Model that performs a convolution, applies HardSwish, and then ReLU.
     """
     def __init__(self, in_channels, out_channels, kernel_size):
         super(ModelNew, self).__init__()
@@ -60,8 +64,6 @@ class ModelNew(nn.Module):
 
     def forward(self, input_0):
         arg0_1 = input_0
-        arg1_1 = self.conv(arg0_1)
-        arg1_1 = arg1_1
-        buf0, arg0_1 = triton_poi_fused_hardswish_relu_0_cuda(arg0_1, arg1_1,
-            arg0_1)
-        return buf0
+        weight = self.conv.weight
+        output = call([arg0_1, weight])
+        return output[0]

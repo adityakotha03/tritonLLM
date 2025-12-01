@@ -1,57 +1,54 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-import torch.nn.functional as F
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_mul_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, ynumel,
-    xoffset, yoffset, XBLOCK: tl.constexpr, YBLOCK: tl.constexpr):
-    xnumel = 32768
-    ynumel = 32768
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
+def triton_per_fused_add_0(in_out_ptr0, in_ptr0, in_ptr1, xnumel, rnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 131072
+    RBLOCK: tl.constexpr = 64
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r0 = rindex
     x2 = xindex
-    y3 = yindex
-    x0 = xindex
-    y1 = yindex
-    tmp0 = tl.load(in_ptr0 + (x2 + 16384 * y3), xmask & ymask, eviction_policy=
-        'evict_last')
-    tmp1 = tl.load(in_ptr1 + (x0 + 64 * y1), xmask & ymask, eviction_policy=
-        'evict_last')
+    y3 = xindex // 16
+    tmp0 = tl.load(in_ptr0 + (r0 + 64 * x2), xmask, other=0.0)
+    tmp1 = tl.load(in_ptr1 + (r0 + 64 * x2 + 131072 * y3), xmask, other=0.0)
     tmp2 = tmp0 * tmp1
-    tmp3 = tl.load(out_ptr0 + (x0 + 16384 * y1), xmask & ymask, eviction_policy
-        = 'evict_last')
-    tmp4 = tmp2 + tmp3
-    tl.store(out_ptr0 + (x0 + 16384 * y1), tmp4, xmask & ymask)
+    tmp3 = tl.broadcast_to(tmp2, [XBLOCK, RBLOCK])
+    tmp5 = tl.where(xmask, tmp3, 0)
+    tmp6 = tl.sum(tmp5, 1)[:, None]
+    tl.debug_barrier()
+    tl.store(in_out_ptr0 + x2, tmp6, xmask)
 
 
 def call(args):
-    (primals_1, primals_2) = args
+    arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(primals_1, (32768, 64), (64, 1))
-    assert_size_stride(primals_2, (64, 32768), (1, 64))
+    assert_size_stride(arg0_1, (131072, 64), (64, 1))
+    assert_size_stride(arg1_1, (64, 131072), (1, 64))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((32768, 32768), (32768, 1), torch.float32)
+        buf0 = empty_strided_cuda((131072, 131072), (131072, 1), torch.float32)
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused_mul_add_0[grid(32768, 32768)](primals_1, primals_2,
-            buf0, 32768, 32768, 0, 0, XBLOCK=128, YBLOCK=64, num_warps=4,
-            num_stages=1)
-        del primals_1
-        del primals_2
-    return buf0,
+        triton_per_fused_add_0[grid(131072)](buf1, arg0_1, arg1_1, 131072,
+            64, XBLOCK=32, num_warps=8, num_stages=1)
+        del arg0_1
+        del arg1_1
+    return buf1,
 
 
 class ModelNew(nn.Module):
@@ -62,6 +59,7 @@ class ModelNew(nn.Module):
         super(ModelNew, self).__init__()
     
     def forward(self, input_0, input_1):
-        arg0_1, arg1_1 = input_0, input_1
+        arg0_1 = input_0
+        arg1_1 = input_1
         output = call([arg0_1, arg1_1])
         return output[0]

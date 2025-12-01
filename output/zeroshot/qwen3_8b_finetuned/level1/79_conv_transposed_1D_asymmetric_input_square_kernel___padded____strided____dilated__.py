@@ -10,48 +10,60 @@ empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 268435456
+def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16515072
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x2 = xindex % 64
-    x3 = xindex // 64
-    x4 = x3 % 131072
-    x1 = xindex
-    tmp0 = tl.load(in_ptr0 + (x2 * 96 + x4), xmask)
-    tmp1 = tl.load(in_ptr1 + x2, xmask, eviction_policy='evict_last')
-    tmp2 = tmp0 * tmp1
-    tmp3 = tl.load(in_ptr0 + (x1), xmask, eviction_policy='evict_last')
-    tmp4 = tmp2 + tmp3
-    tl.store(out_ptr0 + x1, tmp4, xmask)
+    x3 = xindex
+    x0 = xindex % 64
+    x1 = xindex // 131072
+    tmp0 = tl.load(in_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr1 + (x0 + 64 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x3, tmp2, xmask)
 
 
 def call(args):
-    primals_1, primals_2 = args
+    primals_1, primals_2, primals_3 = args
     args.clear()
-    assert_size_stride(primals_1, (64, 96), (96, 1))
-    assert_size_stride(primals_2, (64,), (1,))
+    assert_size_stride(primals_1, (16, 64, 3), (192, 3, 1))
+    assert_size_stride(primals_2, (16, 32, 131072), (4194304, 131072, 1))
+    assert_size_stride(primals_3, (64,), (1,))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 64, 262148), (16384, 256, 1), torch.float32)
+        buf0 = empty_strided_cuda((16, 64, 131072), (8388608, 131072, 1),
+            torch.float32)
         get_raw_stream(0)
-        triton_poi_fused_convolution_0[grid(268435456)](primals_1, primals_2, buf0,
-            268435456, XBLOCK=128, num_warps=4, num_stages=1)
+        triton_poi_fused_convolution_0[grid(16515072)](primals_2,
+            primals_1, buf0, 16515072, XBLOCK=256, num_warps=4, num_stages=1)
         del primals_1
-        del primals_2
-    return buf0,
+    return buf0, primals_2, primals_3
 
 
 class ModelNew(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.randn((64, 96), dtype=torch.float32, device='cuda'))
-        self.bias = nn.Parameter(torch.randn((64,), dtype=torch.float32, device='cuda'))
+    """
+    Performs a transposed 1D convolution operation with asymmetric input and square kernel.
+    Supports padding, striding, and dilation.
 
+    Args:
+        in_channels (int): Number of channels in the input tensor.
+        out_channels (int): Number of channels produced by the convolution.
+        kernel_size (int): Size of the square convolution kernel.
+        stride (int, optional): Stride of the convolution. Defaults to 1.
+        padding (int, optional): Padding applied to the input. Defaults to 0.
+        dilation (int, optional): Spacing between kernel elements. Defaults to 1.
+        bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, dilation: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.conv1d_transpose = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, bias=bias)
+        
     def forward(self, input_0):
-        arg0_1 = input_0
-        arg0_2 = self.weight
-        arg0_3 = self.bias
-        output = call([arg0_1, arg0_2, arg0_3])
+        primals_1 = self.conv1d_transpose.weight
+        primals_3 = self.conv1d_transpose.bias
+        primals_2 = input_0
+        output = call([primals_1, primals_2, primals_3])
         return output[0]

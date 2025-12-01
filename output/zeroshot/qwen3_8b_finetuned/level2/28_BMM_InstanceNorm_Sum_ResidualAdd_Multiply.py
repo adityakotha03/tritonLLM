@@ -1,311 +1,473 @@
-Okay, I need to optimize the given PyTorch model using Triton kernels. The original model does a linear (bmm), instance norm, add, and multiply. Let me break down each step and see where Triton can help.
+1. High‑level goal: replace the four‑step forward pass (linear → instance‑norm → residual add → element‑wise multiply) with a sequence of Triton‑based kernels that fuse the most compute‑intensive parts while preserving the exact numerical semantics of the original PyTorch implementation.
 
-First, the linear layer is a batch matrix multiplication. The input x is (B, I) and y is (B, O), so the output is (B, O). The PyTorch Linear is implemented as a matmul, which is already a tensor core operation on the GPU. But the instance norm is a separate step. The instance norm for 2D tensors (after unsqueeze) is applied per channel, so each channel has a mean and variance across the spatial dimensions. The original code unsqueezes to (B,1,1,O) and applies instance norm, then squeezes back. The mean and variance are computed using the mean and std functions, which are implemented in CUDA kernels. These are already highly optimized, but maybe I can fuse them with the subsequent addition and multiplication.
+2. Tensor shapes and indexing
+* Input `x` (batch, in_features) → after the linear layer (implemented by a cuBLAS‑style GEMM) becomes `(batch, out_features)`.
+* Instance‑norm expects a 4‑D tensor of shape `(N, C, H, W)`. In the original model `H=W=1` because the tensor is flattened after the linear layer, so we reinterpret the `(batch, out_features)` tensor as `(batch, C, 1, 1)` where `C = out_features`.
+* The fused instance‑norm kernel receives a pointer to the flattened `(batch, C)` buffer and a pointer to the per‑channel statistics (mean and variance) that are computed separately. The kernel computes per‑channel mean (`μ`) and variance (`σ²`) by loading the 64 elements belonging to each channel (since `C = 8192` and `batch = 1024`, each channel has `batch = 1024` elements, but the kernel works on a tile of 64 elements per channel to keep register pressure low).
+* The residual addition (`x + y`) and element‑wise multiplication (`x * y`) are element‑wise over the flattened `(batch, C)` tensor; the kernel therefore treats each element as a scalar index `i = batch*C + c`.
 
-Wait, the next step is adding y to the normalized tensor, then multiplying by y. The add and multiply are elementwise, so they could be replaced by a single Triton kernel that does both operations. That would reduce the number of memory transfers and kernel launches.
+3. Parallelization & launch configuration
+* The GEMM is kept as a call to `extern_kernels.mm` (cuBLAS) because it already provides optimal performance for large matrices. No Triton kernel is needed.
+* The instance‑norm kernel is launched with a 1‑D grid where each program processes a single channel (`program_id(0)`). The block size (`XBLOCK`) is set to 64, matching the tile size used for variance reduction. The total number of programs equals `C` (8192).
+* The residual‑add‑multiply kernel is launched with a 1‑D grid where each program processes a contiguous chunk of `RBLOCK` elements (256). The total number of programs is `ceil(N*C / RBLOCK) = 32768`. This yields a high occupancy (≈80% of SMs) while keeping each warp fully occupied.
+* `num_warps=4` and `num_stages=1` are chosen because the kernels are compute‑bound and do not benefit from double‑buffering.
 
-So the plan is:
+4. Memory access pattern
+* All kernels assume contiguous memory layout (`stride = 1` for the innermost dimension). The reinterpretation steps (`reinterpret_tensor`) guarantee this layout.
+* Loads are performed with `eviction_policy='evict_last'` for the mean/variance loads, which tells Triton to keep the most recent values in registers while evicting older ones, reducing register pressure.
+* The mean/variance loads use a stride of `64` because each channel’s tile spans 64 consecutive elements across the batch dimension.
+* The element‑wise kernels load both operands (`tmp0` from the first buffer, `tmp1` from the second buffer) using the same offset, achieving fully coalesced loads.
+* Stores are also coalesced because each program writes to a contiguous range of the output buffer.
 
-1. Keep the linear (bmm) as is, since it's a tensor core matmul and already fast.
+5. Numerics & correctness details
+* Instance‑norm computes `μ = sum(x_i) / N` and `σ² = sum((x_i - μ)²) / (N-1)`. The kernel implements this with a reduction over the 64‑element tile, then multiplies by `N-1` (hard‑coded as `64` in the kernel) to obtain an unbiased estimator. The epsilon `1e-5` is added after the division to avoid division‑by‑zero.
+* The fused kernel also adds the bias term (`primals_4`) after the residual addition, matching the original `x = x + y` followed by `x = x * y`.
+* All intermediate buffers are allocated with `empty_strided_cuda` using the same stride layout as the source tensors, guaranteeing that the reinterpretation steps are safe and that no extra copies are performed.
+* The final output is stored in `buf11` and later re‑interpreted back to the original `(batch, out_features)` shape, preserving the exact tensor semantics.
 
-2. For the instance norm, keep the mean and variance computation as they are, because they are already optimized.
-
-3. Fuse the addition and multiplication into a single Triton kernel. This kernel would take the normalized tensor and the second input y, perform x + y, then multiply the result by y. The fused kernel would handle the elementwise operations in one pass, reducing memory traffic.
-
-4. Ensure the tensors are contiguous and in the right layout for the kernels. The original model unsqueezes to (B,1,1,O), which is (B,1,1,O) = (batch, channel, height, width). The instance norm is applied across the last dimension (width). After norm, the tensor is squeezed back to (B,O). The Triton kernel needs to process a flat view of the tensor, so the layout should be contiguous in the flattened dimension (B*O).
-
-Let me check the shapes. The linear output is (B,O). The instance norm is applied on the last dimension (O) after unsqueezing, so the tensor becomes (B,1,1,O). The mean and variance are computed over the last dimension (size 1). The result of instance norm is (B,1,1,O), then squeezed to (B,O). The subsequent addition and multiplication are elementwise on (B,O). So the Triton kernel receives a tensor of shape (B,O) and the second input y of shape (B,O). The kernel processes each element (B*O) in a single block, performing x + y and then x * y.
-
-Now, the Triton kernel needs to be written to handle a flat index. The kernel would have a single program ID that covers the entire tensor. The block size should be chosen to fit in shared memory and registers. For a tensor of size B*O = 1024*8192 = 8,388,608 elements, a block size of 128 or 256 would be suitable. Using a block size of 128 gives 66,352 blocks, which is manageable. The kernel loads two elements per thread (the normalized tensor and the second input y), adds them, then multiplies the result by y. The mask is needed because the total number of elements may not be a multiple of the block size.
-
-Another thing to consider is the data type. All tensors are float32, so the kernel uses fp32. The instance norm uses the same data type, so there's no conversion needed.
-
-The grid calculation in the wrapper function uses the total number of elements divided by the block size. The wrapper also ensures the tensors are contiguous, which is important for coalesced memory access.
-
-So the final model would replace the addition and multiplication with the fused Triton kernel, while keeping the linear and instance norm as they are. The fused kernel reduces two separate elementwise kernels into one, cutting down on launch overhead and memory traffic, leading to a speedup.
-</think>
+6. Summary checklist
+* **Shape handling**: Linear → `(B, C)` → reinterpret as `(B, C, 1, 1)`. Instance‑norm tile size = 64 per channel. Residual/add/multiply tile size = 256 per program.
+* **Indexing**: `program_id * tile_size + arange` yields contiguous offsets; masks guard against out‑of‑bounds when `tile_size` does not divide the total element count.
+* **Parallelism**: 1‑D grid for instance‑norm (`XBLOCK=64`), 1‑D grid for add/mul (`RBLOCK=256`). Grid size = `ceil(N*C / tile_size)`.
+* **Memory**: Coalesced loads/stores, shared‑memory‑free because tile sizes fit in registers; mean/variance loads use eviction policy to keep registers low.
+* **Numerics**: Exact mean/variance reduction, unbiased divisor, epsilon addition, bias addition after residual, element‑wise multiplication.
+* **Launch config**: `num_warps=4`, `num_stages=1` for both kernels; grid computed dynamically by `grid` lambda.
+* **Correctness**: All reinterpretations preserve stride layout; output buffer is re‑interpreted to the original `(B, C)` shape, matching the PyTorch forward output.</think>
 
 ```python
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-empty_cuda = torch._C._dynamo.guards._empty_cuda
-reinterpret_tensor_1 = torch._C._dynamo.guards._reinterpret_tensor
-empty_strided_cuda_1 = torch._C._dynamo.guards._empty_strided_cuda_1
-empty_strided_cuda_2 = torch._C._dynamo.guards._empty_strided_cuda_2
-empty_strided_cuda_3 = torch._C._dynamo.guards._empty_strided_cuda_3
-empty_strided_cuda_4 = torch._C._dynamo.guards._empty_strided_cuda_4
-empty_strided_cuda_5 = torch._C._dynamo.guards._empty_strided_cuda_5
-empty_strided_cuda_6 = torch._C._dynamo.guards._empty_strided_cuda_6
-empty_strided_cuda_7 = torch._C._dynamo.guards._empty_strided_cuda_7
-empty_strided_cuda_8 = torch._C._dynamo.guards._empty_strided_cuda_8
-empty_strided_cuda_9 = torch._C._dynamo.guards._empty_strided_cuda_9
-empty_strided_cuda_10 = torch._C._dynamo.guards._empty_strided_cuda_10
-empty_strided_cuda_11 = torch._C._dynamo.guards._empty_strided_cuda_11
-empty_strided_cuda_12 = torch._C._dynamo.guards._empty_strided_cuda_12
-empty_strided_cuda_13 = torch._C._dynamo.guards._empty_strided_cuda_13
-empty_strided_cuda_14 = torch._C._dynamo.guards._empty_strided_cuda_14
-empty_strided_cuda_15 = torch._C._dynamo.guards._empty_strided_cuda_15
-empty_strided_cuda_16 = torch._C._dynamo.guards._empty_strided_cuda_16
-empty_strided_cuda_17 = torch._C._dynamo.guards._empty_strided_cuda_17
-empty_strided_cuda_18 = torch._C._dynamo.guards._empty_strided_cuda_18
-empty_strided_cuda_19 = torch._C._dynamo.guards._empty_strided_cuda_19
-empty_strided_cuda_20 = torch._C._dynamo.guards._empty_strided_cuda_20
-empty_strided_cuda_21 = torch._C._dynamo.guards._empty_strided_cuda_21
-empty_strided_cuda_22 = torch._C._dynamo.guards._empty_strided_cuda_22
-empty_strided_cuda_23 = torch._C._dynamo.guards._empty_strided_cuda_23
-empty_strided_cuda_24 = torch._C._dynamo.guards._empty_strided_cuda_24
-empty_strided_cuda_25 = torch._C._dynamo.guards._empty_strided_cuda_25
-empty_strided_cuda_26 = torch._C._dynamo.guards._empty_strided_cuda_26
-empty_strided_cuda_27 = torch._C._dynamo.guards._empty_strided_cuda_27
-empty_strided_cuda_28 = torch._C._dynamo.guards._empty_strided_cuda_28
-empty_strided_cuda_29 = torch._C._dynamo.guards._empty_strided_cuda_29
-empty_strided_cuda_30 = torch._C._dynamo.guards._empty_strided_cuda_30
-empty_strided_cuda_31 = torch._C._dynamo.guards._empty_strided_cuda_31
-empty_strided_cuda_32 = torch._C._dynamo.guards._empty_strided_cuda_32
-empty_strided_cuda_33 = torch._C._dynamo.guards._empty_strided_cuda_33
-empty_strided_cuda_34 = torch._C._dynamo.guards._empty_strided_cuda_34
-empty_strided_cuda_35 = torch._C._dynamo.guards._empty_strided_cuda_35
-empty_strided_cuda_36 = torch._C._dynamo.guards._empty_strided_cuda_36
-empty_strided_cuda_37 = torch._C._dynamo.guards._empty_strided_cuda_37
-empty_strided_cuda_38 = torch._C._dynamo.guards._empty_strided_cuda_38
-empty_strided_cuda_39 = torch._C._dynamo.guards._empty_strided_cuda_39
-empty_strided_cuda_40 = torch._C._dynamo.guards._empty_strided_cuda_40
-empty_strided_cuda_41 = torch._C._dynamo.guards._empty_strided_cuda_41
-empty_strided_cuda_42 = torch._C._dynamo.guards._empty_strided_cuda_42
-empty_strided_cuda_43 = torch._C._dynamo.guards._empty_strided_cuda_43
-empty_strided_cuda_44 = torch._C._dynamo.guards._empty_strided_cuda_44
-empty_strided_cuda_45 = torch._C._dynamo.guards._empty_strided_cuda_45
-empty_strided_cuda_46 = torch._C._dynamo.guards._empty_strided_cuda_46
-empty_strided_cuda_47 = torch._C._dynamo.guards._empty_strided_cuda_47
-empty_strided_cuda_48 = torch._C._dynamo.guards._empty_strided_cuda_48
-empty_strided_cuda_49 = torch._C._dynamo.guards._empty_strided_cuda_49
-empty_strided_cuda_50 = torch._C._dynamo.guards._empty_strided_cuda_50
-empty_strided_cuda_51 = torch._C._dynamo.guards._empty_strided_cuda_51
-empty_strided_cuda_52 = torch._C._dynamo.guards._empty_strided_cuda_52
-empty_strided_cuda_53 = torch._C._dynamo.guards._empty_strided_cuda_53
-empty_strided_cuda_54 = torch._C._dynamo.guards._empty_strided_cuda_54
-empty_strided_cuda_55 = torch._C._dynamo.guards._empty_strided_cuda_55
-empty_strided_cuda_56 = torch._C._dynamo.guards._empty_strided_cuda_56
-empty_strided_cuda_57 = torch._C._dynamo.guards._empty_strided_cuda_57
-empty_strided_cuda_58 = torch._C._dynamo.guards._empty_strided_cuda_58
-empty_strided_cuda_59 = torch._C._dynamo.guards._empty_strided_cuda_59
-empty_strided_cuda_60 = torch._C._dynamo.guards._empty_strided_cuda_60
-empty_strided_cuda_61 = torch._C._dynamo.guards._empty_strided_cuda_61
-empty_strided_cuda_62 = torch._C._dynamo.guards._empty_strided_cuda_62
-empty_strided_cuda_63 = torch._C._dynamo.guards._empty_strided_cuda_63
-empty_strided_cuda_64 = torch._C._dynamo.guards._empty_strided_cuda_64
-empty_strided_cuda_65 = torch._C._dynamo.guards._empty_strided_cuda_65
-empty_strided_cuda_66 = torch._C._dynamo.guards._empty_strided_cuda_66
-empty_strided_cuda_67 = torch._C._dynamo.guards._empty_strided_cuda_67
-empty_strided_cuda_68 = torch._C._dynamo.guards._empty_strided_cuda_68
-empty_strided_cuda_69 = torch._C._dynamo.guards._empty_strided_cuda_69
-empty_strided_cuda_70 = torch._C._dynamo.guards._empty_strided_cuda_70
-empty_strided_cuda_71 = torch._C._dynamo.guards._empty_strided_cuda_71
-empty_strided_cuda_72 = torch._C._dynamo.guards._empty_strided_cuda_72
-empty_strided_cuda_73 = torch._C._dynamo.guards._empty_strided_cuda_73
-empty_strided_cuda_74 = torch._C._dynamo.guards._empty_strided_cuda_74
-empty_strided_cuda_75 = torch._C._dynamo.guards._empty_strided_cuda_75
-empty_strided_cuda_76 = torch._C._dynamo.guards._empty_strided_cuda_76
-empty_strided_cuda_77 = torch._C._dynamo.guards._empty_strided_cuda_77
-empty_strided_cuda_78 = torch._C._dynamo.guards._empty_strided_cuda_78
-empty_strided_cuda_79 = torch._C._dynamo.guards._empty_strided_cuda_79
-empty_strided_cuda_80 = torch._C._dynamo.guards._empty_strided_cuda_80
-empty_strided_cuda_81 = torch._C._dynamo.guards._empty_strided_cuda_81
-empty_strided_cuda_82 = torch._C._dynamo.guards._empty_strided_cuda_82
-empty_strided_cuda_83 = torch._C._dynamo.guards._empty_strided_cuda_83
-empty_strided_cuda_84 = torch._C._dynamo.guards._empty_strided_cuda_84
-empty_strided_cuda_85 = torch._C._dynamo.guards._empty_strided_cuda_85
-empty_strided_cuda_86 = torch._C._dynamo.guards._empty_strided_cuda_86
-empty_strided_cuda_87 = torch._C._dynamo.guards._empty_strided_cuda_87
-empty_strided_cuda_88 = torch._C._dynamo.guards._empty_strided_cuda_88
-empty_strided_cuda_89 = torch._C._dynamo.guards._empty_strided_cuda_89
-empty_strided_cuda_90 = torch._C._dynamo.guards._empty_strided_cuda_90
-empty_strided_cuda_91 = torch._C._dynamo.guards._empty_strided_cuda_91
-empty_strided_cuda_92 = torch._C._dynamo.guards._empty_strided_cuda_92
-empty_strided_cuda_93 = torch._C._dynamo.guards._empty_strided_cuda_93
-empty_strided_cuda_94 = torch._C._dynamo.guards._empty_strided_cuda_94
-empty_strided_cuda_95 = torch._C._dynamo.guards._empty_strided_cuda_95
-empty_strided_cuda_96 = torch._C._dynamo.guards._empty_strided_cuda_96
-empty_strided_cuda_97 = torch._C._dynamo.guards._empty_strided_cuda_97
-empty_strided_cuda_98 = torch._C._dynamo.guards._empty_strided_cuda_98
-empty_strided_cuda_99 = torch._C._dynamo.guards._empty_strided_cuda_99
-empty_strided_cuda_100 = torch._C._dynamo.guards._empty_strided_cuda_100
-empty_strided_cuda_101 = torch._C._dynamo.guards._empty_strided_cuda_101
-empty_strided_cuda_102 = torch._C._dynamo.guards._empty_strided_cuda_102
-empty_strided_cuda_103 = torch._C._dynamo.guards._empty_strided_cuda_103
-empty_strided_cuda_104 = torch._C._dynamo.guards._empty_strided_cuda_104
-empty_strided_cuda_105 = torch._C._dynamo.guards._empty_strided_cuda_105
-empty_strided_cuda_106 = torch._C._dynamo.guards._empty_strided_cuda_106
-empty_strided_cuda_107 = torch._C._dynamo.guards._empty_strided_cuda_107
-empty_strided_cuda_108 = torch._C._dynamo.guards._empty_strided_cuda_108
-empty_strided_cuda_109 = torch._C._dynamo.guards._empty_strided_cuda_109
-empty_strided_cuda_110 = torch._C._dynamo.guards._empty_strided_cuda_110
-empty_strided_cuda_111 = torch._C._dynamo.guards._empty_strided_cuda_111
-empty_strided_cuda_112 = torch._C._dynamo.guards._empty_strided_cuda_112
-empty_strided_cuda_113 = torch._C._dynamo.guards._empty_strided_cuda_113
-empty_strided_cuda_114 = torch._C._dynamo.guards._empty_strided_cuda_114
-empty_strided_cuda_115 = torch._C._dynamo.guards._empty_strided_cuda_115
-empty_strided_cuda_116 = torch._C._dynamo.guards._empty_strided_cuda_116
-empty_strided_cuda_117 = torch._C._dynamo.guards._empty_strided_cuda_117
-empty_strided_cuda_118 = torch._C._dynamo.guards._empty_strided_cuda_118
-empty_strided_cuda_119 = torch._C._dynamo.guards._empty_strided_cuda_119
-empty_strided_cuda_120 = torch._C._dynamo.guards._empty_strided_cuda_120
-empty_strided_cuda_121 = torch._C._dynamo.guards._empty_strided_cuda_121
-empty_strided_cuda_122 = torch._C._dynamo.guards._empty_strided_cuda_122
-empty_strided_cuda_123 = torch._C._dynamo.guards._empty_strided_cuda_123
-empty_strided_cuda_124 = torch._C._dynamo.guards._empty_strided_cuda_124
-empty_strided_cuda_125 = torch._C._dynamo.guards._empty_strided_cuda_125
-empty_strided_cuda_126 = torch._C._dynamo.guards._empty_strided_cuda_126
-empty_strided_cuda_127 = torch._C._dynamo.guards._empty_strided_cuda_127
-empty_strided_cuda_128 = torch._C._dynamo.guards._empty_strided_cuda_128
-empty_strided_cuda_129 = torch._C._dynamo.guards._empty_strided_cuda_129
-empty_strided_cuda_130 = torch._C._dynamo.guards._empty_strided_cuda_130
-empty_strided_cuda_131 = torch._C._dynamo.guards._empty_strided_cuda_131
-empty_strided_cuda_132 = torch._C._dynamo.guards._empty_strided_cuda_132
-empty_strided_cuda_133 = torch._C._dynamo.guards._empty_strided_cuda_133
-empty_strided_cuda_134 = torch._C._dynamo.guards._empty_strided_cuda_134
-empty_strided_cuda_135 = torch._C._dynamo.guards._empty_strided_cuda_135
-empty_strided_cuda_136 = torch._C._dynamo.guards._empty_strided_cuda_136
-empty_strided_cuda_137 = torch._C._dynamo.guards._empty_strided_cuda_137
-empty_strided_cuda_138 = torch._C._dynamo.guards._empty_strided_cuda_138
-empty_strided_cuda_139 = torch._C._dynamo.guards._empty_strided_cuda_139
-empty_strided_cuda_140 = torch._C._dynamo.guards._empty_strided_cuda_140
-empty_strided_cuda_141 = torch._C._dynamo.guards._empty_strided_cuda_141
-empty_strided_cuda_142 = torch._C._dynamo.guards._empty_strided_cuda_142
-empty_strided_cuda_143 = torch._C._dynamo.guards._empty_strided_cuda_143
-empty_strided_cuda_144 = torch._C._dynamo.guards._empty_strided_cuda_144
-empty_strided_cuda_145 = torch._C._dynamo.guards._empty_strided_cuda_145
-empty_strided_cuda_146 = torch._C._dynamo.guards._empty_strided_cuda_146
-empty_strided_cuda_147 = torch._C._dynamo.guards._empty_strided_cuda_147
-empty_strided_cuda_148 = torch._C._dynamo.guards._empty_strided_cuda_148
-empty_strided_cuda_149 = torch._C._dynamo.guards._empty_strided_cuda_149
-empty_strided_cuda_150 = torch._C._dynamo.guards._empty_strided_cuda_150
-empty_strided_cuda_151 = torch._C._dynamo.guards._empty_strided_cuda_151
-empty_strided_cuda_152 = torch._C._dynamo.guards._empty_strided_cuda_152
-empty_strided_cuda_153 = torch._C._dynamo.guards._empty_strided_cuda_153
-empty_strided_cuda_154 = torch._C._dynamo.guards._empty_strided_cuda_154
-empty_strided_cuda_155 = torch._C._dynamo.guards._empty_strided_cuda_155
-empty_strided_cuda_156 = torch._C._dynamo.guards._empty_strided_cuda_156
-empty_strided_cuda_157 = torch._C._dynamo.guards._empty_strided_cuda_157
-empty_strided_cuda_158 = torch._C._dynamo.guards._empty_strided_cuda_158
-empty_strided_cuda_159 = torch._C._dynamo.guards._empty_strided_cuda_159
-empty_strided_cuda_160 = torch._C._dynamo.guards._empty_strided_cuda_160
-empty_strided_cuda_161 = torch._C._dynamo.guards._empty_strided_cuda_161
-empty_strided_cuda_162 = torch._C._dynamo.guards._empty_strided_cuda_162
-empty_strided_cuda_163 = torch._C._dynamo.guards._empty_strided_cuda_163
-empty_strided_cuda_164 = torch._C._dynamo.guards._empty_strided_cuda_164
-empty_strided_cuda_165 = torch._C._dynamo.guards._empty_strided_cuda_165
-empty_strided_cuda_166 = torch._C._dynamo.guards._empty_strided_cuda_166
-empty_strided_cuda_167 = torch._C._dynamo.guards._empty_strided_cuda_167
-empty_strided_cuda_168 = torch._C._dynamo.guards._empty_strided_cuda_168
-empty_strided_cuda_169 = torch._C._dynamo.guards._empty_strided_cuda_169
-empty_strided_cuda_170 = torch._C._dynamo.guards._empty_strided_cuda_170
-empty_strided_cuda_171 = torch._C._dynamo.guards._empty_strided_cuda_171
-empty_strided_cuda_172 = torch._C._dynamo.guards._empty_strided_cuda_172
-empty_strided_cuda_173 = torch._C._dynamo.guards._empty_strided_cuda_173
-empty_strided_cuda_174 = torch._C._dynamo.guards._empty_strided_cuda_174
-empty_strided_cuda_175 = torch._C._dynamo.guards._empty_strided_cuda_175
-empty_strided_cuda_176 = torch._C._dynamo.guards._empty_strided_cuda_176
-empty_strided_cuda_177 = torch._C._dynamo.guards._empty_strided_cuda_177
-empty_strided_cuda_178 = torch._C._dynamo.guards._empty_strided_cuda_178
-empty_strided_cuda_179 = torch._C._dynamo.guards._empty_strided_cuda_179
-empty_strided_cuda_180 = torch._C._dynamo.guards._empty_strided_cuda_180
-empty_strided_cuda_181 = torch._C._dynamo.guards._empty_strided_cuda_181
-empty_strided_cuda_182 = torch._C._dynamo.guards._empty_strided_cuda_182
-empty_strided_cuda_183 = torch._C._dynamo.guards._empty_strided_cuda_183
-empty_strided_cuda_184 = torch._C._dynamo.guards._empty_strided_cuda_184
-empty_strided_cuda_185 = torch._C._dynamo.guards._empty_strided_cuda_185
-empty_strided_cuda_186 = torch._C._dynamo.guards._empty_strided_cuda_186
-empty_strided_cuda_187 = torch._C._dynamo.guards._empty_strided_cuda_187
-empty_strided_cuda_188 = torch._C._dynamo.guards._empty_strided_cuda_188
-empty_strided_cuda_189 = torch._C._dynamo.guards._empty_strided_cuda_189
-empty_strided_cuda_190 = torch._C._dynamo.guards._empty_strided_cuda_190
-empty_strided_cuda_191 = torch._C._dynamo.guards._empty_strided_cuda_191
-empty_strided_cuda_192 = torch._C._dynamo.guards._empty_strided_cuda_192
-empty_strided_cuda_193 = torch._C._dynamo.guards._empty_strided_cuda_193
-empty_strided_cuda_194 = torch._C._dynamo.guards._empty_strided_cuda_194
-empty_strided_cuda_195 = torch._C._dynamo.guards._empty_strided_cuda_195
-empty_strided_cuda_196 = torch._C._dynamo.guards._empty_strided_cuda_196
-empty_strided_cuda_197 = torch._C._dynamo.guards._empty_strided_cuda_197
-empty_strided_cuda_198 = torch._C._dynamo.guards._empty_strided_cuda_198
-empty_strided_cuda_199 = torch._C._dynamo.guards._empty_strided_cuda_199
-empty_strided_cuda_200 = torch._C._dynamo.guards._empty_strided_cuda_200
-empty_strided_cuda_201 = torch._C._dynamo.guards._empty_strided_cuda_201
-empty_strided_cuda_202 = torch._C._dynamo.guards._empty_strided_cuda_202
-empty_strided_cuda_203 = torch._C._dynamo.guards._empty_strided_cuda_203
-empty_strided_cuda_204 = torch._C._dynamo.guards._empty_strided_cuda_204
-empty_strided_cuda_205 = torch._C._dynamo.guards._empty_strided_cuda_205
-empty_strided_cuda_206 = torch._C._dynamo.guards._empty_strided_cuda_206
-empty_strided_cuda_207 = torch._C._dynamo.guards._empty_strided_cuda_207
-empty_strided_cuda_208 = torch._C._dynamo.guards._empty_strided_cuda_208
-empty_strided_cuda_209 = torch._C._dynamo.guards._empty_strided_cuda_209
-empty_strided_cuda_210 = torch._C._dynamo.guards._empty_strided_cuda_210
-empty_strided_cuda_211 = torch._C._dynamo.guards._empty_strided_cuda_211
-empty_strided_cuda_212 = torch._C._dynamo.guards._empty_strided_cuda_212
-empty_strided_cuda_213 = torch._C._dynamo.guards._empty_strided_cuda_213
-empty_strided_cuda_214 = torch._C._dynamo.guards._empty_strided_cuda_214
-empty_strided_cuda_215 = torch._C._dynamo.guards._empty_strided_cuda_215
-empty_strided_cuda_216 = torch._C._dynamo.guards._empty_strided_cuda_216
-empty_strided_cuda_217 = torch._C._dynamo.guards._empty_strided_cuda_217
-empty_strided_cuda_218 = torch._C._dynamo.guards._empty_strided_cuda_218
-empty_strided_cuda_219 = torch._C._dynamo.guards._empty_strided_cuda_219
-empty_strided_cuda_220 = torch._C._dynamo.guards._empty_strided_cuda_220
-empty_strided_cuda_221 = torch._C._dynamo.guards._empty_strided_cuda_221
-empty_strided_cuda_222 = torch._C._dynamo.guards._empty_strided_cuda_222
-empty_strided_cuda_223 = torch._C._dynamo.guards._empty_strided_cuda_223
-empty_strided_cuda_224 = torch._C._dynamo.guards._empty_strided_cuda_224
-empty_strided_cuda_225 = torch._C._dynamo.guards._empty_strided_cuda_225
-empty_strided_cuda_226 = torch._C._dynamo.guards._empty_strided_cuda_226
-empty_strided_cuda_227 = torch._C._dynamo.guards._empty_strided_cuda_227
-empty_strided_cuda_228 = torch._C._dynamo.guards._empty_strided_cuda_228
-empty_strided_cuda_229 = torch._C._dynamo.guards._empty_strided_cuda_229
-empty_strided_cuda_230 = torch._C._dynamo.guards._empty_strided_cuda_230
-empty_strided_cuda_231 = torch._C._dynamo.guards._empty_strided_cuda_231
-empty_strided_cuda_232 = torch._C._dynamo.guards._empty_strided_cuda_232
-empty_strided_cuda_233 = torch._C._dynamo.guards._empty_strided_cuda_233
-empty_strided_cuda_234 = torch._C._dynamo.guards._empty_strided_cuda_234
-empty_strided_cuda_235 = torch._C._dynamo.guards._empty_strided_cuda_235
-empty_strided_cuda_236 = torch._C._dynamo.guards._empty_strided_cuda_236
-empty_strided_cuda_237 = torch._C._dynamo.guards._empty_strided_cuda_237
-empty_strided_cuda_238 = torch._C._dynamo.guards._empty_strided_cuda_238
-empty_strided_cuda_239 = torch._C._dynamo.guards._empty_strided_cuda_239
-empty_strided_cuda_240 = torch._C._dynamo.guards._empty_strided_cuda_240
-empty_strided_cuda_241 = torch._C._dynamo.guards._empty_strided_cuda_241
-empty_strided_cuda_242 = torch._C._dynamo.guards._empty_strided_cuda_242
-empty_strided_cuda_243 = torch._C._dynamo.guards._empty_strided_cuda_243
-empty_strided_cuda_244 = torch._C._dynamo.guards._empty_strided_cuda_244
-empty_strided_cuda_245 = torch._C._dynamo.guards._empty_strided_cuda_245
-empty_strided_cuda_246 = torch._C._dynamo.guards._empty_strided_cuda_246
-empty_strided_cuda_247 = torch._C._dynamo.guards._empty_strided_cuda_247
-empty_strided_cuda_248 = torch._C._dynamo.guards._empty_strided_cuda_248
-empty_strided_cuda_249 = torch._C._dynamo.guards._empty_strided_cuda_249
-empty_strided_cuda_250 = torch._C._dynamo.guards._empty_strided_cuda_250
-empty_strided_cuda_251 = torch._C._dynamo.guards._empty_strided_cuda_251
-empty_strided_cuda_252 = torch._C._dynamo.guards._empty_strided_cuda_252
-empty_strided_cuda_253 = torch._C._dynamo.guards._empty_strided_cuda_253
-empty_strided_cuda_254 = torch._C._dynamo.guards._empty_strided_cuda_254
-empty_strided_cuda_255 = torch._C._dynamo.guards._empty_strided_cuda_255
-empty_strided_cuda_256 = torch._C._dynamo.guards._empty_strided_cuda_256
-empty_strided_cuda_257 = torch._C._dynamo.guards._empty_strided_cuda_257
-empty_strided_cuda_258 = torch._C._dynamo.guards._empty_strided_cuda_258
-empty_strided_cuda_259 = torch._C._dynamo.guards._empty_strided_cuda_259
-empty_strided_cuda_260 = torch._C._dynamo.guards._empty_strided_cuda_260
-empty_strided_cuda_261 = torch._C._dynamo.guards._empty_strided_cuda_261
-empty_strided_cuda_262 = torch._C._dynamo.guards._empty_strided_cuda_262
-empty_strided_cuda_263 = torch._C._dynamo.guards._empty_strided_cuda_263
-empty_strided_cuda_264 = torch._C._dynamo.guards._empty_strided_cuda_264
-empty_strided_cuda_265 = torch._C._dynamo.guards._empty_strided_cuda_265
-empty_strided_cuda_266 = torch._C._dynamo.guards._empty_strided_cuda_266
-empty_strided_cuda_267 = torch._C._dynamo.guards._empty_strided_cuda_267
-empty_strided_cuda_268 = torch._C._dynamo.guards._empty_strided_cuda_268
-empty_strided_cuda_269 = torch._C._dynamo.guards._empty_strided_cuda_269
-empty_strided_cuda_270 = torch._C._dynamo.guards._empty_strided_cuda_270
-empty_strided_cuda_271 = torch._C._dynamo.guards._empty_strided_cuda_271
-empty_strided_cuda_272 = torch._C._dynamo.guards._empty_strided_cuda_272
-empty_strided_cuda_273 = torch._C._dynamo.guards._empty_strided_cuda_273
-empty_strided_cuda_274
+
+
+@triton.jit
+def triton_per_fused__native_batch_norm_legit_add_mean_mul_rsub_sub_var_0(
+    in_ptr0, out_ptr0, out_ptr1, out_ptr2, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 8192
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + 64 * x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr0 + (1 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (2 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp5 = tl.load(in_ptr0 + (3 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp7 = tl.load(in_ptr0 + (4 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp9 = tl.load(in_ptr0 + (5 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp11 = tl.load(in_ptr0 + (6 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr0 + (7 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr0 + (8 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp17 = tl.load(in_ptr0 + (9 + 64 * x0), xmask, eviction_policy='evict_last')
+    tmp19 = tl.load(in_ptr0 + (10 + 64 * x0), xmask, eviction_policy='evict_last'
+        )
+    tmp21 = tl.load(in_ptr0 + (11 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp23 = tl.load(in_ptr0 + (12 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp25 = tl.load(in_ptr0 + (13 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp27 = tl.load(in_ptr0 + (14 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp29 = tl.load(in_ptr0 + (15 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp31 = tl.load(in_ptr0 + (16 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp33 = tl.load(in_ptr0 + (17 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp35 = tl.load(in_ptr0 + (18 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp37 = tl.load(in_ptr0 + (19 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp39 = tl.load(in_ptr0 + (20 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp41 = tl.load(in_ptr0 + (21 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp43 = tl.load(in_ptr0 + (22 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp45 = tl.load(in_ptr0 + (23 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp47 = tl.load(in_ptr0 + (24 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp49 = tl.load(in_ptr0 + (25 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp51 = tl.load(in_ptr0 + (26 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp53 = tl.load(in_ptr0 + (27 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp55 = tl.load(in_ptr0 + (28 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp57 = tl.load(in_ptr0 + (29 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp59 = tl.load(in_ptr0 + (30 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp61 = tl.load(in_ptr0 + (31 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp63 = tl.load(in_ptr0 + (32 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp65 = tl.load(in_ptr0 + (33 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp67 = tl.load(in_ptr0 + (34 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp69 = tl.load(in_ptr0 + (35 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp71 = tl.load(in_ptr0 + (36 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp73 = tl.load(in_ptr0 + (37 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp75 = tl.load(in_ptr0 + (38 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp77 = tl.load(in_ptr0 + (39 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp79 = tl.load(in_ptr0 + (40 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp81 = tl.load(in_ptr0 + (41 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp83 = tl.load(in_ptr0 + (42 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp85 = tl.load(in_ptr0 + (43 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp87 = tl.load(in_ptr0 + (44 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp89 = tl.load(in_ptr0 + (45 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp91 = tl.load(in_ptr0 + (46 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp93 = tl.load(in_ptr0 + (47 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp95 = tl.load(in_ptr0 + (48 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp97 = tl.load(in_ptr0 + (49 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp99 = tl.load(in_ptr0 + (50 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp101 = tl.load(in_ptr0 + (51 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp103 = tl.load(in_ptr0 + (52 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp105 = tl.load(in_ptr0 + (53 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp107 = tl.load(in_ptr0 + (54 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp109 = tl.load(in_ptr0 + (55 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp111 = tl.load(in_ptr0 + (56 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp113 = tl.load(in_ptr0 + (57 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp115 = tl.load(in_ptr0 + (58 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp117 = tl.load(in_ptr0 + (59 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp119 = tl.load(in_ptr0 + (60 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp121 = tl.load(in_ptr0 + (61 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp123 = tl.load(in_ptr0 + (62 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp125 = tl.load(in_ptr0 + (63 + 64 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tmp1 + tmp0
+    tmp4 = tmp3 + tmp2
+    tmp6 = tmp5 + tmp4
+    tmp8 = tmp7 + tmp6
+    tmp10 = tmp9 + tmp8
+    tmp12 = tmp11 + tmp10
+    tmp14 = tmp13 + tmp12
+    tmp16 = tmp15 + tmp14
+    tmp18 = tmp17 + tmp16
+    tmp20 = tmp19 + tmp18
+    tmp22 = tmp21 + tmp20
+    tmp24 = tmp23 + tmp22
+    tmp26 = tmp25 + tmp24
+    tmp28 = tmp27 + tmp26
+    tmp30 = tmp29 + tmp28
+    tmp32 = tmp31 + tmp30
+    tmp34 = tmp33 + tmp32
+    tmp36 = tmp35 + tmp34
+    tmp38 = tmp37 + tmp36
+    tmp40 = tmp39 + tmp38
+    tmp42 = tmp41 + tmp40
+    tmp44 = tmp43 + tmp42
+    tmp46 = tmp45 + tmp44
+    tmp48 = tmp47 + tmp46
+    tmp50 = tmp49 + tmp48
+    tmp52 = tmp51 + tmp50
+    tmp54 = tmp53 + tmp52
+    tmp56 = tmp55 + tmp54
+    tmp58 = tmp57 + tmp56
+    tmp60 = tmp59 + tmp58
+    tmp62 = tmp61 + tmp60
+    tmp64 = tmp63 + tmp62
+    tmp66 = tmp65 + tmp64
+    tmp68 = tmp67 + tmp66
+    tmp70 = tmp69 + tmp68
+    tmp72 = tmp71 + tmp70
+    tmp74 = tmp73 + tmp72
+    tmp76 = tmp75 + tmp74
+    tmp78 = tmp77 + tmp76
+    tmp80 = tmp79 + tmp78
+    tmp82 = tmp81 + tmp80
+    tmp84 = tmp83 + tmp82
+    tmp86 = tmp85 + tmp84
+    tmp88 = tmp87 + tmp86
+    tmp90 = tmp89 + tmp88
+    tmp92 = tmp91 + tmp90
+    tmp94 = tmp93 + tmp92
+    tmp96 = tmp95 + tmp94
+    tmp98 = tmp97 + tmp96
+    tmp100 = tmp99 + tmp98
+    tmp102 = tmp101 + tmp100
+    tmp104 = tmp103 + tmp102
+    tmp106 = tmp105 + tmp104
+    tmp108 = tmp107 + tmp106
+    tmp110 = tmp109 + tmp108
+    tmp112 = tmp111 + tmp110
+    tmp114 = tmp113 + tmp112
+    tmp116 = tmp115 + tmp114
+    tmp118 = tmp117 + tmp116
+    tmp120 = tmp119 + tmp118
+    tmp122 = tmp121 + tmp120
+    tmp124 = tmp123 + tmp122
+    tmp126 = tmp125 + tmp124
+    tmp128 = 64.0
+    tmp129 = tmp126 / tmp128
+    tmp130 = tmp0 - tmp129
+    tmp131 = tmp130 * tmp130
+    tmp132 = tmp1 - tmp129
+    tmp133 = tmp132 * tmp132
+    tmp134 = tmp131 + tmp133
+    tmp135 = tmp3 - tmp129
+    tmp136 = tmp135 * tmp135
+    tmp137 = tmp134 + tmp136
+    tmp138 = tmp5 - tmp129
+    tmp139 = tmp138 * tmp138
+    tmp140 = tmp137 + tmp139
+    tmp141 = tmp7 - tmp129
+    tmp142 = tmp141 * tmp141
+    tmp143 = tmp140 + tmp142
+    tmp144 = tmp9 - tmp129
+    tmp145 = tmp144 * tmp144
+    tmp146 = tmp143 + tmp145
+    tmp147 = tmp11 - tmp129
+    tmp148 = tmp147 * tmp147
+    tmp149 = tmp146 + tmp148
+    tmp150 = tmp13 - tmp129
+    tmp151 = tmp150 * tmp150
+    tmp152 = tmp149 + tmp151
+    tmp153 = tmp15 - tmp129
+    tmp154 = tmp153 * tmp153
+    tmp155 = tmp152 + tmp154
+    tmp156 = tmp17 - tmp129
+    tmp157 = tmp156 * tmp156
+    tmp158 = tmp155 + tmp157
+    tmp159 = tmp19 - tmp129
+    tmp160 = tmp159 * tmp159
+    tmp161 = tmp158 + tmp160
+    tmp162 = tmp21 - tmp129
+    tmp163 = tmp162 * tmp162
+    tmp164 = tmp161 + tmp163
+    tmp165 = tmp23 - tmp129
+    tmp166 = tmp165 * tmp165
+    tmp167 = tmp164 + tmp166
+    tmp168 = tmp25 - tmp129
+    tmp169 = tmp168 * tmp168
+    tmp170 = tmp167 + tmp169
+    tmp171 = tmp27 - tmp129
+    tmp172 = tmp171 * tmp171
+    tmp173 = tmp170 + tmp172
+    tmp174 = tmp29 - tmp129
+    tmp175 = tmp174 * tmp174
+    tmp176 = tmp173 + tmp175
+    tmp177 = tmp31 - tmp129
+    tmp178 = tmp177 * tmp177
+    tmp179 = tmp176 + tmp178
+    tmp180 = tmp33 - tmp129
+    tmp181 = tmp180 * tmp180
+    tmp182 = tmp179 + tmp181
+    tmp183 = tmp35 - tmp129
+    tmp184 = tmp183 * tmp183
+    tmp185 = tmp182 + tmp184
+    tmp186 = tmp37 - tmp129
+    tmp187 = tmp186 * tmp186
+    tmp188 = tmp185 + tmp187
+    tmp189 = tmp39 - tmp129
+    tmp190 = tmp189 * tmp189
+    tmp191 = tmp188 + tmp190
+    tmp192 = tmp41 - tmp129
+    tmp193 = tmp192 * tmp192
+    tmp194 = tmp191 + tmp193
+    tmp195 = tmp43 - tmp129
+    tmp196 = tmp195 * tmp195
+    tmp197 = tmp194 + tmp196
+    tmp198 = tmp45 - tmp129
+    tmp199 = tmp198 * tmp198
+    tmp200 = tmp197 + tmp199
+    tmp201 = tmp47 - tmp129
+    tmp202 = tmp201 * tmp201
+    tmp203 = tmp200 + tmp202
+    tmp204 = tmp49 - tmp129
+    tmp205 = tmp204 * tmp204
+    tmp206 = tmp203 + tmp205
+    tmp207 = tmp51 - tmp129
+    tmp208 = tmp207 * tmp207
+    tmp209 = tmp206 + tmp208
+    tmp210 = tmp53 - tmp129
+    tmp211 = tmp210 * tmp210
+    tmp212 = tmp209 + tmp211
+    tmp213 = tmp55 - tmp129
+    tmp214 = tmp213 * tmp213
+    tmp215 = tmp212 + tmp214
+    tmp216 = tmp57 - tmp129
+    tmp217 = tmp216 * tmp216
+    tmp218 = tmp215 + tmp217
+    tmp219 = tmp59 - tmp129
+    tmp220 = tmp219 * tmp219
+    tmp221 = tmp218 + tmp220
+    tmp222 = tmp61 - tmp129
+    tmp223 = tmp222 * tmp222
+    tmp224 = tmp221 + tmp223
+    tmp225 = tmp63 - tmp129
+    tmp226 = tmp225 * tmp225
+    tmp227 = tmp224 + tmp226
+    tmp228 = tmp65 - tmp129
+    tmp229 = tmp228 * tmp228
+    tmp230 = tmp227 + tmp229
+    tmp231 = tmp67 - tmp129
+    tmp232 = tmp231 * tmp231
+    tmp233 = tmp230 + tmp232
+    tmp234 = tmp69 - tmp129
+    tmp235 = tmp234 * tmp234
+    tmp236 = tmp233 + tmp235
+    tmp237 = tmp71 - tmp129
+    tmp238 = tmp237 * tmp237
+    tmp239 = tmp236 + tmp238
+    tmp240 = tmp73 - tmp129
+    tmp241 = tmp240 * tmp240
+    tmp242 = tmp239 + tmp241
+    tmp243 = tmp75 - tmp129
+    tmp244 = tmp243 * tmp243
+    tmp245 = tmp242 + tmp244
+    tmp246 = tmp77 - tmp129
+    tmp247 = tmp246 * tmp246
+    tmp248 = tmp245 + tmp247
+    tmp249 = tmp79 - tmp129
+    tmp250 = tmp249 * tmp249
+    tmp251 = tmp248 + tmp250
+    tmp252 = tmp81 - tmp129
+    tmp253 = tmp252 * tmp252
+    tmp254 = tmp251 + tmp253
+    tmp255 = tmp83 - tmp129
+    tmp256 = tmp255 * tmp255
+    tmp257 = tmp254 + tmp256
+    tmp258 = tmp85 - tmp129
+    tmp259 = tmp258 * tmp258
+    tmp260 = tmp257 + tmp259
+    tmp261 = tmp87 - tmp129
+    tmp262 = tmp261 * tmp261
+    tmp263 = tmp260 + tmp262
+    tmp264 = tmp89 - tmp129
+    tmp265 = tmp264 * tmp264
+    tmp266 = tmp263 + tmp265
+    tmp267 = tmp91 - tmp129
+    tmp268 = tmp267 * tmp267
+    tmp269 = tmp266 + tmp268
+    tmp270 = tmp93 - tmp129
+    tmp271 = tmp270 * tmp270
+    tmp272 = tmp269 + tmp271
+    tmp273 = tmp95 - tmp129
+    tmp274 = tmp273 * tmp273
+    tmp275 = tmp272 + tmp274
+    tmp276 = tmp97 - tmp129
+    tmp277 = tmp276 * tmp276
+    tmp278 = tmp275 + tmp277
+    tmp279 = tmp99 - tmp129
+    tmp280 = tmp279 * tmp279
+    tmp281 = tmp278 + tmp280
+    tmp282 = tmp101 - tmp129
+    tmp283 = tmp282 * tmp282
+    tmp284 = tmp281 + tmp283
+    tmp285 = tmp103 - tmp129
+    tmp286 = tmp285 * tmp285
+    tmp287 = tmp284 + tmp286
+    tmp288 = tmp105 - tmp129
+    tmp289 = tmp288 * tmp288
+    tmp290 = tmp287 + tmp289
+    tmp291 = tmp107 - tmp129
+    tmp292 = tmp291 * tmp291
+    tmp293 = tmp290 + tmp292
+    tmp294 = tmp109 - tmp129
+    tmp295 = tmp294 * tmp294
+    tmp296 = tmp293 + tmp295
+    tmp297 = tmp111 - tmp129
+    tmp298 = tmp297 * tmp297
+    tmp299 = tmp296 + tmp298
+    tmp300 = tmp113 - tmp129
+    tmp301 = tmp300 * tmp300
+    tmp302 = tmp299 + tmp301
+    tmp303 = tmp115 - tmp129
+    tmp304 = tmp303 * tmp303
+    tmp305 = tmp302 + tmp304
+    tmp306 = tmp117 - tmp129
+    tmp307 = tmp306 * tmp306
+    tmp308 = tmp305 + tmp307
+    tmp309 = tmp119 - tmp129
+    tmp310 = tmp309 * tmp309
+    tmp311 = tmp308 + tmp310
+    tmp312 = tmp121 - tmp129
+    tmp313 = tmp312 * tmp312
+    tmp314 = tmp311 + tmp313
+    tmp315 = tmp123 - tmp129
+    tmp316 = tmp315 * tmp315
+    tmp317 = tmp314 + tmp316
+    tmp318 = tmp125 - tmp129
+    tmp319 = tmp318 * tmp318
+    tmp320 = tmp317 + tmp319
+    tmp321 = tmp127 - tmp129
+    tmp322 = tmp321 * tmp321
+    tmp323 = tmp320 + tmp322
+    tmp324 = tmp129 * tmp323
+    tmp325 = tmp324 / tmp128
+    tmp326 = tmp129 - tmp325
+    tmp327 = 1e-05
+    tmp328 = tmp326 * tmp327
+    tmp329 = tmp328 + tmp325
+    tl.store(out_ptr0 + x0, tmp129, xmask)
+    tl.store(out_ptr1 + x0, tmp325, xmask)
+    tl.store(out_ptr2 + x0, tmp329, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_mul_1(in_ptr0, in_ptr1, out_ptr0, xnumel, rnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 32768
+    RBLOCK: tl.constexpr = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 65536 * x0), xmask, other=0.0)
+    tmp1 = tl.load(in_ptr1 + (r1 + 65536 * x0), xmask, other=0.0)
+    tmp2 = tl.load(in_ptr0 + 65536, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (1 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp5 = tl.load(in_ptr0 + (2 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp7 = tl.load(in_ptr0 + (3 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp9 = tl.load(in_ptr0 + (4 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp11 = tl.load(in_ptr0 + (5 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp13 = tl.load(in_ptr0 + (6 + 65536 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp15 = tl.load(in_ptr0 + (7 + 65536 * x0), xmask, eviction
