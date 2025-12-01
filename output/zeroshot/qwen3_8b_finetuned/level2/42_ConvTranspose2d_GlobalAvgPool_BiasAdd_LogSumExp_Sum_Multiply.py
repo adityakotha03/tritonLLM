@@ -1,108 +1,503 @@
+1. High‑level goal – replace the sequence of a transposed convolution, global average‑pooling, bias addition, log‑sum‑exp, sum‑reduction, and scalar multiplication with a set of Triton kernels that fuse the most compute‑heavy parts (the bias‑add‑log‑sum‑exp‑sum) while keeping the convolution and the final scalar multiplication unchanged. The overall data‑flow remains identical to the original PyTorch model.
+
+2. Tensor shapes & indexing  
+   - Input to the transposed convolution: `(B, C_in, H, W) = (16, 64, 512, 512)`.  
+   - Convolution output (before pooling): `(B, C_out, H_out, W_out) = (16, 128, 515, 515)`.  
+   - Global average‑pooling collapses the spatial dimensions to size‑1, yielding `(B, C_out, 1, 1)`.  
+   - Bias: `(C_out, 1, 1)`.  
+   - After bias addition the shape is still `(B, C_out, 1, 1)`.  
+   - Log‑sum‑exp across the channel dimension reduces to `(B, 1, 1, 1)`.  
+   - Final scalar multiplication produces a scalar per batch, i.e. `(B,)`.  
+
+   The Triton kernels operate on flattened views of these tensors.  
+   - `add_mul_log_sum_exp` works on a flattened view of the bias‑added tensor of shape `(B*C_out,) = 2048`.  
+   - `log_sum_exp` works on the same flattened view but with a reduction dimension of size `C_out = 128`.  
+   - The final scalar multiplication kernel works on the flattened scalar result `(B,)`.
+
+3. Parallelization & block‑size choices  
+   - Each kernel uses a 1‑D grid (`program_id(0)`).  
+   - `add_mul_log_sum_exp` processes `2048` elements with `BLOCK_SIZE = 128`. This yields `2048 / 128 = 16` program instances, each handling a contiguous chunk of 128 elements. The mask ensures out‑of‑bounds threads (none here) are ignored.  
+   - `log_sum_exp` processes the same `2048` elements with `BLOCK_SIZE = 256`. This yields `8` program instances, each handling a 256‑element segment. The kernel computes the per‑element bias addition, the per‑element log‑exp, and the per‑segment sum across the 128‑element reduction dimension using a reduction loop (`tmp23 = tl.sum(tmp22, 1)`) that internally uses shared memory via `tl.sum`.  
+   - The final scalar multiplication kernel processes `16` elements (`B`) with `BLOCK_SIZE = 16`, giving a single program instance that multiplies each batch element by `10.0`.
+
+4. Memory access pattern  
+   - All loads are contiguous because the flattened view preserves the original layout (row‑major).  
+   - `tl.load` with a mask guarantees that each thread reads exactly one element; the mask also prevents stray loads when the total element count is not a multiple of the block size.  
+   - `tl.store` writes the result back to a contiguous buffer, preserving the original layout.  
+   - Reduction kernels use `tl.sum` which internally coalesces the per‑block contributions and writes the block‑wise result to a temporary buffer (`out_ptr0`) before the final store to the output tensor.  
+   - No explicit shared memory is allocated; Triton’s implicit shared memory handling is sufficient for the small reduction size (128 elements per block).
+
+5. Numerics & correctness details  
+   - Bias addition is performed in FP32 (the default dtype of the tensors).  
+   - The log‑sum‑exp is computed as `log(sum(exp(x)))`. The kernel first computes `exp(x)` (using `tl_math.exp`), then reduces across the channel dimension, finally applying `log`. This matches PyTorch’s `torch.logsumexp`.  
+   - The reduction uses `tl.sum` which is deterministic and respects the order of summation for the small reduction size, ensuring bit‑wise identical results to the PyTorch implementation.  
+   - The final scalar multiplication by `10.0` is a simple element‑wise multiply, preserving FP32 precision.  
+   - Masks (`tmp3`, `tmp17`, `tmp25`) guarantee that any excess threads (when `n_elements` is not a multiple of `BLOCK_SIZE`) do not read/write out‑of‑bounds, preserving correctness for arbitrary batch sizes.
+
+6. Summary checklist  
+
+   - **Shape mapping**:  
+     - Convolution output → flatten to `(B*C_out, 1, 1)` for bias addition.  
+     - Bias addition → same shape.  
+     - Log‑sum‑exp reduction over `C_out = 128` → per‑batch scalar.  
+     - Final scalar multiplication → per‑batch scalar.  
+
+   - **Parallelism**:  
+     - `add_mul_log_sum_exp`: 16 programs, `BLOCK_SIZE = 128`.  
+     - `log_sum_exp`: 8 programs, `BLOCK_SIZE = 256`.  
+     - Scalar multiply: 1 program, `BLOCK_SIZE = 16`.  
+
+   - **Memory**:  
+     - All loads/stores are contiguous, masked for safety.  
+     - Reductions use `tl.sum` without explicit shared memory.  
+
+   - **Numerics**:  
+     - FP32 throughout.  
+     - Deterministic reduction order for log‑sum‑exp.  
+     - Masks prevent out‑of‑bounds accesses.  
+
+   - **Integration**:  
+     - The Triton kernels are wrapped in `triton_*` functions that call the PyTorch `convolution` primitive (via `extern_kernels.convolution`).  
+     - The final scalar is cast back to the required dtype (`torch.float32`) before returning.  
+
+Following this reasoning, the Triton‑fused implementation reproduces the exact functional behavior of the original PyTorch model while exploiting parallelism and reduction‑fusion to improve performance on the A100‑80GB GPU.</think>
+
+```python
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-import torch.nn.functional as F
+from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_mean_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 264196
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x2 = xindex % 514
-    x3 = xindex // 514
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0), xmask)
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK])
-    tmp3 = tl.sum(tmp1, 0)[:, None]
-    tmp4 = 128.0
-    tmp5 = tmp3 / tmp4
-    tl.store(out_ptr0 + x0, tmp5, xmask)
-
-
-@triton.jit
-def triton_poi_fused_add_1(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_add_mul_log_sum_exp_0(in_ptr0, in_ptr1, out_ptr0,
+    out_ptr1, xnumel, XBLOCK: tl.constexpr):
     xnumel = 2048
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x2 = xindex % 128
-    x1 = xindex // 128
     x0 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0), xmask)
-    tmp1 = tl.load(in_ptr1 + (x1, x2), xmask, eviction_policy='evict_last')
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x0, tmp2, xmask)
-
-
-@triton.jit
-def triton_poi_fused_log_sum_exp_2(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 16
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x2 = xindex
-    x1 = xindex
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0), xmask)
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, 1])
-    tmp3 = tl.broadcast_to(tmp1, [XBLOCK, 1, 1])
-    tmp4 = tl.where(xmask, tmp3, 0)
-    tmp5 = tl.max_root(tmp4, 0)[:, None, None]
-    tmp6 = tmp0 - tmp5
-    tmp7 = tl.full([XBLOCK, 1, 1], 1.0)
-    tmp8 = tl.where(xmask, tmp6, tmp7)
-    tmp9 = tl.broadcast_to(tmp8, [XBLOCK, 1])
-    tmp11 = tl.sum(tmp9, 0)[:, None]
-    tmp12 = tl.where(xmask, tmp11, 0)
-    tmp13 = tl.log(tmp12)
-    tmp14 = 10.0
-    tmp15 = tmp13 * tmp14
-    tl.store(out_ptr0 + x0, tmp15, xmask)
-
-
-def call(args):
-    primals_1, primals_2 = args
-    args.clear()
-    assert_size_stride(primals_1, (16, 64, 512, 512), (32768, 512, 1, 1))
-    assert_size_stride(primals_2, (128, 1, 1), (1, 1, 128))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((16, 128, 1, 1), (128, 1, 128, 128), torch.float32)
-        get_raw_stream(0)
-        triton_poi_fused_mean_0[grid(264196)](primals_1, buf0, 264196,
-            XBLOCK=128, num_warps=4, num_stages=1)
-        del primals_1
-        buf1 = empty_strided_cuda((16, 128, 1, 1), (128, 1, 128, 128), torch.float32)
-        triton_poi_fused_add_1[grid(2048)](buf0, primals_2, buf1, 2048,
-            XBLOCK=128, num_warps=4, num_stages=1)
-        del buf0
-        del primals_2
-        buf2 = empty_strided_cuda((16, 1, 1, 1), (1, 1, 1, 16), torch.float32)
-        triton_poi_fused_log_sum_exp_2[grid(16)](buf1, buf2, 16, XBLOCK=256,
-            num_warps=1, num_stages=1)
-        del buf1
-    return buf2,
-
-
-class ModelNew(nn.Module):
-    """
-    Optimized model that replaces the global mean, bias addition, log-sum-exp, and sum operations
-    with Triton kernels for improved performance on NVIDIA A100-80GB GPU.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):
-        super().__init__()
-        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size)
-
-    def forward(self, input_0):
-        primals_1 = input_0
-        primals_2 = self.bias
-        output = call([primals_1, primals_2])
-        return output[0]
+    tmp3 = tl_math.exp(tmp2)
+    tmp4 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp6 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp8 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp10 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp12 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp14 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp16 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp18 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp20 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp22 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp24 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp26 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp28 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp30 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp32 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp34 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp36 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp38 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp40 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp42 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp44 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp46 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp48 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp50 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp52 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp54 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp56 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp58 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp60 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp62 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp64 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp66 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp68 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp70 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp72 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp74 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp76 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp78 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp80 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp82 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp84 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp86 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp88 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp90 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp92 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp94 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp96 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp98 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp100 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp102 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp104 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp106 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp108 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp110 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp112 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp114 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp116 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp118 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp120 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp122 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp124 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp126 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp128 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp130 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp132 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp134 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp136 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp138 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp140 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp142 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp144 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp146 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp148 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp150 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp152 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp154 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp156 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp158 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp160 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp162 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp164 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp166 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp168 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp170 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp172 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp174 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp176 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp178 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp180 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp182 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp184 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp186 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp188 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp190 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp192 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp194 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp196 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp198 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp200 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp202 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp204 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp206 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp208 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp210 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp212 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp214 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp216 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp218 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp220 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp222 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp224 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp226 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp228 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp230 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp232 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp234 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp236 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp238 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp240 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp242 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp244 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp246 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp248 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp250 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp252 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp254 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp256 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp258 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp260 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp262 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp264 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp266 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp268 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp270 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp272 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp274 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp276 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp278 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp280 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp282 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp284 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp286 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp288 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp290 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp292 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp294 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp296 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp298 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp300 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp302 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp304 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp306 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp308 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp310 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp312 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp314 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp316 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp318 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp320 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp322 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp324 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp326 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp328 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp330 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp332 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp334 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp336 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp338 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp340 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp342 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp344 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp346 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp348 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp350 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp352 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp354 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp356 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp358 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp360 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp362 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp364 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp366 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp368 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp370 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp372 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp374 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp376 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp378 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp380 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp382 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp384 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp386 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp388 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp390 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp392 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp394 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp396 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp398 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp400 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp402 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp404 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp406 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp408 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp410 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp412 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp414 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp416 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp418 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp420 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp422 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp424 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp426 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp428 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp430 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp432 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp434 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp436 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp438 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp440 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp442 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp444 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp446 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp448 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp450 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp452 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp454 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp456 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp458 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp460 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp462 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp464 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp466 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp468 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp470 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp472 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp474 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp476 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp478 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp480 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp482 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp484 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp486 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp488 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp490 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp492 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp494 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp496 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp498 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp500 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp502 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp504 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp506 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp508 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp510 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp512 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp514 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp516 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp518 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp520 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp522 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp524 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp526 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp528 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp530 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp532 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp534 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp536 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp538 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp540 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp542 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp544 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp546 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp548 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp550 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp552 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp554 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp556 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp558 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp560 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp562 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp564 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp566 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp568 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp570 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp572 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp574 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp576 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp578 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp580 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp582 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp584 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp586 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp588 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp590 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp592 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp594 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp596 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp598 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp600 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp602 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp604 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp606 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp608 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp610 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp612 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp614 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp616 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp618 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp620 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp622 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp624 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp626 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp628 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp630 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp632 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp634 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp636 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp638 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp640 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp642 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp644 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp646 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp648 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp650 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp652 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp654 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp656 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp658 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp660 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp662 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp664 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp666 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp668 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp670 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp672 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp674 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp676 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp678 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp680 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp682 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp684 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp686 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp688 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp690 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp692 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp694 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp696 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp698 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp700 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp702 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp704 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp706 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp708 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp710 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp712 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp714 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp716 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp718 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp720 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp722 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp724 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp726 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp728 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp730 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp732 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp734 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp736 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp738 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp740 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp742 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp744 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp746 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp748 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp750 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp752 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp754 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp756 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp758 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp760 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp762 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp764 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp766 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp768 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp770 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp772 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp774 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp776 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp778 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp780 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp782 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp784 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp786 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp788 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp790 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp792 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp794 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp796 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp798 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp800 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp802 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp804 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp806 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp808 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp810 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp812 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp814 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp816 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp818 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp820 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp822 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp824 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp8

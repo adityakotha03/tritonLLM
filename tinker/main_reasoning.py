@@ -32,7 +32,7 @@ TRAIN_ON_WHAT = renderers.TrainOnWhat.ALL_ASSISTANT_MESSAGES
 LEARNING_RATE = hyperparam_utils.get_lr(BASE_MODEL, is_lora=True)
 
 # Paths and logging
-WANDB_PROJECT = os.getenv("WANDB_PROJECT", "kernelbook-training-reasoning")
+WANDB_PROJECT = os.getenv("WANDB_PROJECT", "kernelbook-training-reasoning-V2")
 date_and_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
 LOG_PATH = f"/tmp/tinker-examples/kernelbook/{date_and_time}"
 WANDB_NAME = f"kernelbook-qwen3-8b-{date_and_time}"

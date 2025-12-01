@@ -1,37 +1,56 @@
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_mul(x_ptr, scalar_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    xnumel = n_elements
-    xoffset = tl.program_id(0) * BLOCK_SIZE
-    xindex = xoffset + tl.arange(0, BLOCK_SIZE)[:]
-    tl.full([1], xnumel, tl.int64)
-    mask = xindex < xnumel
-    x = tl.load(x_ptr + xindex, mask=mask, other=0.0)
-    scalar = tl.load(scalar_ptr, mask=mask, other=0.0)
-    tl.store(out_ptr + xindex, x * scalar, mask=mask)
+def triton_poi_fused_mul_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 268435456
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 16384
+    tmp0 = tl.load(in_ptr0 + (x0 + 16384 * x2), xmask)
+    tmp1 = tl.load(in_ptr1 + 0)
+    tmp2 = 3.14
+    tmp3 = tl.load(in_ptr1 + 0)
+    tmp4 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp5 = tmp0 * tmp4
+    tl.store(out_ptr0 + (x0 + 16384 * x2), tmp5, xmask)
 
 
-def triton_mul_new(x: torch.Tensor, scalar: float):
-    assert x.is_cuda
-    scalar_tensor = torch.tensor(scalar, device=x.device)
-    assert scalar_tensor.is_cuda
-    x = x.contiguous()
-    output = torch.empty_like(x)
-    n_elements = x.numel()
-    BLOCK_SIZE = 1024
-    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
-    triton_mul[grid](x, scalar_tensor, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
-    return output
+def call(args):
+    arg0_1, arg1_1 = args
+    args.clear()
+    assert_size_stride(arg0_1, (16384, 4096), (16384, 1))
+    assert_size_stride(arg1_1, (), ())
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((16384, 4096), (16384, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_mul_0[grid(268435456)](arg0_1, arg1_1, buf0, 
+            268435456, XBLOCK=128, num_warps=4, num_stages=1)
+        del arg0_1
+        del arg1_1
+    return buf0,
 
 
 class ModelNew(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, A: torch.Tensor, s: float) -> torch.Tensor:
-        return triton_mul_new(A, s)
+    """
+    Simple model that performs a matrix-scalar multiplication (C = A * s)
+    """
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, input_0):
+        arg1_1 = 3.14
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
+        return output[0]

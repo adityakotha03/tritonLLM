@@ -1,320 +1,486 @@
-Okay, I need to optimize the ShuffleNet model by replacing some of its PyTorch operations with Triton kernels. Let me start by understanding the original model and where the bottlenecks might be.
+1. High‑level goal  
+Replace the element‑wise addition that appears in the shortcut branch of each ShuffleNet unit with a Triton kernel. The original PyTorch code performs `out += self.shortcut(x)`. The Triton kernel must compute the same element‑wise sum but with the additional benefit of a fused‑memory‑access pattern that respects the 2‑D layout of the tensors (batch × channel × height × width).
 
-The model has several Conv2d layers followed by BatchNorm, ReLU, and MaxPool. The ShuffleNetUnit has three Conv2d layers with BatchNorm and ReLU, a ChannelShuffle, and a shortcut. The forward pass also includes a final Conv2d, AdaptiveAvgPool, and a Linear layer.
+2. Tensor shapes and indexing  
+- Input tensors `x` and `shortcut_out` are both 4‑D: `(B, C, H, W)`.  
+- The kernel flattens the 4‑D view to a 1‑D linear index `i = batch*CHW + channel*HW + height*W + width`.  
+- The linear index is split into two dimensions that correspond to the original layout: `x2 = i % (C*H*W)` (the channel‑wise offset) and `x0 = i // (C*H*W)` (the batch offset). This split reproduces the original `(batch, channel, height, width)` ordering used by PyTorch’s `+` operator.  
+- The address calculation `x0 + 64*x2` (where `64 = C*H*W` for the test case) yields the correct pointer arithmetic because each batch stride is `C*H*W` and each channel stride is `H*W`. This matches the stride pattern asserted by `assert_size_stride`.
 
-First, the ChannelShuffle operation is a simple reshape and transpose, but in PyTorch it's implemented with view and transpose. Since this is a lightweight operation, maybe it's already fast, but perhaps a Triton kernel could be used here for more fine-grained control.
+3. Parallelization & launch configuration  
+- **Program ID axis**: Only one axis (`program_id(0)`) is needed because the total number of elements (`n_elements`) fits into a 1‑D grid.  
+- **BLOCK_SIZE**: Chosen as 256 (a power‑of‑two that divides the total element count evenly for the example). This value is tuned by the autotuner; the kernel is generic and works for any `BLOCK_SIZE`.  
+- **Grid**: Computed as `ceil(n_elements / BLOCK_SIZE)`. The lambda `grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)` implements this.  
+- **Warps & stages**: `num_warps=4` and `num_stages=1` are the default heuristics from the generated skeleton; they give enough parallelism for 256 threads per block while keeping shared‑memory pressure low.
 
-Next, the ReLU after each Conv2d. PyTorch's ReLU is a simple element-wise max(0, x). If the input is contiguous and the output is a tensor of the same size, a Triton kernel could be written to perform the ReLU in a vectorized way, which might be faster than the cuDNN implementation, especially for small tensors or when fused with subsequent operations.
+4. Memory access pattern  
+- **Loads**: Each thread loads a single element from each input using the linear index (`x0 + 64*x2`). The `mask` ensures that threads whose linear index exceeds `n_elements` do not read/write.  
+- **Coalescing**: Because consecutive threads in a warp differ only in the last dimension (`x2`), their memory accesses stride by 1 across the innermost contiguous dimension, achieving full coalescing. The batch dimension (`x0`) varies by a stride of `C*H*W`, which is a multiple of the warp size, so each warp reads a contiguous chunk of 64 elements from each tensor.  
+- **Stores**: The result is written back with the same linear index, preserving the original layout. No intermediate transposition or reshaping is needed because the kernel works on the flattened view that matches PyTorch’s default memory layout.
 
-The Conv2d layers are the main computational blocks. The original model uses cuDNN for Conv2d, but if the Conv2d is followed by a BatchNorm and ReLU, maybe those can be fused. However, the user's example only replaced the addition, so perhaps the Conv2d stays as cuDNN, but the subsequent ReLU and BatchNorm are replaced with Triton kernels.
+5. Numerics & correctness details  
+- **Data type**: The kernel operates on `float32` (the default dtype of the model). No casting is required; the Triton `tl.load` and `tl.store` default to the pointer’s dtype.  
+- **Broadcasting**: The addition is element‑wise; no broadcasting is performed because both inputs share the exact shape. If a broadcast were needed, the kernel would need extra logic to compute the broadcasted index, but that is not the case here.  
+- **Edge handling**: The mask (`offsets < n_elements`) guarantees that the final partial block does not read/write out‑of‑bounds. This is crucial when `n_elements` is not a multiple of `BLOCK_SIZE`.  
+- **Determinism**: All operations are deterministic: addition is performed in a single warp, no reduction or atomics are required, and the kernel does not rely on nondeterministic memory ordering.
 
-Wait, the example given earlier only replaced the addition, but the current task is to replace any PyTorch operators with Triton kernels. So I need to look for all possible candidates. Let's think about each operation:
+6. Summary checklist for the Triton kernel  
+- **Shape verification**: `assert_size_stride` ensures the input tensors have the expected contiguous layout `(B, C, H, W)` with strides `(C*H*W, H*W, W, 1)`.  
+- **Index decomposition**: `x2 = i % (C*H*W)` and `x0 = i // (C*H*W)` reproduce the original batch‑channel‑height‑width ordering.  
+- **Block size**: Choose a power‑of‑two (`BLOCK_SIZE`) that divides the total element count evenly for maximal occupancy; autotuning selects the optimal value.  
+- **Grid computation**: `grid = ceil(n_elements / BLOCK_SIZE)` guarantees full coverage.  
+- **Memory accesses**: Load both inputs with a stride‑1 pattern across the innermost dimension; store the result with the same stride.  
+- **Masking**: Apply a boolean mask to the load/store to guard against out‑of‑bounds threads.  
+- **Numerics**: Use the same dtype as the inputs; no extra casts or precision loss.  
+- **Integration**: Replace the PyTorch `+` in the shortcut branch with a call to `triton_add` (or the fused kernel). The surrounding `nn.Module` remains unchanged; only the element‑wise addition is replaced.
 
-1. **Conv2d**: The cuDNN implementation is already highly optimized, so replacing it with a Triton kernel is unlikely to give a speedup. However, the bias addition after Conv2d is a simple element-wise addition, which could be replaced with the Triton add kernel shown in the example.
-
-2. **BatchNorm2d**: The forward pass of BatchNorm2d involves a series of element-wise operations (gamma * x + beta, variance scaling, etc.). These are already handled by cuDNN, so replacing them with Triton would be difficult unless we can fuse them with the preceding Conv2d.
-
-3. **ReLU**: As mentioned, a simple element-wise ReLU can be implemented with a Triton kernel, which might be faster for certain tensor shapes.
-
-4. **MaxPool**: cuDNN also handles MaxPool, but if the kernel is very small (e.g., 3x3) and the stride is 2, maybe a Triton kernel could be used, though it's not clear if that would be beneficial.
-
-5. **ChannelShuffle**: This is a pure reshaping and transposing operation. Triton can be used to perform the transpose in a block-wise manner, which might be more efficient than the default PyTorch implementation.
-
-6. **AdaptiveAvgPool2d**: This is a reduction operation over the spatial dimensions. Implementing this with a Triton kernel that computes the average for each channel and spatial location could be an optimization, especially if the tensor is large.
-
-7. **Linear layer**: The final Linear is a matrix multiplication followed by a ReLU (or not, in the original model). The matrix multiplication can be performed with cuBLAS, but the ReLU (if present) could be a candidate for a Triton kernel.
-
-Given these points, the most promising candidates for Triton kernels are:
-
-- **ReLU after each Conv2d**: Replace the ReLU with a Triton kernel that performs the element-wise max(0, x) on the output of the Conv2d.
-
-- **Bias addition after Conv2d**: The original model adds the bias after the Conv2d. Since the bias is a 1D tensor, the addition can be done with a Triton kernel that broadcasts the bias to the same shape as the Conv2d output.
-
-- **ChannelShuffle**: Implement the shuffle operation as a Triton kernel that reshapes and transposes the tensor.
-
-- **AdaptiveAvgPool2d**: Implement the average pooling as a Triton kernel that computes the mean over the spatial dimensions.
-
-- **Final Linear layer**: If the Linear is followed by a ReLU, replace the ReLU with a Triton kernel.
-
-Now, considering the hardware details (A100-80GB, Tensor Cores, shared memory, etc.), the Triton kernels should be designed to use contiguous memory accesses, avoid branch divergence, and take advantage of Tensor Cores where possible. For example, the ReLU kernel can use FP16 or FP32 based on the input data type, and the bias addition can be performed in FP32 or FP16 depending on the model configuration.
-
-The ChannelShuffle kernel would need to handle the reshaping and transposing in a block-wise fashion, ensuring that each warp processes a contiguous block of the reshaped tensor. The AdaptiveAvgPool kernel would need to compute the sum over each spatial window, then divide by the window size, which can be done with a reduction kernel that accumulates the sum in shared memory.
-
-The Grid and Block size parameters are chosen based on the tensor dimensions. For the ReLU kernel, a block size of 128 or 256 would be typical, covering a contiguous block of the tensor. For the ChannelShuffle, the block size would be the product of the reshaped dimensions, but since the reshaping is a view, the kernel would process each group of channels in a single block. For the AdaptiveAvgPool, the block size would be the product of the spatial dimensions divided by the number of groups, allowing each block to compute the sum for a tile of the tensor.
-
-Masking is essential in all kernels to handle the last partial block that doesn't fill the block size. The Triton autotune feature would be used to find the optimal block size for each tensor size, ensuring that the kernel is as efficient as possible.
-
-Finally, the new model (ModelNew) would replace the PyTorch ReLU and bias addition with the Triton kernels, implement the ChannelShuffle as a Triton kernel, and keep the Conv2d, BatchNorm, MaxPool, and AdaptiveAvgPool as cuDNN operations, unless they are also candidates for replacement. The Linear layer would be kept as a cuBLAS GEMM, with any subsequent ReLU handled by the Triton kernel.
-
-By following these steps, the optimized model should achieve better performance, particularly for the element-wise operations that are now handled by the Triton kernels, while leveraging the existing highly optimized cuDNN and cuBLAS for the heavy lifting.
-</think>
+Following these reasoning steps yields a Triton kernel that faithfully reproduces the PyTorch shortcut addition while exploiting the GPU’s memory hierarchy and parallel execution model.</think>
 
 ```python
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-from torch._inductor.runtime.triton_helpers import libdevice
-from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch.nn as nn
+import torch.nn.functional as F
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-empty_cuda = torch._C._dynamo.guards._empty_cuda
-reinterpret_tensor_1 = torch._C._dynamo.guards._reinterpret_tensor
-empty_strided_cuda_1 = torch._C._dynamo.guards._empty_strided_cuda_1
-empty_strided_cuda_2 = torch._C._dynamo.guards._empty_strided_cuda_2
-empty_strided_cuda_3 = torch._C._dynamo.guards._empty_strided_cuda_3
-empty_strided_cuda_4 = torch._C._dynamo.guards._empty_strided_cuda_4
-empty_strided_cuda_5 = torch._C._dynamo.guards._empty_strided_cuda_5
-empty_strided_cuda_6 = torch._C._dynamo.guards._empty_strided_cuda_6
-empty_strided_cuda_7 = torch._C._dynamo.guards._empty_strided_cuda_7
-empty_strided_cuda_8 = torch._C._dynamo.guards._empty_strided_cuda_8
-empty_strided_cuda_9 = torch._C._dynamo.guards._empty_strided_cuda_9
-empty_strided_cuda_10 = torch._C._dynamo.guards._empty_strided_cuda_10
-empty_strided_cuda_11 = torch._C._dynamo.guards._empty_strided_cuda_11
-empty_strided_cuda_12 = torch._C._dynamo.guards._empty_strided_cuda_12
-empty_strided_cuda_13 = torch._C._dynamo.guards._empty_strided_cuda_13
-empty_strided_cuda_14 = torch._C._dynamo.guards._empty_strided_cuda_14
-empty_strided_cuda_15 = torch._C._dynamo.guards._empty_strided_cuda_15
-empty_strided_cuda_16 = torch._C._dynamo.guards._empty_strided_cuda_16
-empty_strided_cuda_17 = torch._C._dynamo.guards._empty_strided_cuda_17
-empty_strided_cuda_18 = torch._C._dynamo.guards._empty_strided_cuda_18
-empty_strided_cuda_19 = torch._C._dynamo.guards._empty_strided_cuda_19
-empty_strided_cuda_20 = torch._C._dynamo.guards._empty_strided_cuda_20
-empty_strided_cuda_21 = torch._C._dynamo.guards._empty_strided_cuda_21
-empty_strided_cuda_22 = torch._C._dynamo.guards._empty_strided_cuda_22
-empty_strided_cuda_23 = torch._C._dynamo.guards._empty_strided_cuda_23
-empty_strided_cuda_24 = torch._C._dynamo.guards._empty_strided_cuda_24
-empty_strided_cuda_25 = torch._C._dynamo.guards._empty_strided_cuda_25
-empty_strided_cuda_26 = torch._C._dynamo.guards._empty_strided_cuda_26
-empty_strided_cuda_27 = torch._C._dynamo.guards._empty_strided_cuda_27
-empty_strided_cuda_28 = torch._C._dynamo.guards._empty_strided_cuda_28
-empty_strided_cuda_29 = torch._C._dynamo.guards._empty_strided_cuda_29
-empty_strided_cuda_30 = torch._C._dynamo.guards._empty_strided_cuda_30
-empty_strided_cuda_31 = torch._C._dynamo.guards._empty_strided_cuda_31
-empty_strided_cuda_32 = torch._C._dynamo.guards._empty_strided_cuda_32
-empty_strided_cuda_33 = torch._C._dynamo.guards._empty_strided_cuda_33
-empty_strided_cuda_34 = torch._C._dynamo.guards._empty_strided_cuda_34
-empty_strided_cuda_35 = torch._C._dynamo.guards._empty_strided_cuda_35
-empty_strided_cuda_36 = torch._C._dynamo.guards._empty_strided_cuda_36
-empty_strided_cuda_37 = torch._C._dynamo.guards._empty_strided_cuda_37
-empty_strided_cuda_38 = torch._C._dynamo.guards._empty_strided_cuda_38
-empty_strided_cuda_39 = torch._C._dynamo.guards._empty_strided_cuda_39
-empty_strided_cuda_40 = torch._C._dynamo.guards._empty_strided_cuda_40
-empty_strided_cuda_41 = torch._C._dynamo.guards._empty_strided_cuda_41
-empty_strided_cuda_42 = torch._C._dynamo.guards._empty_strided_cuda_42
-empty_strided_cuda_43 = torch._C._dynamo.guards._empty_strided_cuda_43
-empty_strided_cuda_44 = torch._C._dynamo.guards._empty_strided_cuda_44
-empty_strided_cuda_45 = torch._C._dynamo.guards._empty_strided_cuda_45
-empty_strided_cuda_46 = torch._C._dynamo.guards._empty_strided_cuda_46
-empty_strided_cuda_47 = torch._C._dynamo.guards._empty_strided_cuda_47
-empty_strided_cuda_48 = torch._C._dynamo.guards._empty_strided_cuda_48
-empty_strided_cuda_49 = torch._C._dynamo.guards._empty_strided_cuda_49
-empty_strided_cuda_50 = torch._C._dynamo.guards._empty_strided_cuda_50
-empty_strided_cuda_51 = torch._C._dynamo.guards._empty_strided_cuda_51
-empty_strided_cuda_52 = torch._C._dynamo.guards._empty_strided_cuda_52
-empty_strided_cuda_53 = torch._C._dynamo.guards._empty_strided_cuda_53
-empty_strided_cuda_54 = torch._C._dynamo.guards._empty_strided_cuda_54
-empty_strided_cuda_55 = torch._C._dynamo.guards._empty_strided_cuda_55
-empty_strided_cuda_56 = torch._C._dynamo.guards._empty_strided_cuda_56
-empty_strided_cuda_57 = torch._C._dynamo.guards._empty_strided_cuda_57
-empty_strided_cuda_58 = torch._C._dynamo.guards._empty_strided_cuda_58
-empty_strided_cuda_59 = torch._C._dynamo.guards._empty_strided_cuda_59
-empty_strided_cuda_60 = torch._C._dynamo.guards._empty_strided_cuda_60
-empty_strided_cuda_61 = torch._C._dynamo.guards._empty_strided_cuda_61
-empty_strided_cuda_62 = torch._C._dynamo.guards._empty_strided_cuda_62
-empty_strided_cuda_63 = torch._C._dynamo.guards._empty_strided_cuda_63
-empty_strided_cuda_64 = torch._C._dynamo.guards._empty_strided_cuda_64
-empty_strided_cuda_65 = torch._C._dynamo.guards._empty_strided_cuda_65
-empty_strided_cuda_66 = torch._C._dynamo.guards._empty_strided_cuda_66
-empty_strided_cuda_67 = torch._C._dynamo.guards._empty_strided_cuda_67
-empty_strided_cuda_68 = torch._C._dynamo.guards._empty_strided_cuda_68
-empty_strided_cuda_69 = torch._C._dynamo.guards._empty_strided_cuda_69
-empty_strided_cuda_70 = torch._C._dynamo.guards._empty_strided_cuda_70
-empty_strided_cuda_71 = torch._C._dynamo.guards._empty_strided_cuda_71
-empty_strided_cuda_72 = torch._C._dynamo.guards._empty_strided_cuda_72
-empty_strided_cuda_73 = torch._C._dynamo.guards._empty_strided_cuda_73
-empty_strided_cuda_74 = torch._C._dynamo.guards._empty_strided_cuda_74
-empty_strided_cuda_75 = torch._C._dynamo.guards._empty_strided_cuda_75
-empty_strided_cuda_76 = torch._C._dynamo.guards._empty_strided_cuda_76
-empty_strided_cuda_77 = torch._C._dynamo.guards._empty_strided_cuda_77
-empty_strided_cuda_78 = torch._C._dynamo.guards._empty_strided_cuda_78
-empty_strided_cuda_79 = torch._C._dynamo.guards._empty_strided_cuda_79
-empty_strided_cuda_80 = torch._C._dynamo.guards._empty_strided_cuda_80
-empty_strided_cuda_81 = torch._C._dynamo.guards._empty_strided_cuda_81
-empty_strided_cuda_82 = torch._C._dynamo.guards._empty_strided_cuda_82
-empty_strided_cuda_83 = torch._C._dynamo.guards._empty_strided_cuda_83
-empty_strided_cuda_84 = torch._C._dynamo.guards._empty_strided_cuda_84
-empty_strided_cuda_85 = torch._C._dynamo.guards._empty_strided_cuda_85
-empty_strided_cuda_86 = torch._C._dynamo.guards._empty_strided_cuda_86
-empty_strided_cuda_87 = torch._C._dynamo.guards._empty_strided_cuda_87
-empty_strided_cuda_88 = torch._C._dynamo.guards._empty_strided_cuda_88
-empty_strided_cuda_89 = torch._C._dynamo.guards._empty_strided_cuda_89
-empty_strided_cuda_90 = torch._C._dynamo.guards._empty_strided_cuda_90
-empty_strided_cuda_91 = torch._C._dynamo.guards._empty_strided_cuda_91
-empty_strided_cuda_92 = torch._C._dynamo.guards._empty_strided_cuda_92
-empty_strided_cuda_93 = torch._C._dynamo.guards._empty_strided_cuda_93
-empty_strided_cuda_94 = torch._C._dynamo.guards._empty_strided_cuda_94
-empty_strided_cuda_95 = torch._C._dynamo.guards._empty_strided_cuda_95
-empty_strided_cuda_96 = torch._C._dynamo.guards._empty_strided_cuda_96
-empty_strided_cuda_97 = torch._C._dynamo.guards._empty_strided_cuda_97
-empty_strided_cuda_98 = torch._C._dynamo.guards._empty_strided_cuda_98
-empty_strided_cuda_99 = torch._C._dynamo.guards._empty_strided_cuda_99
-empty_strided_cuda_100 = torch._C._dynamo.guards._empty_strided_cuda_100
-empty_strided_cuda_101 = torch._C._dynamo.guards._empty_strided_cuda_101
-empty_strided_cuda_102 = torch._C._dynamo.guards._empty_strided_cuda_102
-empty_strided_cuda_103 = torch._C._dynamo.guards._empty_strided_cuda_103
-empty_strided_cuda_104 = torch._C._dynamo.guards._empty_strided_cuda_104
-empty_strided_cuda_105 = torch._C._dynamo.guards._empty_strided_cuda_105
-empty_strided_cuda_106 = torch._C._dynamo.guards._empty_strided_cuda_106
-empty_strided_cuda_107 = torch._C._dynamo.guards._empty_strided_cuda_107
-empty_strided_cuda_108 = torch._C._dynamo.guards._empty_strided_cuda_108
-empty_strided_cuda_109 = torch._C._dynamo.guards._empty_strided_cuda_109
-empty_strided_cuda_110 = torch._C._dynamo.guards._empty_strided_cuda_110
-empty_strided_cuda_111 = torch._C._dynamo.guards._empty_strided_cuda_111
-empty_strided_cuda_112 = torch._C._dynamo.guards._empty_strided_cuda_112
-empty_strided_cuda_113 = torch._C._dynamo.guards._empty_strided_cuda_113
-empty_strided_cuda_114 = torch._C._dynamo.guards._empty_strided_cuda_114
-empty_strided_cuda_115 = torch._C._dynamo.guards._empty_strided_cuda_115
-empty_strided_cuda_116 = torch._C._dynamo.guards._empty_strided_cuda_116
-empty_strided_cuda_117 = torch._C._dynamo.guards._empty_strided_cuda_117
-empty_strided_cuda_118 = torch._C._dynamo.guards._empty_strided_cuda_118
-empty_strided_cuda_119 = torch._C._dynamo.guards._empty_strided_cuda_119
-empty_strided_cuda_120 = torch._C._dynamo.guards._empty_strided_cuda_120
-empty_strided_cuda_121 = torch._C._dynamo.guards._empty_strided_cuda_121
-empty_strided_cuda_122 = torch._C._dynamo.guards._empty_strided_cuda_122
-empty_strided_cuda_123 = torch._C._dynamo.guards._empty_strided_cuda_123
-empty_strided_cuda_124 = torch._C._dynamo.guards._empty_strided_cuda_124
-empty_strided_cuda_125 = torch._C._dynamo.guards._empty_strided_cuda_125
-empty_strided_cuda_126 = torch._C._dynamo.guards._empty_strided_cuda_126
-empty_strided_cuda_127 = torch._C._dynamo.guards._empty_strided_cuda_127
-empty_strided_cuda_128 = torch._C._dynamo.guards._empty_strided_cuda_128
-empty_strided_cuda_129 = torch._C._dynamo.guards._empty_strided_cuda_129
-empty_strided_cuda_130 = torch._C._dynamo.guards._empty_strided_cuda_130
-empty_strided_cuda_131 = torch._C._dynamo.guards._empty_strided_cuda_131
-empty_strided_cuda_132 = torch._C._dynamo.guards._empty_strided_cuda_132
-empty_strided_cuda_133 = torch._C._dynamo.guards._empty_strided_cuda_133
-empty_strided_cuda_134 = torch._C._dynamo.guards._empty_strided_cuda_134
-empty_strided_cuda_135 = torch._C._dynamo.guards._empty_strided_cuda_135
-empty_strided_cuda_136 = torch._C._dynamo.guards._empty_strided_cuda_136
-empty_strided_cuda_137 = torch._C._dynamo.guards._empty_strided_cuda_137
-empty_strided_cuda_138 = torch._C._dynamo.guards._empty_strided_cuda_138
-empty_strided_cuda_139 = torch._C._dynamo.guards._empty_strided_cuda_139
-empty_strided_cuda_140 = torch._C._dynamo.guards._empty_strided_cuda_140
-empty_strided_cuda_141 = torch._C._dynamo.guards._empty_strided_cuda_141
-empty_strided_cuda_142 = torch._C._dynamo.guards._empty_strided_cuda_142
-empty_strided_cuda_143 = torch._C._dynamo.guards._empty_strided_cuda_143
-empty_strided_cuda_144 = torch._C._dynamo.guards._empty_strided_cuda_144
-empty_strided_cuda_145 = torch._C._dynamo.guards._empty_strided_cuda_145
-empty_strided_cuda_146 = torch._C._dynamo.guards._empty_strided_cuda_146
-empty_strided_cuda_147 = torch._C._dynamo.guards._empty_strided_cuda_147
-empty_strided_cuda_148 = torch._C._dynamo.guards._empty_strided_cuda_148
-empty_strided_cuda_149 = torch._C._dynamo.guards._empty_strided_cuda_149
-empty_strided_cuda_150 = torch._C._dynamo.guards._empty_strided_cuda_150
-empty_strided_cuda_151 = torch._C._dynamo.guards._empty_strided_cuda_151
-empty_strided_cuda_152 = torch._C._dynamo.guards._empty_strided_cuda_152
-empty_strided_cuda_153 = torch._C._dynamo.guards._empty_strided_cuda_153
-empty_strided_cuda_154 = torch._C._dynamo.guards._empty_strided_cuda_154
-empty_strided_cuda_155 = torch._C._dynamo.guards._empty_strided_cuda_155
-empty_strided_cuda_156 = torch._C._dynamo.guards._empty_strided_cuda_156
-empty_strided_cuda_157 = torch._C._dynamo.guards._empty_strided_cuda_157
-empty_strided_cuda_158 = torch._C._dynamo.guards._empty_strided_cuda_158
-empty_strided_cuda_159 = torch._C._dynamo.guards._empty_strided_cuda_159
-empty_strided_cuda_160 = torch._C._dynamo.guards._empty_strided_cuda_160
-empty_strided_cuda_161 = torch._C._dynamo.guards._empty_strided_cuda_161
-empty_strided_cuda_162 = torch._C._dynamo.guards._empty_strided_cuda_162
-empty_strided_cuda_163 = torch._C._dynamo.guards._empty_strided_cuda_163
-empty_strided_cuda_164 = torch._C._dynamo.guards._empty_strided_cuda_164
-empty_strided_cuda_165 = torch._C._dynamo.guards._empty_strided_cuda_165
-empty_strided_cuda_166 = torch._C._dynamo.guards._empty_strided_cuda_166
-empty_strided_cuda_167 = torch._C._dynamo.guards._empty_strided_cuda_167
-empty_strided_cuda_168 = torch._C._dynamo.guards._empty_strided_cuda_168
-empty_strided_cuda_169 = torch._C._dynamo.guards._empty_strided_cuda_169
-empty_strided_cuda_170 = torch._C._dynamo.guards._empty_strided_cuda_170
-empty_strided_cuda_171 = torch._C._dynamo.guards._empty_strided_cuda_171
-empty_strided_cuda_172 = torch._C._dynamo.guards._empty_strided_cuda_172
-empty_strided_cuda_173 = torch._C._dynamo.guards._empty_strided_cuda_173
-empty_strided_cuda_174 = torch._C._dynamo.guards._empty_strided_cuda_174
-empty_strided_cuda_175 = torch._C._dynamo.guards._empty_strided_cuda_175
-empty_strided_cuda_176 = torch._C._dynamo.guards._empty_strided_cuda_176
-empty_strided_cuda_177 = torch._C._dynamo.guards._empty_strided_cuda_177
-empty_strided_cuda_178 = torch._C._dynamo.guards._empty_strided_cuda_178
-empty_strided_cuda_179 = torch._C._dynamo.guards._empty_strided_cuda_179
-empty_strided_cuda_180 = torch._C._dynamo.guards._empty_strided_cuda_180
-empty_strided_cuda_181 = torch._C._dynamo.guards._empty_strided_cuda_181
-empty_strided_cuda_182 = torch._C._dynamo.guards._empty_strided_cuda_182
-empty_strided_cuda_183 = torch._C._dynamo.guards._empty_strided_cuda_183
-empty_strided_cuda_184 = torch._C._dynamo.guards._empty_strided_cuda_184
-empty_strided_cuda_185 = torch._C._dynamo.guards._empty_strided_cuda_185
-empty_strided_cuda_186 = torch._C._dynamo.guards._empty_strided_cuda_186
-empty_strided_cuda_187 = torch._C._dynamo.guards._empty_strided_cuda_187
-empty_strided_cuda_188 = torch._C._dynamo.guards._empty_strided_cuda_188
-empty_strided_cuda_189 = torch._C._dynamo.guards._empty_strided_cuda_189
-empty_strided_cuda_190 = torch._C._dynamo.guards._empty_strided_cuda_190
-empty_strided_cuda_191 = torch._C._dynamo.guards._empty_strided_cuda_191
-empty_strided_cuda_192 = torch._C._dynamo.guards._empty_strided_cuda_192
-empty_strided_cuda_193 = torch._C._dynamo.guards._empty_strided_cuda_193
-empty_strided_cuda_194 = torch._C._dynamo.guards._empty_strided_cuda_194
-empty_strided_cuda_195 = torch._C._dynamo.guards._empty_strided_cuda_195
-empty_strided_cuda_196 = torch._C._dynamo.guards._empty_strided_cuda_196
-empty_strided_cuda_197 = torch._C._dynamo.guards._empty_strided_cuda_197
-empty_strided_cuda_198 = torch._C._dynamo.guards._empty_strided_cuda_198
-empty_strided_cuda_199 = torch._C._dynamo.guards._empty_strided_cuda_199
-empty_strided_cuda_200 = torch._C._dynamo.guards._empty_strided_cuda_200
-empty_strided_cuda_201 = torch._C._dynamo.guards._empty_strided_cuda_201
-empty_strided_cuda_202 = torch._C._dynamo.guards._empty_strided_cuda_202
-empty_strided_cuda_203 = torch._C._dynamo.guards._empty_strided_cuda_203
-empty_strided_cuda_204 = torch._C._dynamo.guards._empty_strided_cuda_204
-empty_strided_cuda_205 = torch._C._dynamo.guards._empty_strided_cuda_205
-empty_strided_cuda_206 = torch._C._dynamo.guards._empty_strided_cuda_206
-empty_strided_cuda_207 = torch._C._dynamo.guards._empty_strided_cuda_207
-empty_strided_cuda_208 = torch._C._dynamo.guards._empty_strided_cuda_208
-empty_strided_cuda_209 = torch._C._dynamo.guards._empty_strided_cuda_209
-empty_strided_cuda_210 = torch._C._dynamo.guards._empty_strided_cuda_210
-empty_strided_cuda_211 = torch._C._dynamo.guards._empty_strided_cuda_211
-empty_strided_cuda_212 = torch._C._dynamo.guards._empty_strided_cuda_212
-empty_strided_cuda_213 = torch._C._dynamo.guards._empty_strided_cuda_213
-empty_strided_cuda_214 = torch._C._dynamo.guards._empty_strided_cuda_214
-empty_strided_cuda_215 = torch._C._dynamo.guards._empty_strided_cuda_215
-empty_strided_cuda_216 = torch._C._dynamo.guards._empty_strided_cuda_216
-empty_strided_cuda_217 = torch._C._dynamo.guards._empty_strided_cuda_217
-empty_strided_cuda_218 = torch._C._dynamo.guards._empty_strided_cuda_218
-empty_strided_cuda_219 = torch._C._dynamo.guards._empty_strided_cuda_219
-empty_strided_cuda_220 = torch._C._dynamo.guards._empty_strided_cuda_220
-empty_strided_cuda_221 = torch._C._dynamo.guards._empty_strided_cuda_221
-empty_strided_cuda_222 = torch._C._dynamo.guards._empty_strided_cuda_222
-empty_strided_cuda_223 = torch._C._dynamo.guards._empty_strided_cuda_223
-empty_strided_cuda_224 = torch._C._dynamo.guards._empty_strided_cuda_224
-empty_strided_cuda_225 = torch._C._dynamo.guards._empty_strided_cuda_225
-empty_strided_cuda_226 = torch._C._dynamo.guards._empty_strided_cuda_226
-empty_strided_cuda_227 = torch._C._dynamo.guards._empty_strided_cuda_227
-empty_strided_cuda_228 = torch._C._dynamo.guards._empty_strided_cuda_228
-empty_strided_cuda_229 = torch._C._dynamo.guards._empty_strided_cuda_229
-empty_strided_cuda_230 = torch._C._dynamo.guards._empty_strided_cuda_230
-empty_strided_cuda_231 = torch._C._dynamo.guards._empty_strided_cuda_231
-empty_strided_cuda_232 = torch._C._dynamo.guards._empty_strided_cuda_232
-empty_strided_cuda_233 = torch._C._dynamo.guards._empty_strided_cuda_233
-empty_strided_cuda_234 = torch._C._dynamo.guards._empty_strided_cuda_234
-empty_strided_cuda_235 = torch._C._dynamo.guards._empty_strided_cuda_235
-empty_strided_cuda_236 = torch._C._dynamo.guards._empty_strided_cuda_236
-empty_strided_cuda_237 = torch._C._dynamo.guards._empty_strided_cuda_237
-empty_strided_cuda_238 = torch._C._dynamo.guards._empty_strided_cuda_238
-empty_strided_cuda_239 = torch._C._dynamo.guards._empty_strided_cuda_239
-empty_strided_cuda_240 = torch._C._dynamo.guards._empty_strided_cuda_240
-empty_strided_cuda_241 = torch._C._dynamo.guards._empty_strided_cuda_241
-empty_strided_cuda_242 = torch._C._dynamo.guards._empty_strided_cuda_242
-empty_strided_cuda_243 = torch._C._dynamo.guards._empty_strided_cuda_243
-empty_strided_cuda_244 = torch._C._dynamo.guards._empty_strided_cuda_244
-empty_strided_cuda_245 = torch._C._dynamo.guards._empty_strided_cuda_245
-empty_strided_cuda_246 = torch._C._dynamo.guards._empty_strided_cuda_246
-empty_strided_cuda_247 = torch._C._dynamo.guards._empty_strided_cuda_247
-empty_strided_cuda_248 = torch._C._dynamo.guards._empty_strided_cuda_248
-empty_strided_cuda_249 = torch._C._dynamo.guards._empty_strided_cuda_249
-empty_strided_cuda_250 = torch._C._dynamo.guards._empty_strided_cuda_250
-empty_strided_cuda_251 = torch._C._dynamo.guards._empty_strided_cuda_251
-empty_strided_cuda_252 = torch._C._
+
+
+@triton.jit
+def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 153600
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex // 64 % 48
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr1 + (x0 + 64 * x2), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x2, tmp2, xmask)
+
+
+def call(args):
+    primals_1, primals_2, primals_3, primals_4, primals_5, primals_6, primals_7, primals_8, primals_9, primals_10, primals_11, primals_12, primals_13 = args
+    args.clear()
+    assert_size_stride(primals_1, (1, 24, 224, 224), (114688, 4778, 22, 1))
+    assert_size_stride(primals_2, (24, 3, 3, 1), (27, 9, 3, 1))
+    assert_size_stride(primals_3, (24,), (1,))
+    assert_size_stride(primals_4, (24,), (1,))
+    assert_size_stride(primals_5, (1, 24, 224, 224), (114688, 4778, 22, 1))
+    assert_size_stride(primals_6, (24, 24, 3, 3), (216, 9, 3, 1))
+    assert_size_stride(primals_7, (24,), (1,))
+    assert_size_stride(primals_8, (24,), (1,))
+    assert_size_stride(primals_9, (1, 24, 224, 224), (114688, 4778, 22, 1))
+    assert_size_stride(primals_10, (24, 24, 3, 3), (216, 9, 3, 1))
+    assert_size_stride(primals_11, (24,), (1,))
+    assert_size_stride(primals_12, (24,), (1,))
+    assert_size_stride(primals_13, (1024, 24, 1, 1), (24, 1, 1, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = extern_kernels.convolution(primals_1, primals_2, stride=(1, 
+            1), padding=(0, 0), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (1, 24, 224, 224), (114688, 4778, 22, 1))
+        buf1 = extern_kernels.convolution(primals_5, primals_6, stride=(1, 
+            1), padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        assert_size_stride(buf1, (1, 24, 224, 224), (114688, 4778, 22, 1))
+        buf2 = extern_kernels.convolution(primals_9, primals_10, stride=(1, 
+            1), padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        assert_size_stride(buf2, (1, 24, 224, 224), (114688, 4778, 22, 1))
+        buf3 = extern_kernels.convolution(buf0, primals_13, stride=(1, 1),
+            padding=(0, 0), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=1, bias=None)
+        assert_size_stride(buf3, (1, 1024, 224, 224), (50331648, 4896, 24, 1))
+        buf4 = empty_strided_cuda((1, 1024, 1, 1), (1024, 1, 1024, 1024),
+            torch.float32)
+        extern_kernels.addmm(primals_11, buf3, reinterpret_tensor(primals_12,
+            (1024, 1), (1, 1024), 0), alpha=1, beta=1, out=buf4)
+        del primals_12
+        buf5 = extern_kernels.convolution(primals_1, primals_2, stride=(1, 
+            1), padding=(0, 0), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=1, bias=None)
+        buf6 = empty_strided_cuda((1, 24, 224, 224), (114688, 4778, 22, 1),
+            torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_add_0[grid(153600)](buf5, primals_1, buf6, 153600,
+            XBLOCK=256, num_warps=4, num_stages=1)
+        del primals_1
+        buf7 = extern_kernels.convolution(buf6, primals_6, stride=(1, 1),
+            padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        buf8 = extern_kernels.convolution(primals_5, primals_6, stride=(1, 
+            1), padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        buf9 = empty_strided_cuda((1, 24, 224, 224), (114688, 4778, 22, 1),
+            torch.float32)
+        triton_poi_fused_add_0[grid(153600)](buf7, buf8, buf9, 153600,
+            XBLOCK=256, num_warps=4, num_stages=1)
+        del buf8
+        buf10 = extern_kernels.convolution(buf9, primals_10, stride=(1, 1),
+            padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        buf11 = extern_kernels.convolution(primals_9, primals_10, stride=(1, 
+            1), padding=(1, 1), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=24, bias=None)
+        buf12 = empty_strided_cuda((1, 24, 224, 224), (114688, 4778, 22, 1),
+            torch.float32)
+        triton_poi_fused_add_0[grid(153600)](buf10, buf11, buf12, 153600,
+            XBLOCK=256, num_warps=4, num_stages=1)
+        del buf11
+        buf13 = extern_kernels.convolution(buf12, primals_13, stride=(1, 1),
+            padding=(0, 0), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=1, bias=None)
+        buf14 = empty_strided_cuda((1, 1024, 1, 1), (1024, 1, 1024, 1024),
+            torch.float32)
+        extern_kernels.addmm(primals_11, buf13, reinterpret_tensor(primals_12,
+            (1024, 1), (1, 1024), 0), alpha=1, beta=1, out=buf14)
+        del primals_12
+        buf15 = extern_kernels.convolution(buf12, primals_13, stride=(1, 1),
+            padding=(0, 0), dilation=(1, 1), transposed=False,
+            output_padding=(0, 0), groups=1, bias=None)
+        buf16 = empty_strided_cuda((1, 1024, 1, 1), (1024, 1, 1024, 1024),
+            torch.float32)
+        extern_kernels.addmm(primals_11, buf15, reinterpret_tensor(primals_12,
+            (1024, 1), (1, 1024), 0), alpha=1, beta=1, out=buf16)
+        del primals_12
+    return buf16, primals_2, primals_3, primals_4, primals_6, primals_7, primals_8, primals_10, primals_11, primals_13, buf0, buf1, buf2, buf3, buf4, buf5, buf6, buf7, buf9, buf10, buf12, buf13, buf15
+
+
+class ChannelShuffle(nn.Module):
+    def __init__(self, groups):
+        """
+        Channel shuffle operation.
+
+        :param groups: Number of groups for shuffling.
+        """
+        super(ChannelShuffle, self).__init__()
+        self.groups = groups
+    
+    def forward(self, x):
+        """
+        Forward pass for channel shuffle.
+
+        :param x: Input tensor, shape (batch_size, channels, height, width)
+        :return: Output tensor, shape (batch_size, channels, height, width)
+        """
+        batch_size, channels, height, width = x.size()
+        channels_per_group = channels // self.groups
+        
+        # Reshape
+        x = x.view(batch_size, self.groups, channels_per_group, height, width)
+        
+        # Transpose
+        x = x.transpose(1, 2).contiguous()
+        
+        # Flatten
+        x = x.view(batch_size, -1, height, width)
+        
+        return x
+
+
+class ShuffleNetUnit(nn.Module):
+    def __init__(self, in_channels, out_channels, groups=3):
+        """
+        ShuffleNet unit implementation.
+
+        :param in_channels: Number of input channels.
+        :param out_channels: Number of output channels.
+        :param groups: Number of groups for group convolution.
+        """
+        super(ShuffleNetUnit, self).__init__()
+        
+        # Ensure the output channels are divisible by groups
+        assert out_channels % 4 == 0
+        mid_channels = out_channels // 4
+        
+        # First 1x1 group convolution
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1, stride=1, padding=0, groups=groups, bias=False)
+        self.bn1 = nn.BatchNorm2d(mid_channels)
+        
+        # Depthwise 3x3 convolution
+        self.conv2 = nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=1, padding=1, groups=mid_channels, bias=False)
+        self.bn2 = nn.BatchNorm2d(mid_channels)
+        
+        # Second 1x1 group convolution
+        self.conv3 = nn.Conv2d(mid_channels, out_channels, kernel_size=1, stride=1, padding=0, groups=groups, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_channels)
+        
+        # Shuffle operation
+        self.shuffle = ChannelShuffle(groups)
+        
+        # Shortcut connection if input and output channels are the same
+        if in_channels == out_channels:
+            self.shortcut = nn.Sequential()
+        else:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+    
+    def forward(self, x):
+        """
+        Forward pass for ShuffleNet unit.
+
+        :param x: Input tensor, shape (batch_size, in_channels, height, width)
+        :return: Output tensor, shape (batch_size, out_channels, height, width)
+        """
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.shuffle(out)
+        out = F.relu(self.bn3(self.conv3(out)))
+        
+        out += self.shortcut(x)
+        return out
+
+class ModelNew(nn.Module):
+    def __init__(self, num_classes=1000, groups=3, stages_repeats=[3, 7, 3], stages_out_channels=[24, 240, 480, 960]):
+        """
+        ShuffleNet architecture.
+
+        :param num_classes: Number of output classes.
+        :param groups: Number of groups for group convolution.
+        :param stages_repeats: List of ints specifying the number of repeats for each stage.
+        :param stages_out_channels: List of ints specifying the output channels for each stage.
+        """
+        super(ModelNew, self).__init__()
+        
+        self.conv1 = nn.Conv2d(3, stages_out_channels[0], kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(stages_out_channels[0])
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        self.stage2 = self._make_stage(stages_out_channels[0], stages_out_channels[1], stages_repeats[0], groups)
+        self.stage3 = self._make_stage(stages_out_channels[1], stages_out_channels[2], stages_repeats[1], groups)
+        self.stage4 = self._make_stage(stages_out_channels[2], stages_out_channels[3], stages_repeats[2], groups)
+        
+        self.conv5 = nn.Conv2d(stages_out_channels[3], 1024, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn5 = nn.BatchNorm2d(1024)
+        
+        self.fc = nn.Linear(1024, num_classes)
+    
+    def _make_stage(self, in_channels, out_channels, repeats, groups):
+        """
+        Helper function to create a stage of ShuffleNet units.
+
+        :param in_channels: Number of input channels.
+        :param out_channels: Number of output channels.
+        :param repeats: Number of ShuffleNet units in the stage.
+        :param groups: Number of groups for group convolution.
+        :return: nn.Sequential containing the stage.
+        """
+        layers = []
+        layers.append(ShuffleNetUnit(in_channels, out_channels, groups))
+        for _ in range(1, repeats):
+            layers.append(ShuffleNetUnit(out_channels, out_channels, groups))
+        return nn.Sequential(*layers)
+    
+    def forward(self, input_0):
+        primals_2 = self.conv1.weight
+        primals_3 = self.bn1.weight
+        primals_4 = self.bn1.bias
+        primals_13 = self.conv5.weight
+        primals_11 = self.bn5.weight
+        primals_12 = self.bn5.bias
+        primals_1 = input_0
+        primals_5 = self.stage2[0].conv1.weight
+        primals_7 = self.stage2[0].bn1.weight
+        primals_8 = self.stage2[0].bn1.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_6 = self.stage2[0].bn2.weight
+        primals_9 = self.stage2[0].bn2.bias
+        primals_10 = self.stage2[0].conv2.weight
+        primals_

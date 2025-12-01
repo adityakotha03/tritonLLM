@@ -2,93 +2,99 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-reinterpret_tensor_1 = torch._C._dynamo.guards._reinterpret_tensor
-empty_cuda = torch._C._dynamo.guards._empty_cuda
-to_tensor = torch._C._dynamo.guards.to_tensor
-reinterpret_tensor_2 = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, rnumel, XBLOCK: tl
-    .constexpr):
+def triton_poi_fused_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 32768
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    tl.full([XBLOCK], True, tl.int1)
-    x3 = xindex
-    x2 = xindex
-    tmp0 = tl.load(in_ptr0 + x3, None)
-    tmp1 = tl.load(in_ptr1 + x2, None)
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + (x0 % 256), xmask, eviction_policy='evict_last')
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x3, tmp2, None)
+    tl.store(out_ptr0 + x0, tmp2, xmask)
 
 
 def call(args):
-    arg0_1, arg1_1, arg2_1 = args
+    primals_1, primals_2, primals_3 = args
     args.clear()
-    assert_size_stride(arg0_1, (1, 512, 128), (65536, 128, 1))
-    assert_size_stride(arg1_1, (6, 1, 256), (256, 1, 1))
-    assert_size_stride(arg2_1, (6, 1, 256), (256, 1, 1))
+    assert_size_stride(primals_1, (6, 10, 256), (2560, 256, 1))
+    assert_size_stride(primals_2, (256,), (1,))
+    assert_size_stride(primals_3, (10, 256), (256, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((1, 512, 256), (131072, 256, 1), torch.float32
-            )
-        buf1 = empty_strided_cuda((1, 512, 256), (131072, 256, 1), torch.float32
-            )
-        buf2 = empty_strided_cuda((6, 1, 256), (256, 1, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 512, 256), (131072, 256, 1), torch.float32
-            )
-        buf4 = empty_strided_cuda((1, 512, 256), (131072, 256, 1), torch.float32
-            )
-        buf5 = empty_strided_cuda((6, 1, 256), (256, 1, 1), torch.float32)
-        del arg1_1
-        del arg2_1
-        buf6 = buf0
+        buf0 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_add_0[grid(32768)](primals_1, primals_2, buf0, 
+            32768, XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_2
+        buf1 = buf0
         del buf0
-        buf7 = buf1
-        del buf1
-        triton_poi_fused_add_0[grid(131072)](buf6, buf7, buf4, 131072, 1,
-            XBLOCK=256, num_warps=4, num_stages=1)
-        del buf6
+        buf2 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf1, primals_1, buf2, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf3 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf2, primals_1, buf3, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf4 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf3, primals_1, buf4, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf5 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf4, primals_1, buf5, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf6 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf5, primals_1, buf6, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf7 = empty_strided_cuda((6, 10, 256), (2560, 256, 1), torch.float32)
+        triton_poi_fused_add_0[grid(32768)](buf6, primals_1, buf7, 32768,
+            XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_1
+        buf8 = torch.ops.aten.mm.default(buf7, primals_3, out=None)
         del buf7
-        buf8 = buf2
-        del buf2
-        buf9 = buf3
-        del buf3
-        triton_poi_fused_add_0[grid(256)](buf8, buf9, buf5, 256, 1, XBLOCK=256,
-            num_warps=4, num_stages=1)
-        del buf8
-        del buf9
-        buf10 = buf4
-        del buf4
-        buf11 = buf5
-        del buf5
-        buf12 = buf10
-        del buf10
-        del buf11
-        buf13 = buf12
-        del buf12
-        buf14 = buf13
-        del buf13
-        del arg0_1
-        get_raw_buf = buf14
-        del buf14
-    return buf10, buf11, buf12, buf13, buf14, get_raw_buf
+    return buf8, primals_3, buf1, buf2, buf3, buf4, buf5, buf6, buf8
 
 
 class ModelNew(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, dropout
-        =0.0):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, dropout=0.0):
+        """
+        Initialize the LSTM model.
+
+        :param input_size: The number of expected features in the input `x`
+        :param hidden_size: The number of features in the hidden state `h`
+        :param num_layers: Number of recurrent layers
+        :param output_size: The number of output features
+        :param dropout: If non-zero, introduces a Dropout layer on the outputs of each LSTM layer except the last layer, with dropout probability equal to `dropout`
+        """
         super(ModelNew, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True
-            , dropout=dropout, bidirectional=False)
+        # Initialize hidden state with random values
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout, bidirectional=False)
         self.fc = nn.Linear(hidden_size, output_size)
     
     def forward(self, input_0, input_1, input_2):
-        arg0_1 = input_0
-        arg1_1 = input_1
-        arg2_1 = input_2
-        output = call([arg0_1, arg1_1, arg2_1])
+        primals_1 = self.lstm.weight_hh_l0
+        primals_2 = self.lstm.weight_ih_l0
+        primals_3 = self.lstm.bias_hh_l0
+        primals_4 = self.lstm.bias_ih_l0
+        primals_5 = self.fc.weight
+        primals_6 = self.fc.bias
+        primals_1 = self.lstm.weight_hh_l0
+        primals_2 = self.lstm.weight_ih_l0
+        primals_3 = self.lstm.bias_hh_l0
+        primals_4 = self.lstm.bias_ih_l0
+        primals_5 = self.fc.weight
+        primals_6 = self.fc.bias
+        output = call([input_0, input_1, input_2, primals_1, primals_2,
+            primals_3, primals_4, primals_5, primals_6])
         return output[0]

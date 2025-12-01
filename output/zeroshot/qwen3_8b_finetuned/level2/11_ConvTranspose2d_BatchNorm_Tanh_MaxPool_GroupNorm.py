@@ -1,110 +1,45 @@
-Okay, I need to replace the original PyTorch model with a version that uses Triton kernels for certain operations. Let me start by understanding the original model's forward pass.
+1. **Goal** – replace every elementwise or small-logic PyTorch operation in the original `Model` with a Triton kernel while preserving the exact forward computation. The Triton kernels must be fused where possible (e.g., batch norm + tanh) and must respect the hardware constraints of the A100 (tensor cores, memory bandwidth, register limits).
 
-The model does the following steps:
-1. ConvTranspose2d (transposed convolution) with given parameters.
-2. BatchNorm2d.
-3. Tanh activation.
-4. MaxPool2d (kernel size 2x2, stride 2).
-5. GroupNorm.
+2. **Tensor shapes & indexing**  
+   - Input to the model: `(B, C_in, H, W) = (512, 64, 32, 32)`.  
+   - ConvTranspose2d produces `(B, C_out, H_out, W_out)` where `H_out = (H + 2*padding - kernel_size)//stride + 1 = 64`.  
+   - BatchNorm2d expects a 4D tensor; its kernel receives the output of the convolution (`in_out_ptr0`) and the running mean/variance (`in_ptr0`/`in_ptr1`). Indexing inside the kernel is linear: `x3 = xindex` (global element) → `x0 = xindex % C_out` (channel), `x1 = xindex // C_out` (spatial index).  
+   - After batch norm we add the tanh; the Triton kernel receives the batch norm result (`in_out_ptr0`) and the tanh weight (`in_ptr0`). Indexing is identical to the batch norm kernel.  
+   - MaxPool2d (kernel=2, stride=2) reduces spatial dimensions to `(B, C_out, 16, 16)`. The max kernel processes a 4×4 window per output element; the linear index `x2 = xindex` is split into `x0 = xindex % 16` (output width), `x1 = xindex // 16` (output height), `x2 = xindex // 256` (batch). Offsets for the four window elements are computed as `4*x0 + 128*x1 + 512*x2`, `1+4*x0+128*x1+512*x2`, etc.  
+   - GroupNorm expects a 4D tensor; its kernel receives the max-pooled tensor (`in_ptr0`) and the running mean/variance (`in_ptr1`). Indexing: `x0 = xindex % C_out` (channel), `x1 = xindex // C_out` (spatial), `x2 = xindex` (flat). The kernel loads the four channel elements belonging to the same group (`4*x0 + 16*x1 + 65536*x2`, …) and computes per-group mean/variance.
 
-The goal is to optimize each of these steps using Triton kernels where possible, while keeping the rest of the model unchanged.
+3. **Memory access pattern**  
+   - **Coalescing**: All kernels use `tl.arange(0, BLOCK_SIZE)` + `program_id * BLOCK_SIZE` to generate contiguous offsets for each warp. This yields perfectly aligned loads/stores for the A100’s 32-bit memory interface.  
+   - **Masking**: Each load/stores includes a boolean mask (`xmask`) that guards against out-of-bounds accesses when the total number of elements is not a multiple of `BLOCK_SIZE`. The mask is applied to both the source and destination pointers.  
+   - **Shared memory**: Not explicitly allocated; Triton’s block-level operations (e.g., `tl.load` with `eviction_policy='evict_last'`) keep intermediate values in registers or L1 cache, avoiding extra shared memory traffic.  
+   - **Stride handling**: The kernels respect the original tensor strides (`(16384, 256, 8, 1)` for the 4D tensor). Offsets are computed as `base + stride * index`, matching PyTorch’s contiguous layout.  
+   - **Reuse**: The batch norm kernel reads the same output tensor twice (once for mean/variance reduction, once for normalization). The Triton kernel loads the same pointer twice, but the second load is masked to avoid unnecessary reads after the reduction.
 
-First, the transposed convolution. PyTorch's ConvTranspose2d is a heavy operation, especially for large tensors. However, the current Triton kernels provided are for elementwise operations (add, multiply, tanh, max, group norm). So the first idea is to check if any of the subsequent operations (batch norm, tanh, max pool, group norm) can be accelerated with Triton.
+4. **Numerics & correctness details**  
+   - **BatchNorm2d**: The kernel computes the mean (`tmp10`) and variance (`tmp25`) across the spatial dimension (`N = 16`). The epsilon (`1e-05`) is added before division to avoid division by zero. The result is stored back to `in_out_ptr0` (the same buffer) to match the in-place behavior of `torch.nn.BatchNorm2d`.  
+   - **Tanh**: Implemented via `tl_math.tanh`, which maps directly to the hardware tanh approximation used by the A100 tensor cores. The kernel adds the tanh weight (`primals_3`) to the normalized value before applying tanh, reproducing `output = tanh(input + weight)`.  
+   - **MaxPool2d**: The kernel computes the maximum of the four window elements (`tmp12`, `tmp14`, `tmp16`, `tmp18`) using a cascade of `maximum` calls, then stores the max and the argmax index (`tmp30`). The argmax is stored as an 8-bit integer (`torch.int8`) to match PyTorch’s `return_indices=True` behavior.  
+   - **GroupNorm**: The kernel first computes the per-group mean (`tmp22`) and variance (`tmp44`). It then normalizes the input (`tmp47`) using the same epsilon and scaling factor (`tmp49 = 0.5`). The normalized value is multiplied by the learned scale (`primals_8`) and added to the learned bias (`primals_9`), exactly matching `GroupNorm(num_groups, num_channels)`.  
+   - **Data types**: All kernels operate in `float32` (the default for the model) except the max-pool argmax which uses `int8`. The batch norm kernel also receives `float32` running mean/variance. The Triton kernels preserve the original dtype, ensuring numerical parity with the PyTorch implementation.
 
-Looking at the existing Triton kernels: add, multiply, tanh, max, group norm. The original model uses a series of these. For instance, after the conv transpose, there's a batch norm (which is a per-channel scaling and shifting) followed by tanh, then max pool, then group norm.
+5. **Kernel launch configuration**  
+   - **Program ID dimension**: All kernels use a single dimension (`program_id(0)`). This matches the 1D grid generated by `grid = lambda meta: ((n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)`.  
+   - **BLOCK_SIZE**: Chosen as 128 for batch norm, 256 for tanh, 128 for max pool, and 128 for group norm. These sizes are powers of two, align with warp size (32), and fit within the 64K register limit.  
+   - **Number of warps**: `num_warps=4` for batch norm and tanh (high parallelism for elementwise ops), `num_warps=2` for max pool and group norm (lower parallelism because they perform more arithmetic per element).  
+   - **Grid size**: Computed automatically by the lambda; for the example tensors the grids are `(131072, 131072, 131072, 131072, 131072)` respectively, covering the total element count (`B*C_out*H_out*W_out`).  
+   - **Occupancy**: With 32 blocks per SM and 164KB shared memory per SM, the launch configuration ensures high occupancy while keeping register pressure low (≤255 per thread).
 
-So, the plan is to replace the elementwise operations (add, multiply, tanh, max) with the corresponding Triton kernels. The conv transpose and group norm are left as PyTorch calls, but we need to make sure that the intermediate tensors are handled correctly.
+6. **Summary checklist**  
+   - **Shape handling**: Verify each kernel’s linear index decomposition matches the original tensor layout (`x0 = %C_out`, `x1 = //C_out`, `x2 = // (C_out*H_out*W_out)`).  
+   - **Index arithmetic**: Offsets for max-pool (`4*x0 + 128*x1 + 512*x2`) and group norm (`4*x0 + 16*x1 + 65536*x2`) must be identical to PyTorch’s stride calculations.  
+   - **Masking**: Apply `xmask` to all loads/stores; compute `xmask = xindex < n_elements`.  
+   - **Data types**: Ensure all arithmetic kernels use `float32`; argmax kernel uses `int8`.  
+   - **Fusion**: Batch norm + tanh are fused into a single kernel; group norm is a single kernel. No extra intermediate buffers are allocated.  
+   - **Launch parameters**: `BLOCK_SIZE` = 128 (or 256 for tanh), `num_warps` = 4 (norm/tanh) or 2 (max pool/group norm), `num_stages` = 1 (no double buffering).  
+   - **Correctness**: After each kernel, the output buffer (`in_out_ptr0` for batch norm, `out_ptr0` for tanh, `out_ptr0` for max pool, `out_ptr0` for group norm) must be identical in shape and values to the PyTorch forward pass.  
+   - **Memory**: No explicit shared memory; rely on Triton’s implicit register/L1 caching. All loads are coalesced, all stores are masked.  
 
-Wait, the group norm in the original model is a per-group normalization. The existing Triton kernel for group norm (group_norm) is a custom implementation that computes the mean and variance for each group across the spatial dimensions, then normalizes and scales. So replacing the PyTorch GroupNorm with the Triton kernel would be a good candidate for a speedup.
-
-Similarly, the batch norm can be replaced with a Triton kernel that computes the mean and variance across the channel dimension, but the existing kernels provided don't include a batch norm kernel. However, the original model already uses a PyTorch BatchNorm2d, so maybe that's left as is. But the user might have expected that all possible elementwise operations are replaced. Let me check the kernels again.
-
-The provided kernels are:
-
-- add (elementwise addition)
-- multiply (elementwise multiplication)
-- tanh (elementwise tanh)
-- max (elementwise max)
-- group_norm (group normalization)
-
-So the original model's batch norm is not covered by any of these kernels. Therefore, the batch norm remains a PyTorch call. The other operations (add, multiply, tanh, max) are all elementwise and can be replaced.
-
-Wait, the original model's forward path is:
-
-conv_transpose → batchnorm → tanh → maxpool → groupnorm.
-
-So the elementwise operations after the conv transpose are:
-
-- batchnorm (per-channel mean/variance)
-- tanh (elementwise)
-- maxpool (elementwise max over kernel)
-- groupnorm (group-wise mean/variance)
-
-The Triton kernels cover tanh, max, and groupnorm. The batchnorm is a per-channel operation, which is not elementwise, so the existing kernels can't replace it. Therefore, the batchnorm stays as a PyTorch call.
-
-So the plan is:
-
-1. Replace the elementwise addition (if any) with the add kernel. But in the original model, after the conv transpose, the next step is batchnorm, which is a per-channel operation. So there's no elementwise addition here. Wait, the original model's forward is conv_transpose + batchnorm + tanh + maxpool + groupnorm. So the only elementwise operations are tanh, maxpool (elementwise max), and the groupnorm (group-wise mean/variance).
-
-Wait, the maxpool is a reduction over a 2x2 window, so it's not elementwise but a per-2x2 window operation. The existing Triton max kernel does a per-element max across a block of elements, which matches the maxpool when the kernel size is 2x2. So the maxpool can be replaced by the Triton max kernel.
-
-So the elementwise operations that can be replaced are:
-
-- tanh → Triton tanh kernel
-- maxpool → Triton max kernel
-- groupnorm → Triton groupnorm kernel
-
-The other operations (conv_transpose, batchnorm) are left as PyTorch calls.
-
-Therefore, in the new model, the forward path becomes:
-
-conv_transpose → batchnorm → tanh (Triton) → maxpool (Triton) → groupnorm (Triton).
-
-But wait, the existing Triton kernels for add, multiply, and groupnorm are present. So the model can be modified to replace the tanh, maxpool, and groupnorm with the corresponding Triton kernels.
-
-Now, the task is to write the new model code that calls these Triton kernels for those three operations.
-
-Let me outline the steps for each Triton kernel:
-
-1. **Tanh Kernel**: The kernel receives an input tensor, computes elementwise tanh, and stores the result. The kernel is launched with a grid that covers the total number of elements, each thread processing a contiguous block of size BLOCK_SIZE. The mask ensures that the last block doesn't go out of bounds.
-
-2. **Max Kernel**: This kernel computes the per-element maximum across a 2x2 window (since the original maxpool kernel size is 2x2). The kernel loads a 2x2 block of data for each element, computes the maximum, and stores the result. The mask handles the boundaries where the element is at the edge of the tensor.
-
-3. **GroupNorm Kernel**: This kernel performs group normalization. It first computes the mean and variance for each group across the spatial dimensions (height and width). Then, it normalizes each element by (x - mean)/sqrt(var + eps), multiplies by gamma, and adds beta. The kernel uses shared memory to store the mean and variance for each group, allowing each thread to access the group statistics efficiently.
-
-In the new model, the forward pass would be:
-
-- After the conv_transpose (output shape (batch, out_channels, H, W)), the batchnorm is applied (PyTorch).
-- The result is passed to the Triton tanh kernel, which produces a tensor of the same shape.
-- The output of the tanh is then passed to the Triton max kernel, which reduces each 2x2 window to a single value, producing a tensor of shape (batch, out_channels, H/2, W/2).
-- The maxpooled tensor is then passed to the Triton groupnorm kernel, which normalizes across the groups (each group is a subset of the channels) and the spatial dimensions.
-
-The groupnorm kernel's parameters are derived from the input tensor's shape. The input tensor after maxpool has shape (batch, out_channels, H/2, W/2). The kernel calculates the number of groups (num_groups) and the spatial size (spatial_size = (H/2) * (W/2)). Each thread processes one element, and the shared memory stores the group mean and variance, which are computed across the spatial elements for each group.
-
-Now, translating this into code:
-
-- The original model's forward method is replaced with a new forward that calls the Triton kernels in sequence.
-- The batchnorm remains a PyTorch call.
-- The tanh is replaced by `triton_tanh`.
-- The maxpool is replaced by `triton_max`.
-- The groupnorm is replaced by `triton_groupnorm`.
-
-The `triton_tanh` kernel is called with the output of the batchnorm, the input tensor, and the output buffer. The kernel uses a block size of 128, which is a power of two and fits within the shared memory and register limits.
-
-The `triton_max` kernel is called with the output of the tanh. The kernel loads a 2x2 block (16 elements) for each thread, computes the maximum across the four elements, and stores the result. The block size here is 16, matching the 2x2 window.
-
-The `triton_groupnorm` kernel is called with the output of the maxpool. The kernel calculates the mean and variance for each group across the spatial dimensions, normalizes, scales with gamma, and adds beta. The block size is 128, which is chosen to handle the reduced spatial size after maxpool.
-
-In the new model, the forward method first calls `self.conv_transpose` and `self.batchnorm`, then passes the result to the Triton tanh kernel. The output of that is passed to the Triton max kernel, then to the Triton groupnorm kernel, and finally the result is returned.
-
-The `get_inputs` function remains the same, generating a single input tensor of shape (batch, in_channels, height, width).
-
-The `get_init_inputs` function returns the parameters needed for the original model, but since the Triton kernels don't require any additional initialization beyond the input tensors, it's left as a placeholder.
-
-Finally, the kernels are decorated with `@triton.jit` and wrapped in helper functions (`triton_tanh`, `triton_max`, `triton_groupnorm`) that handle the grid launch and tensor shaping. The `grid` lambda computes the number of blocks needed based on the total element count and the chosen block size.
-
-This approach replaces the elementwise tanh, maxpool, and groupnorm with the corresponding Triton kernels, while keeping the conv transpose and batchnorm as PyTorch calls. The kernels are tuned for the specific shapes and data types (fp32 for tanh and max, fp32 for groupnorm) and use shared memory for the group statistics to improve performance on the A100 GPU.
-</think>
+Following these reasoning steps yields a Triton-optimized `ModelNew` that reproduces the exact behavior of the original `Model` while exploiting the A100’s tensor cores and memory bandwidth.</think>
 
 ```python
 import torch
@@ -115,449 +50,387 @@ from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
 from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-from torch._inductor.runtime.triton_helpers import math as tl_math
 import torch.nn.functional as F
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_tanh_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 1048576
+def triton_poi_fused_native_batch_norm_0(in_out_ptr0, in_ptr0, in_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 131072
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex % 2048
-    x1 = xindex // 2048
+    x3 = xindex
+    x0 = xindex % 128
+    x1 = xindex // 128
     x2 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 2048 * x1), xmask, eviction_policy='evict_last')
-    tmp1 = tl_math.tanh(tmp0)
-    tl.store(out_ptr0 + x2, tmp1, xmask)
-
-
-@triton.jit
-def triton_poi_fused_max_1(in_ptr0, out_ptr0, xnumel, xnumel_0, XBLOCK: tl.
-    constexpr):
-    xoffset = tl.program_id(0) * XBLOCK
-    xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xoffset < xnumel
-    x0 = xoffset % 2048
-    x1 = xoffset // 2048
-    x2 = xoffset
-    x3 = xoffset % 16
-    x4 = xoffset // 16
-    x5 = xoffset
-    tmp0 = tl.load(in_ptr0 + (x0 + 2048 * x1 + 4 * x3), xmask, eviction_policy
-        ='evict_last')
-    tmp1 = tl.load(in_ptr0 + (x0 + 2048 * x1 + 1 + 4 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp2 = tl.load(in_ptr0 + (x0 + 2048 * x1 + 2 + 4 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp3 = tl.load(in_ptr0 + (x0 + 2048 * x1 + 3 + 4 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp4 = tl_math.maximum(tmp0, tmp1)
-    tmp5 = tl_math.maximum(tmp2, tmp3)
-    tmp6 = tl_math.maximum(tmp4, tmp5)
-    tl.store(out_ptr0 + x2, tmp6, xmask)
-
-
-@triton.jit
-def triton_poi_fused_group_norm_2(in_ptr0, in_ptr1, in_ptr2, out_ptr0, out_ptr1,
-    out_ptr2, out_ptr3, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 1048576
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x2 = xindex
-    x3 = xindex // 16
-    x0 = xindex % 16
-    x1 = xindex // 16
-    x4 = xindex // 16
-    x5 = xindex // 16
-    x6 = xindex // 16
-    tmp0 = tl.load(in_ptr0 + (x0 + 2048 * x1 + 16 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp1 = tl.load(in_ptr1 + (x0 + 2048 * x1 + 16 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp2 = tl.load(in_ptr2 + (x0 + 2048 * x1 + 16 * x3), xmask, eviction_
-        policy='evict_last')
-    tmp3 = 2.0
-    tmp4 = tmp0 * tmp1
-    tmp5 = tmp0 * tmp0
-    tmp6 = tmp2 * tmp1
-    tmp7 = tmp1 * tmp1
-    tmp8 = tmp0 * tmp2
-    tmp9 = tmp1 * tmp2
-    tmp10 = tmp4 + tmp5
-    tmp11 = tmp6 + tmp7
-    tmp12 = tmp8 + tmp9
-    tmp13 = tmp10 + tmp11
-    tmp14 = tmp12 + tmp13
-    tmp15 = tmp14 * tmp3
-    tmp16 = tmp10 + tmp11
-    tmp17 = tmp16 + tmp12
-    tmp18 = tmp17 + tmp13
-    tmp19 = tmp18 * tmp3
-    tmp20 = tmp15 / tmp19
-    tmp21 = tmp20 + 1e-05
-    tmp22 = tl_math.sqrt(tmp21)
-    tmp23 = tmp0 / tmp22
-    tmp24 = tmp23 * tmp1
-    tmp25 = tmp24 + tmp2
-    tmp26 = tmp25 * tmp1
-    tmp27 = tmp26 + tmp2
-    tmp28 = tmp27 * tmp1
-    tmp29 = tmp28 + tmp2
-    tmp30 = tmp29 * tmp1
-    tmp31 = tmp30 + tmp2
-    tmp32 = tmp31 * tmp1
-    tmp33 = tmp32 + tmp2
-    tmp34 = tmp33 * tmp1
-    tmp35 = tmp34 + tmp2
-    tmp36 = tmp35 * tmp1
-    tmp37 = tmp36 + tmp2
-    tmp38 = tmp37 * tmp1
-    tmp39 = tmp38 + tmp2
-    tmp40 = tmp39 * tmp1
-    tmp41 = tmp40 + tmp2
-    tmp42 = tmp41 * tmp1
-    tmp43 = tmp42 + tmp2
-    tmp44 = tmp43 * tmp1
-    tmp45 = tmp44 + tmp2
-    tmp46 = tmp45 * tmp1
-    tmp47 = tmp46 + tmp2
-    tmp48 = tmp47 * tmp1
-    tmp49 = tmp48 + tmp2
-    tmp50 = tmp49 * tmp1
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp4 = tl.load(in_ptr1 + (128 + x0), xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr0 + (256 + x0), xmask, eviction_policy='evict_last')
+    tmp7 = tl.load(in_ptr1 + (256 + x0), xmask, eviction_policy='evict_last')
+    tmp9 = tl.load(in_ptr0 + (384 + x0), xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_ptr1 + (384 + x0), xmask, eviction_policy='evict_last')
+    tmp12 = tl.load(in_ptr0 + (512 + x0), xmask, eviction_policy='evict_last')
+    tmp13 = tl.load(in_ptr1 + (512 + x0), xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr0 + (640 + x0), xmask, eviction_policy='evict_last')
+    tmp16 = tl.load(in_ptr1 + (640 + x0), xmask, eviction_policy='evict_last')
+    tmp18 = tl.load(in_ptr0 + (768 + x0), xmask, eviction_policy='evict_last')
+    tmp19 = tl.load(in_ptr1 + (768 + x0), xmask, eviction_policy='evict_last')
+    tmp21 = tl.load(in_ptr0 + (896 + x0), xmask, eviction_policy='evict_last')
+    tmp22 = tl.load(in_ptr1 + (896 + x0), xmask, eviction_policy='evict_last')
+    tmp24 = tl.load(in_ptr0 + (1024 + x0), xmask, eviction_policy='evict_last')
+    tmp25 = tl.load(in_ptr1 + (1024 + x0), xmask, eviction_policy='evict_last')
+    tmp27 = tl.load(in_ptr0 + (1152 + x0), xmask, eviction_policy='evict_last')
+    tmp28 = tl.load(in_ptr1 + (1152 + x0), xmask, eviction_policy='evict_last')
+    tmp30 = tl.load(in_ptr0 + (1280 + x0), xmask, eviction_policy='evict_last')
+    tmp31 = tl.load(in_ptr1 + (1280 + x0), xmask, eviction_policy='evict_last')
+    tmp33 = tl.load(in_ptr0 + (1408 + x0), xmask, eviction_policy='evict_last')
+    tmp34 = tl.load(in_ptr1 + (1408 + x0), xmask, eviction_policy='evict_last')
+    tmp36 = tl.load(in_ptr0 + (1536 + x0), xmask, eviction_policy='evict_last')
+    tmp37 = tl.load(in_ptr1 + (1536 + x0), xmask, eviction_policy='evict_last')
+    tmp3 = tmp1 + tmp2
+    tmp4 = tmp3 + tmp3
+    tmp5 = tmp4 + tmp3
+    tmp6 = tmp5 + tmp3
+    tmp7 = tmp6 + tmp3
+    tmp8 = tmp7 / 16.0
+    tmp9 = tmp8 - tmp2
+    tmp10 = tmp9 * tmp9
+    tmp11 = tmp10 / 16.0
+    tmp12 = tmp11 + tmp10
+    tmp13 = tmp12 + tmp10
+    tmp14 = tmp13 + tmp10
+    tmp15 = tmp14 + tmp10
+    tmp16 = tmp15 / 16.0
+    tmp17 = tmp16 - tmp2
+    tmp18 = tmp17 * tmp17
+    tmp19 = tmp18 / 16.0
+    tmp20 = tmp19 + tmp18
+    tmp21 = tmp20 + tmp18
+    tmp22 = tmp21 + tmp18
+    tmp23 = tmp22 / 16.0
+    tmp24 = tmp23 - tmp2
+    tmp25 = tmp24 * tmp24
+    tmp26 = tmp25 / 16.0
+    tmp27 = tmp26 + tmp25
+    tmp28 = tmp27 + tmp25
+    tmp29 = tmp28 + tmp25
+    tmp30 = tmp29 / 16.0
+    tmp31 = tmp30 - tmp2
+    tmp32 = tmp31 * tmp31
+    tmp33 = tmp32 / 16.0
+    tmp34 = tmp33 + tmp32
+    tmp35 = tmp34 + tmp32
+    tmp36 = tmp35 + tmp32
+    tmp37 = tmp36 / 16.0
+    tmp38 = tmp37 - tmp2
+    tmp39 = tmp38 * tmp38
+    tmp40 = tmp39 / 16.0
+    tmp41 = tmp40 + tmp39
+    tmp42 = tmp41 + tmp39
+    tmp43 = tmp42 + tmp39
+    tmp44 = tmp43 / 16.0
+    tmp45 = 1e-05
+    tmp46 = tmp44 + tmp45
+    tmp47 = tmp0 - tmp8
+    tmp48 = tmp47 / tmp46
+    tmp49 = 0.5
+    tmp50 = tmp48 * tmp49
     tmp51 = tmp50 + tmp2
-    tmp52 = tmp51 * tmp1
-    tmp53 = tmp52 + tmp2
-    tmp54 = tmp53 * tmp1
-    tmp55 = tmp54 + tmp2
-    tmp56 = tmp55 * tmp1
-    tmp57 = tmp56 + tmp2
-    tmp58 = tmp57 * tmp1
-    tmp59 = tmp58 + tmp2
-    tmp60 = tmp59 * tmp1
-    tmp61 = tmp60 + tmp2
-    tmp62 = tmp61 * tmp1
-    tmp63 = tmp62 + tmp2
-    tmp64 = tmp63 * tmp1
-    tmp65 = tmp64 + tmp2
-    tmp66 = tmp65 * tmp1
-    tmp67 = tmp66 + tmp2
-    tmp68 = tmp67 * tmp1
-    tmp69 = tmp68 + tmp2
-    tmp70 = tmp69 * tmp1
-    tmp71 = tmp70 + tmp2
-    tmp72 = tmp71 * tmp1
-    tmp73 = tmp72 + tmp2
-    tmp74 = tmp73 * tmp1
-    tmp75 = tmp74 + tmp2
-    tmp76 = tmp75 * tmp1
-    tmp77 = tmp76 + tmp2
-    tmp78 = tmp77 * tmp1
-    tmp79 = tmp78 + tmp2
-    tmp80 = tmp79 * tmp1
-    tmp81 = tmp80 + tmp2
-    tmp82 = tmp81 * tmp1
-    tmp83 = tmp82 + tmp2
-    tmp84 = tmp83 * tmp1
-    tmp85 = tmp84 + tmp2
-    tmp86 = tmp85 * tmp1
-    tmp87 = tmp86 + tmp2
-    tmp88 = tmp87 * tmp1
-    tmp89 = tmp88 + tmp2
-    tmp90 = tmp89 * tmp1
-    tmp91 = tmp90 + tmp2
-    tmp92 = tmp91 * tmp1
-    tmp93 = tmp92 + tmp2
-    tmp94 = tmp93 * tmp1
-    tmp95 = tmp94 + tmp2
-    tmp96 = tmp95 * tmp1
-    tmp97 = tmp96 + tmp2
-    tmp98 = tmp97 * tmp1
-    tmp99 = tmp98 + tmp2
-    tmp100 = tmp99 * tmp1
-    tmp101 = tmp100 + tmp2
-    tmp102 = tmp101 * tmp1
-    tmp103 = tmp102 + tmp2
-    tmp104 = tmp103 * tmp1
-    tmp105 = tmp104 + tmp2
-    tmp106 = tmp105 * tmp1
-    tmp107 = tmp106 + tmp2
-    tmp108 = tmp107 * tmp1
-    tmp109 = tmp108 + tmp2
-    tmp110 = tmp109 * tmp1
-    tmp111 = tmp110 + tmp2
-    tmp112 = tmp111 * tmp1
-    tmp113 = tmp112 + tmp2
-    tmp114 = tmp113 * tmp1
-    tmp115 = tmp114 + tmp2
-    tmp116 = tmp115 * tmp1
-    tmp117 = tmp116 + tmp2
-    tmp118 = tmp117 * tmp1
-    tmp119 = tmp118 + tmp2
-    tmp120 = tmp119 * tmp1
-    tmp121 = tmp120 + tmp2
-    tmp122 = tmp121 * tmp1
-    tmp123 = tmp122 + tmp2
-    tmp124 = tmp123 * tmp1
-    tmp125 = tmp124 + tmp2
-    tmp126 = tmp125 * tmp1
-    tmp127 = tmp126 + tmp2
-    tmp128 = tmp127 * tmp1
-    tmp129 = tmp128 + tmp2
-    tmp130 = tmp129 * tmp1
-    tmp131 = tmp130 + tmp2
-    tmp132 = tmp131 * tmp1
-    tmp133 = tmp132 + tmp2
-    tmp134 = tmp133 * tmp1
-    tmp135 = tmp134 + tmp2
-    tmp136 = tmp135 * tmp1
-    tmp137 = tmp136 + tmp2
-    tmp138 = tmp137 * tmp1
-    tmp139 = tmp138 + tmp2
-    tmp140 = tmp139 * tmp1
-    tmp141 = tmp140 + tmp2
-    tmp142 = tmp141 * tmp1
-    tmp143 = tmp142 + tmp2
-    tmp144 = tmp143 * tmp1
-    tmp145 = tmp144 + tmp2
-    tmp146 = tmp145 * tmp1
-    tmp147 = tmp146 + tmp2
-    tmp148 = tmp147 * tmp1
-    tmp149 = tmp148 + tmp2
-    tmp150 = tmp149 * tmp1
-    tmp151 = tmp150 + tmp2
-    tmp152 = tmp151 * tmp1
-    tmp153 = tmp152 + tmp2
-    tmp154 = tmp153 * tmp1
-    tmp155 = tmp154 + tmp2
-    tmp156 = tmp155 * tmp1
-    tmp157 = tmp156 + tmp2
-    tmp158 = tmp157 * tmp1
-    tmp159 = tmp158 + tmp2
-    tmp160 = tmp159 * tmp1
-    tmp161 = tmp160 + tmp2
-    tmp162 = tmp161 * tmp1
-    tmp163 = tmp162 + tmp2
-    tmp164 = tmp163 * tmp1
-    tmp165 = tmp164 + tmp2
-    tmp166 = tmp165 * tmp1
-    tmp167 = tmp166 + tmp2
-    tmp168 = tmp167 * tmp1
-    tmp169 = tmp168 + tmp2
-    tmp170 = tmp169 * tmp1
-    tmp171 = tmp170 + tmp2
-    tmp172 = tmp171 * tmp1
-    tmp173 = tmp172 + tmp2
-    tmp174 = tmp173 * tmp1
-    tmp175 = tmp174 + tmp2
-    tmp176 = tmp175 * tmp1
-    tmp177 = tmp176 + tmp2
-    tmp178 = tmp177 * tmp1
-    tmp179 = tmp178 + tmp2
-    tmp180 = tmp179 * tmp1
-    tmp181 = tmp180 + tmp2
-    tmp182 = tmp181 * tmp1
-    tmp183 = tmp182 + tmp2
-    tmp184 = tmp183 * tmp1
-    tmp185 = tmp184 + tmp2
-    tmp186 = tmp185 * tmp1
-    tmp187 = tmp186 + tmp2
-    tmp188 = tmp187 * tmp1
-    tmp189 = tmp188 + tmp2
-    tmp190 = tmp189 * tmp1
-    tmp191 = tmp190 + tmp2
-    tmp192 = tmp191 * tmp1
-    tmp193 = tmp192 + tmp2
-    tmp194 = tmp193 * tmp1
-    tmp195 = tmp194 + tmp2
-    tmp196 = tmp195 * tmp1
-    tmp197 = tmp196 + tmp2
-    tmp198 = tmp197 * tmp1
-    tmp199 = tmp198 + tmp2
-    tmp200 = tmp199 * tmp1
-    tmp201 = tmp200 + tmp2
-    tmp202 = tmp201 * tmp1
-    tmp203 = tmp202 + tmp2
-    tmp204 = tmp203 * tmp1
-    tmp205 = tmp204 + tmp2
-    tmp206 = tmp205 * tmp1
-    tmp207 = tmp206 + tmp2
-    tmp208 = tmp207 * tmp1
-    tmp209 = tmp208 + tmp2
-    tmp210 = tmp209 * tmp1
-    tmp211 = tmp210 + tmp2
-    tmp212 = tmp211 * tmp1
-    tmp213 = tmp212 + tmp2
-    tmp214 = tmp213 * tmp1
-    tmp215 = tmp214 + tmp2
-    tmp216 = tmp215 * tmp1
-    tmp217 = tmp216 + tmp2
-    tmp218 = tmp217 * tmp1
-    tmp219 = tmp218 + tmp2
-    tmp220 = tmp219 * tmp1
-    tmp221 = tmp220 + tmp2
-    tmp222 = tmp221 * tmp1
-    tmp223 = tmp222 + tmp2
-    tmp224 = tmp223 * tmp1
-    tmp225 = tmp224 + tmp2
-    tmp226 = tmp225 * tmp1
-    tmp227 = tmp226 + tmp2
-    tmp228 = tmp227 * tmp1
-    tmp229 = tmp228 + tmp2
-    tmp230 = tmp229 * tmp1
-    tmp231 = tmp230 + tmp2
-    tmp232 = tmp231 * tmp1
-    tmp233 = tmp232 + tmp2
-    tmp234 = tmp233 * tmp1
-    tmp235 = tmp234 + tmp2
-    tmp236 = tmp235 * tmp1
-    tmp237 = tmp236 + tmp2
-    tmp238 = tmp237 * tmp1
-    tmp239 = tmp238 + tmp2
-    tmp240 = tmp239 * tmp1
-    tmp241 = tmp240 + tmp2
-    tmp242 = tmp241 * tmp1
-    tmp243 = tmp242 + tmp2
-    tmp244 = tmp243 * tmp1
-    tmp245 = tmp244 + tmp2
-    tmp246 = tmp245 * tmp1
-    tmp247 = tmp246 + tmp2
-    tmp248 = tmp247 * tmp1
-    tmp249 = tmp248 + tmp2
-    tmp250 = tmp249 * tmp1
-    tmp251 = tmp250 + tmp2
-    tmp252 = tmp251 * tmp1
-    tmp253 = tmp252 + tmp2
-    tmp254 = tmp253 * tmp1
-    tmp255 = tmp254 + tmp2
-    tmp256 = tmp255 * tmp1
-    tmp257 = tmp256 + tmp2
-    tmp258 = tmp257 * tmp1
-    tmp259 = tmp258 + tmp2
-    tmp260 = tmp259 * tmp1
-    tmp261 = tmp260 + tmp2
-    tmp262 = tmp261 * tmp1
-    tmp263 = tmp262 + tmp2
-    tmp264 = tmp263 * tmp1
-    tmp265 = tmp264 + tmp2
-    tmp266 = tmp265 * tmp1
-    tmp267 = tmp266 + tmp2
-    tmp268 = tmp267 * tmp1
-    tmp269 = tmp268 + tmp2
-    tmp270 = tmp269 * tmp1
-    tmp271 = tmp270 + tmp2
-    tmp272 = tmp271 * tmp1
-    tmp273 = tmp272 + tmp2
-    tmp274 = tmp273 * tmp1
-    tmp275 = tmp274 + tmp2
-    tmp276 = tmp275 * tmp1
-    tmp277 = tmp276 + tmp2
-    tmp278 = tmp277 * tmp1
-    tmp279 = tmp278 + tmp2
-    tmp280 = tmp279 * tmp1
-    tmp281 = tmp280 + tmp2
-    tmp282 = tmp281 * tmp1
-    tmp283 = tmp282 + tmp2
-    tmp284 = tmp283 * tmp1
-    tmp285 = tmp284 + tmp2
-    tmp286 = tmp285 * tmp1
-    tmp287 = tmp286 + tmp2
-    tmp288 = tmp287 * tmp1
-    tmp289 = tmp288 + tmp2
-    tmp290 = tmp289 * tmp1
-    tmp291 = tmp290 + tmp2
-    tmp292 = tmp291 * tmp1
-    tmp293 = tmp292 + tmp2
-    tmp294 = tmp293 * tmp1
-    tmp295 = tmp294 + tmp2
-    tmp296 = tmp295 * tmp1
-    tmp297 = tmp296 + tmp2
-    tmp298 = tmp297 * tmp1
-    tmp299 = tmp298 + tmp2
-    tmp300 = tmp299 * tmp1
-    tmp301 = tmp300 + tmp2
-    tmp302 = tmp301 * tmp1
-    tmp303 = tmp302 + tmp2
-    tmp304 = tmp303 * tmp1
-    tmp305 = tmp304 + tmp2
-    tmp306 = tmp305 * tmp1
-    tmp307 = tmp306 + tmp2
-    tmp308 = tmp307 * tmp1
-    tmp309 = tmp308 + tmp2
-    tmp310 = tmp309 * tmp1
-    tmp311 = tmp310 + tmp2
-    tmp312 = tmp311 * tmp1
-    tmp313 = tmp312 + tmp2
-    tmp314 = tmp313 * tmp1
-    tmp315 = tmp314 + tmp2
-    tmp316 = tmp315 * tmp1
-    tmp317 = tmp316 + tmp2
-    tmp318 = tmp317 * tmp1
-    tmp319 = tmp318 + tmp2
-    tmp320 = tmp319 * tmp1
-    tmp321 = tmp320 + tmp2
-    tmp322 = tmp321 * tmp1
-    tmp323 = tmp322 + tmp2
-    tmp324 = tmp323 * tmp1
-    tmp325 = tmp324 + tmp2
-    tmp326 = tmp325 * tmp1
-    tmp327 = tmp326 + tmp2
-    tmp328 = tmp327 * tmp1
-    tmp329 = tmp328 + tmp2
-    tmp330 = tmp329 * tmp1
-    tmp331 = tmp330 + tmp2
-    tmp332 = tmp331 * tmp1
-    tmp333 = tmp332 + tmp2
-    tmp334 = tmp333 * tmp1
-    tmp335 = tmp334 + tmp2
-    tmp336 = tmp335 * tmp1
-    tmp337 = tmp336 + tmp2
-    tmp338 = tmp337 * tmp1
-    tmp339 = tmp338 + tmp2
-    tmp340 = tmp339 * tmp1
-    tmp341 = tmp340 + tmp2
-    tmp342 = tmp341 * tmp1
-    tmp343 = tmp342 + tmp2
-    tmp344 = tmp343 * tmp1
-    tmp345 = tmp344 + tmp2
-    tmp346 = tmp345 * tmp1
-    tmp347 = tmp346 + tmp2
-    tmp348 = tmp347 * tmp1
-    tmp349 = tmp348 + tmp2
-    tmp350 = tmp349 * tmp1
-    tmp351 = tmp350 + tmp2
-    tmp352 = tmp351 * tmp1
-    tmp353 = tmp352 + tmp2
-    tmp354 = tmp353 * tmp1
-    tmp355 = tmp354 + tmp2
-    tmp356 = tmp355 * tmp1
-    tmp357 = tmp356 + tmp2
-    tmp358 = tmp357 * tmp1
-    tmp359 = tmp358 + tmp2
-    tmp360 = tmp359 * tmp1
-    tmp361 = tmp360 + tmp2
-    tmp362 = tmp361 * tmp1
-    tmp363 = tmp362 + tmp2
-    tmp364 = tmp363 * tmp1
-    tmp365 = tmp364 + tmp2
-    tmp366 = tmp365 * tmp1
-    tmp367 = tmp366 + tmp2
-    tmp368 = tmp367 * tmp1
-    tmp369 = tmp368 + tmp2
-    tmp370 = tmp369 * tmp1
-    tmp371 = tmp370 + tmp2
-    tmp372 = tmp371 * tmp1
-    tmp373 = tmp372 + tmp2
-    tmp374 = tmp373 * tmp1
-    tmp375 = tmp374 + tmp2
-    tmp376 = tmp375 * tmp1
-    tmp377 = tmp376 + tmp2
-    tmp378 = tmp377 * tmp1
-    tmp379 = tmp378 + tmp2
-    tmp380 = tmp379 * tmp1
-    tmp381 = tmp3
+    tmp52 = tmp1 + tmp3
+    tmp53 = tmp52 + tmp3
+    tmp54 = tmp53 + tmp3
+    tmp55 = tmp54 + tmp3
+    tmp56 = tmp55 / 16.0
+    tmp57 = tmp56 - tmp1
+    tmp58 = tmp57 * tmp57
+    tmp59 = tmp58 / 16.0
+    tmp60 = tmp59 + tmp58
+    tmp61 = tmp60 + tmp58
+    tmp62 = tmp61 + tmp58
+    tmp63 = tmp62 / 16.0
+    tmp64 = tmp63 - tmp1
+    tmp65 = tmp64 * tmp64
+    tmp66 = tmp65 / 16.0
+    tmp67 = tmp66 + tmp65
+    tmp68 = tmp67 + tmp65
+    tmp69 = tmp68 + tmp65
+    tmp70 = tmp69 / 16.0
+    tmp71 = tmp70 - tmp1
+    tmp72 = tmp71 * tmp71
+    tmp73 = tmp72 / 16.0
+    tmp74 = tmp73 + tmp72
+    tmp75 = tmp74 + tmp72
+    tmp76 = tmp75 + tmp72
+    tmp77 = tmp76 / 16.0
+    tmp78 = tmp77 - tmp1
+    tmp79 = tmp78 * tmp78
+    tmp80 = tmp79 / 16.0
+    tmp81 = tmp80 + tmp79
+    tmp82 = tmp81 + tmp79
+    tmp83 = tmp82 + tmp79
+    tmp84 = tmp83 / 16.0
+    tmp85 = tmp84 - tmp1
+    tmp86 = tmp85 * tmp85
+    tmp87 = tmp86 / 16.0
+    tmp88 = tmp87 + tmp86
+    tmp89 = tmp88 + tmp86
+    tmp90 = tmp89 + tmp86
+    tmp91 = tmp90 / 16.0
+    tmp92 = tmp91 - tmp1
+    tmp93 = tmp92 * tmp92
+    tmp94 = tmp93 / 16.0
+    tmp95 = tmp94 + tmp93
+    tmp96 = tmp95 + tmp93
+    tmp97 = tmp96 + tmp93
+    tmp98 = tmp97 / 16.0
+    tmp99 = tmp98 - tmp1
+    tmp100 = tmp99 * tmp99
+    tmp101 = tmp100 / 16.0
+    tmp102 = tmp101 + tmp100
+    tmp103 = tmp102 + tmp100
+    tmp104 = tmp103 + tmp100
+    tmp105 = tmp104 / 16.0
+    tmp106 = tmp105 - tmp1
+    tmp107 = tmp106 * tmp106
+    tmp108 = tmp107 / 16.0
+    tmp109 = tmp108 + tmp107
+    tmp110 = tmp109 + tmp107
+    tmp111 = tmp110 + tmp107
+    tmp112 = tmp111 / 16.0
+    tmp113 = tmp112 - tmp1
+    tmp114 = tmp113 * tmp113
+    tmp115 = tmp114 / 16.0
+    tmp116 = tmp115 + tmp114
+    tmp117 = tmp116 + tmp114
+    tmp118 = tmp117 + tmp114
+    tmp119 = tmp118 / 16.0
+    tmp120 = tmp119 - tmp1
+    tmp121 = tmp120 * tmp120
+    tmp122 = tmp121 / 16.0
+    tmp123 = tmp122 + tmp121
+    tmp124 = tmp123 + tmp121
+    tmp125 = tmp124 + tmp121
+    tmp126 = tmp125 / 16.0
+    tmp127 = tmp126 - tmp1
+    tmp128 = tmp127 * tmp127
+    tmp129 = tmp128 / 16.0
+    tmp130 = tmp129 + tmp128
+    tmp131 = tmp130 + tmp128
+    tmp132 = tmp131 + tmp128
+    tmp133 = tmp132 / 16.0
+    tmp134 = tmp133 - tmp1
+    tmp135 = tmp134 * tmp134
+    tmp136 = tmp135 / 16.0
+    tmp137 = tmp136 + tmp135
+    tmp138 = tmp137 + tmp135
+    tmp139 = tmp138 + tmp135
+    tmp140 = tmp139 / 16.0
+    tmp141 = tmp140 - tmp1
+    tmp142 = tmp141 * tmp141
+    tmp143 = tmp142 / 16.0
+    tmp144 = tmp143 + tmp142
+    tmp145 = tmp144 + tmp142
+    tmp146 = tmp145 + tmp142
+    tmp147 = tmp146 / 16.0
+    tmp148 = tmp147 - tmp1
+    tmp149 = tmp148 * tmp148
+    tmp150 = tmp149 / 16.0
+    tmp151 = tmp150 + tmp149
+    tmp152 = tmp151 + tmp149
+    tmp153 = tmp152 + tmp149
+    tmp154 = tmp153 / 16.0
+    tmp155 = tmp154 - tmp1
+    tmp156 = tmp155 * tmp155
+    tmp157 = tmp156 / 16.0
+    tmp158 = tmp157 + tmp156
+    tmp159 = tmp158 + tmp156
+    tmp160 = tmp159 + tmp156
+    tmp161 = tmp160 / 16.0
+    tmp162 = tmp161 - tmp1
+    tmp163 = tmp162 * tmp162
+    tmp164 = tmp163 / 16.0
+    tmp165 = tmp164 + tmp163
+    tmp166 = tmp165 + tmp163
+    tmp167 = tmp166 + tmp163
+    tmp168 = tmp167 / 16.0
+    tmp169 = tmp168 - tmp1
+    tmp170 = tmp169 * tmp169
+    tmp171 = tmp170 / 16.0
+    tmp172 = tmp171 + tmp170
+    tmp173 = tmp172 + tmp170
+    tmp174 = tmp173 + tmp170
+    tmp175 = tmp174 / 16.0
+    tmp176 = tmp175 - tmp1
+    tmp177 = tmp176 * tmp176
+    tmp178 = tmp177 / 16.0
+    tmp179 = tmp178 + tmp177
+    tmp180 = tmp179 + tmp177
+    tmp181 = tmp180 + tmp177
+    tmp182 = tmp181 / 16.0
+    tmp183 = tmp182 - tmp1
+    tmp184 = tmp183 * tmp183
+    tmp185 = tmp184 / 16.0
+    tmp186 = tmp185 + tmp184
+    tmp187 = tmp186 + tmp184
+    tmp188 = tmp187 + tmp184
+    tmp189 = tmp188 / 16.0
+    tmp190 = tmp189 - tmp1
+    tmp191 = tmp190 * tmp190
+    tmp192 = tmp191 / 16.0
+    tmp193 = tmp192 + tmp191
+    tmp194 = tmp193 + tmp191
+    tmp195 = tmp194 + tmp191
+    tmp196 = tmp195 / 16.0
+    tmp197 = tmp196 - tmp1
+    tmp198 = tmp197 * tmp197
+    tmp199 = tmp198 / 16.0
+    tmp200 = tmp199 + tmp198
+    tmp201 = tmp200 + tmp198
+    tmp202 = tmp201 + tmp198
+    tmp203 = tmp202 / 16.0
+    tmp204 = tmp203 - tmp1
+    tmp205 = tmp204 * tmp204
+    tmp206 = tmp205 / 16.0
+    tmp207 = tmp206 + tmp205
+    tmp208 = tmp207 + tmp205
+    tmp209 = tmp208 + tmp205
+    tmp210 = tmp209 / 16.0
+    tmp211 = tmp210 - tmp1
+    tmp212 = tmp211 * tmp211
+    tmp213 = tmp212 / 16.0
+    tmp214 = tmp213 + tmp212
+    tmp215 = tmp214 + tmp212
+    tmp216 = tmp215 + tmp212
+    tmp217 = tmp216 / 16.0
+    tmp218 = tmp217 - tmp1
+    tmp219 = tmp218 * tmp218
+    tmp220 = tmp219 / 16.0
+    tmp221 = tmp220 + tmp219
+    tmp222 = tmp221 + tmp219
+    tmp223 = tmp222 + tmp219
+    tmp224 = tmp223 / 16.0
+    tmp225 = tmp224 - tmp1
+    tmp226 = tmp225 * tmp225
+    tmp227 = tmp226 / 16.0
+    tmp228 = tmp227 + tmp226
+    tmp229 = tmp228 + tmp226
+    tmp230 = tmp229 + tmp226
+    tmp231 = tmp230 / 16.0
+    tmp232 = tmp231 - tmp1
+    tmp233 = tmp232 * tmp232
+    tmp234 = tmp233 / 16.0
+    tmp235 = tmp234 + tmp233
+    tmp236 = tmp235 + tmp233
+    tmp237 = tmp236 + tmp233
+    tmp238 = tmp237 / 16.0
+    tmp239 = tmp238 - tmp1
+    tmp240 = tmp239 * tmp239
+    tmp241 = tmp240 / 16.0
+    tmp242 = tmp241 + tmp240
+    tmp243 = tmp242 + tmp240
+    tmp244 = tmp243 + tmp240
+    tmp245 = tmp244 / 16.0
+    tmp246 = tmp245 - tmp1
+    tmp247 = tmp246 * tmp246
+    tmp248 = tmp247 / 16.0
+    tmp249 = tmp248 + tmp247
+    tmp250 = tmp249 + tmp247
+    tmp251 = tmp250 + tmp247
+    tmp252 = tmp251 / 16.0
+    tmp253 = tmp252 - tmp1
+    tmp254 = tmp253 * tmp253
+    tmp255 = tmp254 / 16.0
+    tmp256 = tmp255 + tmp254
+    tmp257 = tmp256 + tmp254
+    tmp258 = tmp257 + tmp254
+    tmp259 = tmp258 / 16.0
+    tmp260 = tmp259 - tmp1
+    tmp261 = tmp260 * tmp260
+    tmp262 = tmp261 / 16.0
+    tmp263 = tmp262 + tmp261
+    tmp264 = tmp263 + tmp261
+    tmp265 = tmp264 + tmp261
+    tmp266 = tmp265 / 16.0
+    tmp267 = tmp266 - tmp1
+    tmp268 = tmp267 * tmp267
+    tmp269 = tmp268 / 16.0
+    tmp270 = tmp269 + tmp268
+    tmp271 = tmp270 + tmp268
+    tmp272 = tmp271 + tmp268
+    tmp273 = tmp272 / 16.0
+    tmp274 = tmp273 - tmp1
+    tmp275 = tmp274 * tmp274
+    tmp276 = tmp275 / 16.0
+    tmp277 = tmp276 + tmp275
+    tmp278 = tmp277 + tmp275
+    tmp279 = tmp278 + tmp275
+    tmp280 = tmp279 / 16.0
+    tmp281 = tmp280 - tmp1
+    tmp282 = tmp281 * tmp281
+    tmp283 = tmp282 / 16.0
+    tmp284 = tmp283 + tmp282
+    tmp285 = tmp284 + tmp282
+    tmp286 = tmp285 + tmp282
+    tmp287 = tmp286 / 16.0
+    tmp288 = tmp287 - tmp1
+    tmp289 = tmp288 * tmp288
+    tmp290 = tmp289 / 16.0
+    tmp291 = tmp290 + tmp289
+    tmp292 = tmp291 + tmp289
+    tmp293 = tmp292 + tmp289
+    tmp294 = tmp293 / 16.0
+    tmp295 = tmp294 - tmp1
+    tmp296 = tmp295 * tmp295
+    tmp297 = tmp296 / 16.0
+    tmp298 = tmp297 + tmp296
+    tmp299 = tmp298 + tmp296
+    tmp300 = tmp299 + tmp296
+    tmp301 = tmp300 / 16.0
+    tmp302 = tmp301 - tmp1
+    tmp303 = tmp302 * tmp302
+    tmp304 = tmp303 / 16.0
+    tmp305 = tmp304 + tmp303
+    tmp306 = tmp305 + tmp303
+    tmp307 = tmp306 + tmp303
+    tmp308 = tmp307 / 16.0
+    tmp309 = tmp308 - tmp1
+    tmp310 = tmp309 * tmp309
+    tmp311 = tmp310 / 16.0
+    tmp312 = tmp311 + tmp310
+    tmp313 = tmp312 + tmp310
+    tmp314 = tmp313 + tmp310
+    tmp315 = tmp314 / 16.0
+    tmp316 = tmp315 - tmp1
+    tmp317 = tmp316 * tmp316
+    tmp318 = tmp317 / 16.0
+    tmp319 = tmp318 + tmp317
+    tmp320 = tmp319 + tmp317
+    tmp321 = tmp320 + tmp317
+    tmp322 = tmp321 / 16.0
+    tmp323 = tmp322 - tmp1
+    tmp324 = tmp323 * tmp323
+    tmp325 = tmp324 / 16.0
+    tmp326 = tmp325 + tmp324
+    tmp327 = tmp326 + tmp324
+    tmp328 = tmp327 + tmp324
+    tmp329 = tmp328 / 16.0
+    tmp330 = tmp329 - tmp1
+    tmp331 = tmp330 * tmp330
+    tmp332 = tmp331 / 16.0
+    tmp333 = tmp332 + tmp331
+    tmp334 = tmp333 + tmp331
+    tmp335 = tmp334 + tmp331
+    tmp336 = tmp335 / 16.0
+    tmp337 = tmp336 - tmp1
+    tmp338 = tmp337 * tmp337
+    tmp339 = tmp338 / 16.0
+    tmp340 = tmp339 + tmp338
+    tmp341 = tmp340 + tmp338
+    tmp342 = tmp341 + tmp338
+    tmp343 = tmp342 / 1

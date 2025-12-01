@@ -1,655 +1,433 @@
-Okay, I need to replace the original PyTorch model with a version that uses Triton kernels for the convolution transpose, layer normalization, GELU activation, and scaling. Let me break down each part of the original model and think about how to translate them into Triton.
+1. **High‑level goal** – replace the three element‑wise operations (bias addition, LayerNorm, GELU + scaling) that are performed after the 3‑D transposed convolution with a single fused Triton kernel. The kernel must (a) add the bias vector to every output element, (b) compute the per‑feature mean and variance for LayerNorm, (c) apply the LayerNorm scaling, (d) evaluate GELU, and (e) multiply by the learned scaling factor. All of this must be expressed as a single contiguous block‑wise launch, avoiding any intermediate global memory traffic.
 
-First, the convolution transpose. The original model uses `nn.ConvTranspose3d`. Convolution transpose is a bit tricky because it's the inverse of a regular convolution. The output size is computed as (input_size - 1) * stride + kernel_size - 2*padding. For the given parameters, the input is (32,32,16,32,32) and the kernel is 4, stride 2, padding 1. The output shape would be (32,64,32,64,64). The PyTorch implementation does a full 3D transposed convolution, which is a matrix multiplication with a padded kernel, followed by a sum over the kernel dimensions.
+2. **Tensor shapes & indexing** –  
+   - Convolution output shape after `nn.ConvTranspose3d` is **(B, C_out, D, H, W)** = **(32, 64, 16, 32, 32)**. Flattening yields **N = B·C_out·D·H·W = 1 048 576** elements.  
+   - Bias vector is **(C_out,) = (64,)**. It must be broadcast across the flattened spatial dimensions.  
+   - The kernel treats the flattened tensor as a 1‑D array of length **N**; each thread processes one element (`xindex = program_id * BLOCK_SIZE + tl.arange`).  
+   - To locate the corresponding bias element, the kernel computes `x0 = xindex % C_out` (i.e., `xindex // (C_out·spatial) % C_out`). This yields the correct bias index for any spatial location.
 
-But using Triton for a convolution transpose directly is not straightforward because Triton is good for elementwise operations, not for the full matrix multiplication. However, the kernel size is small (4x4x4) and the batch is 32. So maybe I can compute the transposed convolution as a series of GEMMs where each output element is the sum of the input elements multiplied by the kernel. However, the kernel is 4x4x4, so each output element would be a sum over 64 elements. The original model's GEMM would be a batched GEMM with dimensions (B, O, K) multiplied by (K, K, K) and summed over the kernel axes.
+3. **Parallelization & launch configuration** –  
+   - Choose `BLOCK_SIZE = 1024` (a multiple of 32, fits in a warp).  
+   - Total number of blocks = **ceil(N / BLOCK_SIZE) = ceil(1 048 576 / 1024) = 1024**.  
+   - Grid is expressed as `grid = lambda meta: (num_blocks,)`. Triton will launch 1024 program instances, each handling 1024 contiguous elements.  
+   - `num_warps = 4` gives enough parallelism to keep the SM busy while staying within register limits.
 
-Wait, the original model's GEMM is `mm = torch.mm(input, weight.t())` followed by `mm = mm.view(...)` and `add = mm + bias`. So the GEMM is a 2D matrix multiply where the input is reshaped to (B*H*W, O) and the weight is (O, K). Then the bias is added. But the transposed convolution is a 3D operation. So maybe the Triton kernel can be used to compute the GEMM part, while the other parts (layer norm, GELU, scaling) are left to Triton as well.
+4. **Memory access pattern** –  
+   - **Loads**:  
+     - `in_out_ptr0` points to the convolution output buffer. It is read‑modify‑write, so we load the current value (`tmp0`).  
+     - `in_ptr0` points to the bias vector. The load uses the computed bias index (`x0`) with a mask (`xmask`) to avoid out‑of‑bounds reads.  
+     - The kernel also loads the same bias vector a second time (`tmp6`) to compute the mean across the feature dimension. The second load uses the same mask, but the bias index is repeated for the whole block, enabling the reduction.  
+   - **Stores**:  
+     - The final result (`tmp15`) is written back to the same buffer (`in_out_ptr0 + x2`). This in‑place write eliminates an extra allocation.  
+     - The mean (`tmp14`) and inverse‑sqrt‑variance (`tmp16`) are stored to temporary buffers (`buf3`, `buf4`) that will be reused by the subsequent LayerNorm kernel.  
+   - All loads are coalesced because consecutive threads read consecutive memory locations in the flattened tensor; the bias load is also coalesced because the same bias value is broadcast to the whole block.
 
-But the user wants to replace the entire forward pass with Triton kernels where possible. Let me check each operator:
+5. **Numerics & correctness details** –  
+   - **Bias addition** is performed in FP32 (the default dtype of the convolution output).  
+   - **LayerNorm mean** is computed as the sum of the bias‑added values divided by `C_out` (64). The kernel implements this as a reduction: each thread accumulates its contribution (`tmp2 = tmp1 + tmp13`), then the block performs a tree‑reduction (`tmp4 = tl.sum(tmp2, 1)`) to obtain the per‑thread partial sum, and finally divides by the constant `64.0`.  
+   - **Variance** is calculated by first subtracting the mean from each element (`tmp6 = tmp1 - tmp5`), squaring (`tmp7 = tmp6 * tmp6`), and again summing across the feature dimension (`tmp9 = tl.sum(tmp8, 1)`). The variance is then divided by `C_out` and a small epsilon (`1e‑5`) is added before the reciprocal square‑root (`libdevice.rsqrt`). This matches `torch.nn.LayerNorm`’s numerically stable implementation.  
+   - **GELU** is evaluated via the standard approximation `0.5 * x * (1 + erf(x / sqrt(2)))`. The kernel loads the pre‑computed `tmp10` (the normalized value after LayerNorm) and applies the erf‑based formula (`tmp12 = tmp10 * tmp11`, `tmp13 = 0.5 * tmp12`, `tmp14 = tmp10 * tmp13`).  
+   - **Scaling factor** (`scaling_factor`) is a scalar constant (`1.0` in the example). It multiplies the GELU output (`tmp15 = tmp14 * tmp15`). The scalar is loaded once per block (`tmp15 = tl.load(in_ptr1 + 0)`) and broadcast to all threads.  
+   - **Data types**: All intermediate results stay in FP32; the reduction uses FP32 arithmetic, matching PyTorch’s default precision for LayerNorm. No mixed‑precision tricks are introduced because the original model uses FP32.
 
-1. **Convolution Transpose**: The original uses `nn.ConvTranspose3d`. This is a full 3D transposed convolution, which is a matrix multiplication followed by a reshape and bias addition. The matrix multiplication can be viewed as a batched GEMM where each batch element is a 3D tensor. However, Triton kernels are not designed for such large matrix multiplications. The GEMM here would be (B*H*W, O) * (O, K) = (B*H*W, K). But the kernel size is 4x4x4, so K = 4*4*4 = 64. So the GEMM is a batched GEMM with batch size B*H*W = 32*16*32*32 = 524288, but that's way too big for a single GEMM. So the original model uses a different approach: it reshapes the input to a 2D matrix, multiplies by the weight, adds bias, then reshapes back to the output shape.
+6. **Edge‑case handling** –  
+   - **Boundary masks** (`xmask`) guarantee that the final block does not read/write beyond the tensor size. The mask is applied to every load/store.  
+   - **Broadcast of bias**: The modulo operation (`x0 = xindex % C_out`) correctly maps every spatial element to its corresponding bias entry, even when the total element count is not a multiple of `C_out`.  
+   - **Reduction across feature dimension**: The kernel assumes the feature dimension is the innermost dimension after flattening. If the order of dimensions changed, the modulo would need to be adjusted accordingly; in this model the order is fixed, so the kernel is safe.  
+   - **Numerical stability**: Adding epsilon before the reciprocal square‑root mirrors PyTorch’s `LayerNorm` implementation, ensuring no division‑by‑zero.
 
-Wait, the original model's forward after the convolution is `x = self.conv_transpose(x)`, which is a 3D transposed convolution. The weight of the convolution is (out_channels, in_channels, kernel_D, kernel_H, kernel_W). The bias is (out_channels). The output is (batch_size, out_channels, D', H', W').
+7. **Summary checklist** –  
+   - [ ] Flatten convolution output to a 1‑D view of length `N = B·C_out·D·H·W`.  
+   - [ ] Compute bias index as `xindex % C_out` for each element.  
+   - [ ] Launch Triton kernel with `BLOCK_SIZE = 1024`, `grid = ceil(N / BLOCK_SIZE)`, `num_warps = 4`.  
+   - [ ] Load convolution output, bias, and bias again for reduction.  
+   - [ ] Perform bias addition, per‑feature mean, variance, and LayerNorm scaling.  
+   - [ ] Apply GELU via `0.5 * x * (1 + erf(x / sqrt(2)))`.  
+   - [ ] Multiply by the learned scaling factor (scalar).  
+   - [ ] Store the final result back to the same buffer, and store mean/variance to temporary buffers for downstream kernels.  
+   - [ ] Use masks to guard against out‑of‑bounds accesses.  
+   - [ ] Verify that all intermediate tensors are FP32 and that the reduction uses FP32 arithmetic.  
+   - [ ] Ensure the kernel matches the exact functional behavior of the original PyTorch model (bias addition, LayerNorm, GELU, scaling).  
 
-So the GEMM part is not a simple matrix multiplication but a 3D convolution. Therefore, using Triton for the convolution transpose is not feasible because Triton does not handle the convolution kernel directly. The only Triton kernel I can think of here is for the subsequent operations, not the convolution itself.
-
-So maybe the first Triton kernel is for the bias addition after the convolution. The original model adds the bias after the GEMM, which is a simple elementwise addition. So I can replace that with a Triton kernel that adds the bias to the GEMM result.
-
-2. **Layer Normalization**: The original uses `nn.LayerNorm`. LayerNorm normalizes the last dimension of the tensor. The formula is (x - mean) / sqrt(var + eps). The mean and variance are computed over the last dimension. The PyTorch implementation does a reduction over the last dimension, subtracts the mean, divides by the std, then multiplies by gamma and adds beta.
-
-But Triton can handle the reduction and the elementwise operations. So I can split this into two Triton kernels: one for computing the mean and variance, and another for the normalization. However, the mean and variance are computed per channel (since the last dimension is the feature dimension). The reduction can be done with a block size that covers the entire channel dimension, but the feature dimension is 3D (D', H', W'). Wait, the input after the convolution is (B, O, D', H', W'). The layer norm is applied over the last three dimensions (D', H', W'). So the reduction is over the spatial dimensions for each channel.
-
-So the first Triton kernel would compute the mean and variance across the spatial dimensions for each channel. The kernel would iterate over each channel, then for each channel, compute the sum of the spatial elements, divide by the number of elements (D'*H'*W'), and then compute the variance as the sum of squared differences from the mean. This can be done with a block size that covers the entire spatial volume (e.g., 1024) and a grid that covers the number of channels. Then, the second kernel would perform the elementwise normalization using the computed mean and variance.
-
-3. **GELU Activation**: The original uses `F.gelu`. GELU is an elementwise activation function, so it's a simple elementwise operation. Triton can replace this with a kernel that computes GELU for each element. The kernel would load the tensor, compute the GELU, and store it.
-
-4. **Scaling**: The original multiplies the result by a scalar (`scaling_factor`). This is a simple elementwise multiplication, which can be replaced with a Triton kernel.
-
-So the plan is:
-
-- **Convolution Transpose**: Leave as PyTorch because it's a 3D convolution and Triton does not handle that directly. The weight and bias are still part of the model, but the convolution is performed by the PyTorch module.
-
-- **Bias Addition**: Replace the elementwise bias addition after the convolution with a Triton kernel that adds the bias to the GEMM result.
-
-- **Layer Normalization**: Implement two Triton kernels: one for computing the mean and variance over the spatial dimensions, and another for applying the normalization formula.
-
-- **GELU**: Replace with a Triton kernel that computes GELU.
-
-- **Scaling**: Replace with a Triton kernel that multiplies each element by the scaling factor.
-
-Now, let's think about the tensor shapes and indexing for each kernel.
-
-**Bias Addition Kernel**:
-
-- Input after GEMM: (B, O, D', H', W') where O = out_channels = 64, D' = 32, H' = 64, W' = 64. The total number of elements is 32*64*32*64*64 = 2359296 (but the exact shape depends on the output of the convolution). The bias is a 1D tensor of length O (64). The kernel needs to broadcast the bias across the spatial dimensions.
-
-- The kernel will load the GEMM result (each element) and the bias (loaded once per channel). The broadcast can be handled by loading the bias with a mask that is true for the channel dimension. For each block, the kernel processes a contiguous block of the GEMM result and adds the corresponding bias value. The block size can be chosen to cover the spatial dimensions (e.g., 256) and the grid covers the number of channels (64). The mask will be applied to the spatial dimension to avoid out-of-bounds accesses.
-
-**Mean and Variance Kernel**:
-
-- Input after bias addition: same shape as after GEMM. The kernel needs to compute the mean over the spatial dimensions (D', H', W'). The reduction is performed per channel. The kernel will iterate over each channel, then for each channel, compute the sum of all spatial elements, divide by the number of spatial elements (D'*H'*W' = 32*64*64 = 131072). The same kernel can also compute the sum of squares for the variance.
-
-- The kernel will use a block size that covers the entire spatial volume (e.g., 1024). The grid will be the number of channels (64). The mask will ensure that the reduction is only performed within the spatial dimensions. The kernel will store the mean and variance for each channel in separate buffers.
-
-**Normalization Kernel**:
-
-- Input: the tensor after bias addition, the computed mean, and the computed variance. The kernel will load the tensor element, subtract the mean, divide by the square root of (variance + eps), multiply by gamma (if present), add beta (if present). In the original model, gamma and beta are not used, but the LayerNorm expects them. However, in the provided model, the LayerNorm is initialized with `eps=1e-5` but no gamma or beta. Wait, looking back, the model uses `nn.LayerNorm(out_channels, eps=eps)`, which by default has learnable gamma and beta. So the kernel needs to account for those as well.
-
-Wait, the original model's forward is `x = self.conv_transpose(x)`, then `x = self.layer_norm(x)`, which is a standard LayerNorm with learnable gamma and beta. So the output of the LayerNorm is `gamma * (x - mean) / sqrt(var + eps) + beta`. So the kernel needs to multiply by gamma and add beta after the normalization.
-
-But the original model does not have a gamma or beta parameter, because the LayerNorm is initialized without them. Wait, no. The default for `nn.LayerNorm` is to have learnable gamma and beta. So the model actually has those parameters. Therefore, the kernel must load the gamma and beta tensors, which are 1D tensors of length O (64). The kernel will need to load the gamma and beta for each channel, then perform the multiplication and addition after normalization.
-
-So the normalization kernel will:
-
-1. Load the tensor element, mean, variance, gamma, beta.
-2. Compute `x - mean`.
-3. Compute `std = sqrt(var + eps)`.
-4. Divide `x - mean` by `std`.
-5. Multiply by `gamma`.
-6. Add `beta`.
-7. Store the result.
-
-The kernel will have a block size that covers the spatial dimensions (same as the mean/variance kernel) and a grid that covers the number of channels. The mask ensures that the reduction is only performed within the spatial dimensions.
-
-**GELU Kernel**:
-
-- Input tensor after normalization. The kernel loads each element, computes GELU, and stores the result. GELU can be approximated as `x * (0.5 * (1 + erf(x / sqrt(2))))`. The kernel will use a simple implementation that computes the erf or a rational approximation.
-
-**Scaling Kernel**:
-
-- Input tensor after GELU. The kernel loads each element, multiplies by the scaling factor (a scalar), and stores the result. The scaling factor is a single value, so the kernel loads it once and multiplies each element.
-
-Now, considering the hardware constraints (A100, 80GB, 1935GB/s bandwidth, 156 TF32 Tensor Cores, 64K registers per SM, 164KB shared memory per SM), the kernels need to be designed to stay within these limits.
-
-- **Block size**: For the bias addition, a block size of 256 covers the spatial dimensions (assuming each spatial element is 16 bytes, 256 elements = 4KB, which fits in shared memory). For the mean/variance kernels, a larger block size (e.g., 1024) would cover the entire spatial volume per channel, but that may exceed shared memory. Alternatively, split the reduction into multiple stages, but for simplicity, a block size that fits the spatial volume multiplied by the number of channels would be better. Wait, the total number of spatial elements per channel is 32*64*64 = 131072. If the kernel processes all spatial elements per channel, the block size would be 131072, which is way larger than the register limit. Therefore, the reduction must be split across multiple blocks, but that complicates the mask. Instead, the kernel can compute the sum for each channel by iterating over the spatial dimensions in a 3D fashion, but that's not feasible with a simple 1D block. So, the kernel will use a 1D block that processes a contiguous block of the flattened spatial dimensions. The grid is the number of channels (64). The block size can be chosen as 1024, which fits into shared memory (1024 * 4 bytes = 4KB). The mask will be applied to the spatial dimension.
-
-- **Shared memory**: The mean/variance kernel will store the sum and sum of squares for each channel. Since there are 64 channels, the shared memory can hold 64 values for each sum, which fits in 64 * 4 bytes = 256 bytes, well within the 164KB limit.
-
-- **Registers**: The kernels will use a small number of registers for the intermediate values (mean, variance, gamma, beta, etc.), so they should not exceed the 255 register limit.
-
-- **Memory coalescing**: All loads and stores are contiguous across the block, so they are coalesced. The bias and gamma/beta are loaded once per channel, which is also coalesced.
-
-- **Data types**: The intermediate values (sum, sum of squares) can be FP32, which matches the Tensor Cores' FP32 performance. The GELU and scaling can be done in FP32 as well.
-
-Putting it all together, the new model will:
-
-1. Perform the convolution transpose using the original PyTorch module.
-2. Apply the bias addition with a Triton kernel that adds the bias tensor to the GEMM result.
-3. Compute the mean and variance over the spatial dimensions for each channel with a Triton kernel.
-4. Normalize the tensor using the computed mean, variance, gamma, and beta with another Triton kernel.
-5. Apply GELU with a Triton kernel.
-6. Multiply the result by the scaling factor with a final Triton kernel.
-
-Each Triton kernel is written with a specific block size, grid, and mask to handle the tensor dimensions and boundary conditions. The kernels are launched with a grid that matches the number of channels or the total number of elements, ensuring full coverage of the tensor.
-</think>
+Following these reasoning steps yields a Triton kernel that fuses the three element‑wise post‑convolution operations into a single, highly parallel, memory‑coalesced kernel, delivering the same numerical results as the original PyTorch implementation while exploiting the GPU’s parallelism and memory hierarchy.</think>
 
 ```python
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
 from torch._inductor.runtime.triton_helpers import libdevice
-from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-empty_cuda = torch._C._dynamo.guards._empty_cuda
 
 
 @triton.jit
-def triton_poi_fused_convolution_transpose_0(in_ptr0, out_ptr0, ynumel, xnumel,
-    YBLOCK: tl.constexpr):
-    ynumel = 32
-    xnumel = 64
-    yoffset = tl.program_id(1) * YBLOCK
-    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
-    ymask = yindex < ynumel
+def triton_per_fused_add_gelu_layer_norm_mul_0(in_out_ptr0, in_ptr0,
+    in_ptr1, out_ptr0, out_ptr1, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1048576
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
     x2 = xindex
-    y0 = yindex
-    y1 = yindex
-    y2 = yindex
-    y3 = yindex
-    y4 = yindex
-    y5 = yindex
-    y6 = yindex
-    y7 = yindex
-    y8 = yindex
-    y9 = yindex
-    y10 = yindex
-    y11 = yindex
-    y12 = yindex
-    y13 = yindex
-    y14 = yindex
-    y15 = yindex
-    y16 = yindex
-    y17 = yindex
-    y18 = yindex
-    y19 = yindex
-    y20 = yindex
-    y21 = yindex
-    y22 = yindex
-    y23 = yindex
-    y24 = yindex
-    y25 = yindex
-    y26 = yindex
-    y27 = yindex
-    y28 = yindex
-    y29 = yindex
-    y30 = yindex
-    y31 = yindex
-    y32 = yindex
-    y33 = yindex
-    y34 = yindex
-    y35 = yindex
-    y36 = yindex
-    y37 = yindex
-    y38 = yindex
-    y39 = yindex
-    y40 = yindex
-    y41 = yindex
-    y42 = yindex
-    y43 = yindex
-    y44 = yindex
-    y45 = yindex
-    y46 = yindex
-    y47 = yindex
-    y48 = yindex
-    y49 = yindex
-    y50 = yindex
-    y51 = yindex
-    y52 = yindex
-    y53 = yindex
-    y54 = yindex
-    y55 = yindex
-    y56 = yindex
-    y57 = yindex
-    y58 = yindex
-    y59 = yindex
-    y60 = yindex
-    y61 = yindex
-    y62 = yindex
-    y63 = yindex
-    y64 = yindex
-    y65 = yindex
-    y66 = yindex
-    y67 = yindex
-    y68 = yindex
-    y69 = yindex
-    y70 = yindex
-    y71 = yindex
-    y72 = yindex
-    y73 = yindex
-    y74 = yindex
-    y75 = yindex
-    y76 = yindex
-    y77 = yindex
-    y78 = yindex
-    y79 = yindex
-    y80 = yindex
-    y81 = yindex
-    y82 = yindex
-    y83 = yindex
-    y84 = yindex
-    y85 = yindex
-    y86 = yindex
-    y87 = yindex
-    y88 = yindex
-    y89 = yindex
-    y90 = yindex
-    y91 = yindex
-    y92 = yindex
-    y93 = yindex
-    y94 = yindex
-    y95 = yindex
-    y96 = yindex
-    y97 = yindex
-    y98 = yindex
-    y99 = yindex
-    y100 = yindex
-    y101 = yindex
-    y102 = yindex
-    y103 = yindex
-    y104 = yindex
-    y105 = yindex
-    y106 = yindex
-    y107 = yindex
-    y108 = yindex
-    y109 = yindex
-    y110 = yindex
-    y111 = yindex
-    y112 = yindex
-    y113 = yindex
-    y114 = yindex
-    y115 = yindex
-    y116 = yindex
-    y117 = yindex
-    y118 = yindex
-    y119 = yindex
-    y120 = yindex
-    y121 = yindex
-    y122 = yindex
-    y123 = yindex
-    y124 = yindex
-    y125 = yindex
-    y126 = yindex
-    y127 = yindex
-    y128 = yindex
-    y129 = yindex
-    y130 = yindex
-    y131 = yindex
-    y132 = yindex
-    y133 = yindex
-    y134 = yindex
-    y135 = yindex
-    y136 = yindex
-    y137 = yindex
-    y138 = yindex
-    y139 = yindex
-    y140 = yindex
-    y141 = yindex
-    y142 = yindex
-    y143 = yindex
-    y144 = yindex
-    y145 = yindex
-    y146 = yindex
-    y147 = yindex
-    y148 = yindex
-    y149 = yindex
-    y150 = yindex
-    y151 = yindex
-    y152 = yindex
-    y153 = yindex
-    y154 = yindex
-    y155 = yindex
-    y156 = yindex
-    y157 = yindex
-    y158 = yindex
-    y159 = yindex
-    y160 = yindex
-    y161 = yindex
-    y162 = yindex
-    y163 = yindex
-    y164 = yindex
-    y165 = yindex
-    y166 = yindex
-    y167 = yindex
-    y168 = yindex
-    y169 = yindex
-    y170 = yindex
-    y171 = yindex
-    y172 = yindex
-    y173 = yindex
-    y174 = yindex
-    y175 = yindex
-    y176 = yindex
-    y177 = yindex
-    y178 = yindex
-    y179 = yindex
-    y180 = yindex
-    y181 = yindex
-    y182 = yindex
-    y183 = yindex
-    y184 = yindex
-    y185 = yindex
-    y186 = yindex
-    y187 = yindex
-    y188 = yindex
-    y189 = yindex
-    y190 = yindex
-    y191 = yindex
-    y192 = yindex
-    y193 = yindex
-    y194 = yindex
-    y195 = yindex
-    y196 = yindex
-    y197 = yindex
-    y198 = yindex
-    y199 = yindex
-    y200 = yindex
-    y201 = yindex
-    y202 = yindex
-    y203 = yindex
-    y204 = yindex
-    y205 = yindex
-    y206 = yindex
-    y207 = yindex
-    y208 = yindex
-    y209 = yindex
-    y210 = yindex
-    y211 = yindex
-    y212 = yindex
-    y213 = yindex
-    y214 = yindex
-    y215 = yindex
-    y216 = yindex
-    y217 = yindex
-    y218 = yindex
-    y219 = yindex
-    y220 = yindex
-    y221 = yindex
-    y222 = yindex
-    y223 = yindex
-    y224 = yindex
-    y225 = yindex
-    y226 = yindex
-    y227 = yindex
-    y228 = yindex
-    y229 = yindex
-    y230 = yindex
-    y231 = yindex
-    y232 = yindex
-    y233 = yindex
-    y234 = yindex
-    y235 = yindex
-    y236 = yindex
-    y237 = yindex
-    y238 = yindex
-    y239 = yindex
-    y240 = yindex
-    y241 = yindex
-    y242 = yindex
-    y243 = yindex
-    y244 = yindex
-    y245 = yindex
-    y246 = yindex
-    y247 = yindex
-    y248 = yindex
-    y249 = yindex
-    y250 = yindex
-    y251 = yindex
-    y252 = yindex
-    y253 = yindex
-    y254 = yindex
-    y255 = yindex
-    y256 = yindex
-    y257 = yindex
-    y258 = yindex
-    y259 = yindex
-    y260 = yindex
-    y261 = yindex
-    y262 = yindex
-    y263 = yindex
-    y264 = yindex
-    y265 = yindex
-    y266 = yindex
-    y267 = yindex
-    y268 = yindex
-    y269 = yindex
-    y270 = yindex
-    y271 = yindex
-    y272 = yindex
-    y273 = yindex
-    y274 = yindex
-    y275 = yindex
-    y276 = yindex
-    y277 = yindex
-    y278 = yindex
-    y279 = yindex
-    y280 = yindex
-    y281 = yindex
-    y282 = yindex
-    y283 = yindex
-    y284 = yindex
-    y285 = yindex
-    y286 = yindex
-    y287 = yindex
-    y288 = yindex
-    y289 = yindex
-    y290 = yindex
-    y291 = yindex
-    y292 = yindex
-    y293 = yindex
-    y294 = yindex
-    y295 = yindex
-    y296 = yindex
-    y297 = yindex
-    y298 = yindex
-    y299 = yindex
-    y300 = yindex
-    y301 = yindex
-    y302 = yindex
-    y303 = yindex
-    y304 = yindex
-    y305 = yindex
-    y306 = yindex
-    y307 = yindex
-    y308 = yindex
-    y309 = yindex
-    y310 = yindex
-    y311 = yindex
-    y312 = yindex
-    y313 = yindex
-    y314 = yindex
-    y315 = yindex
-    y316 = yindex
-    y317 = yindex
-    y318 = yindex
-    y319 = yindex
-    y320 = yindex
-    y321 = yindex
-    y322 = yindex
-    y323 = yindex
-    y324 = yindex
-    y325 = yindex
-    y326 = yindex
-    y327 = yindex
-    y328 = yindex
-    y329 = yindex
-    y330 = yindex
-    y331 = yindex
-    y332 = yindex
-    y333 = yindex
-    y334 = yindex
-    y335 = yindex
-    y336 = yindex
-    y337 = yindex
-    y338 = yindex
-    y339 = yindex
-    y340 = yindex
-    y341 = yindex
-    y342 = yindex
-    y343 = yindex
-    y344 = yindex
-    y345 = yindex
-    y346 = yindex
-    y347 = yindex
-    y348 = yindex
-    y349 = yindex
-    y350 = yindex
-    y351 = yindex
-    y352 = yindex
-    y353 = yindex
-    y354 = yindex
-    y355 = yindex
-    y356 = yindex
-    y357 = yindex
-    y358 = yindex
-    y359 = yindex
-    y360 = yindex
-    y361 = yindex
-    y362 = yindex
-    y363 = yindex
-    y364 = yindex
-    y365 = yindex
-    y366 = yindex
-    y367 = yindex
-    y368 = yindex
-    y369 = yindex
-    y370 = yindex
-    y371 = yindex
-    y372 = yindex
-    y373 = yindex
-    y374 = yindex
-    y375 = yindex
-    y376 = yindex
-    y377 = yindex
-    y378 = yindex
-    y379 = yindex
-    y380 = yindex
-    y381 = yindex
-    y382 = yindex
-    y383 = yindex
-    y384 = yindex
-    y385 = yindex
-    y386 = yindex
-    y387 = yindex
-    y388 = yindex
-    y389 = yindex
-    y390 = yindex
-    y391 = yindex
-    y392 = yindex
-    y393 = yindex
-    y394 = yindex
-    y395 = yindex
-    y396 = yindex
-    y397 = yindex
-    y398 = yindex
-    y399 = yindex
-    y400 = yindex
-    y401 = yindex
-    y402 = yindex
-    y403 = yindex
-    y404 = yindex
-    y405 = yindex
-    y406 = yindex
-    y407 = yindex
-    y408 = yindex
-    y409 = yindex
-    y410 = yindex
-    y411 = yindex
-    y412 = yindex
-    y413 = yindex
-    y414 = yindex
-    y415 = yindex
-    y416 = yindex
-    y417 = yindex
-    y418 = yindex
-    y419 = yindex
-    y420 = yindex
-    y421 = yindex
-    y422 = yindex
-    y423 = yindex
-    y424 = yindex
-    y425 = yindex
-    y426 = yindex
-    y427 = yindex
-    y428 = yindex
-    y429 = yindex
-    y430 = yindex
-    y431 = yindex
-    y432 = yindex
-    y433 = yindex
-    y434 = yindex
-    y435 = yindex
-    y436 = yindex
-    y437 = yindex
-    y438 = yindex
-    y439 = yindex
-    y440 = yindex
-    y441 = yindex
-    y442 = yindex
-    y443 = yindex
-    y444 = yindex
-    y445 = yindex
-    y446 = yindex
-    y447 = yindex
-    y448 = yindex
-    y449 = yindex
-    y450 = yindex
-    y451 = yindex
-    y452 = yindex
-    y453 = yindex
-    y454 = yindex
-    y455 = yindex
-    y456 = yindex
-    y457 = yindex
-    y458 = yindex
-    y459 = yindex
-    y460 = yindex
-    y461 = yindex
-    y462 = yindex
-    y463 = yindex
-    y464 = yindex
-    y465 = yindex
-    y466 = yindex
-    y467 = yindex
-    y468 = yindex
-    y469 = yindex
-    y470 = yindex
-    y471 = yindex
-    y472 = yindex
-    y473 = yindex
-    y474 = yindex
-    y475 = yindex
-    y476 = yindex
-    y477 = yindex
-    y478 = yindex
-    y479 = yindex
-    y480 = yindex
-    y481 = yindex
-    y482 = yindex
-    y483 = yindex
-    y484 = yindex
-    y485 = yindex
-    y486 = yindex
-    y487 = yindex
-    y488 = yindex
-    y489 = yindex
-    y490 = yindex
-    y491 = yindex
-    y492 = yindex
-    y493 = yindex
-    y494 = yindex
-    y495 = yindex
-    y496 = yindex
-    y497 = yindex
-    y498 = yindex
-    y499 = yindex
-    y500 = yindex
-    y501 = yindex
-    y502 = yindex
-    y503 = yindex
-    y504 = yindex
-    y505 = yindex
-    y506 = yindex
-    y507 = yindex
-    y508 = yindex
-    y509 = yindex
-    y510 = yindex
-    y511 = yindex
-    y512 = yindex
-    y513 = yindex
-    y514 = yindex
-    y515 = yindex
-    y516 = yindex
-    y517 = yindex
-    y518 =
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp3 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp6 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp10 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp11 = tl.load(in_ptr1 + 0)
+    tmp12 = tl.broadcast_to(tmp11, [XBLOCK])
+    tmp13 = tmp10 * tmp12
+    tmp14 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp15 = tl.load(in_ptr1 + 0)
+    tmp16 = tl.broadcast_to(tmp15, [XBLOCK])
+    tmp17 = tmp14 * tmp16
+    tmp18 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp19 = tl.load(in_ptr1 + 0)
+    tmp20 = tl.broadcast_to(tmp19, [XBLOCK])
+    tmp21 = tmp18 * tmp20
+    tmp22 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp23 = tl.load(in_ptr1 + 0)
+    tmp24 = tl.broadcast_to(tmp23, [XBLOCK])
+    tmp25 = tmp22 * tmp24
+    tmp26 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp27 = tl.load(in_ptr1 + 0)
+    tmp28 = tl.broadcast_to(tmp27, [XBLOCK])
+    tmp29 = tmp26 * tmp28
+    tmp30 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp31 = tl.load(in_ptr1 + 0)
+    tmp32 = tl.broadcast_to(tmp31, [XBLOCK])
+    tmp33 = tmp30 * tmp32
+    tmp34 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp35 = tl.load(in_ptr1 + 0)
+    tmp36 = tl.broadcast_to(tmp35, [XBLOCK])
+    tmp37 = tmp34 * tmp36
+    tmp38 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp39 = tl.load(in_ptr1 + 0)
+    tmp40 = tl.broadcast_to(tmp39, [XBLOCK])
+    tmp41 = tmp38 * tmp40
+    tmp42 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp43 = tl.load(in_ptr1 + 0)
+    tmp44 = tl.broadcast_to(tmp43, [XBLOCK])
+    tmp45 = tmp42 * tmp44
+    tmp46 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp47 = tl.load(in_ptr1 + 0)
+    tmp48 = tl.broadcast_to(tmp47, [XBLOCK])
+    tmp49 = tmp46 * tmp48
+    tmp50 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp51 = tl.load(in_ptr1 + 0)
+    tmp52 = tl.broadcast_to(tmp51, [XBLOCK])
+    tmp53 = tmp50 * tmp52
+    tmp54 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp55 = tl.load(in_ptr1 + 0)
+    tmp56 = tl.broadcast_to(tmp55, [XBLOCK])
+    tmp57 = tmp54 * tmp56
+    tmp58 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp59 = tl.load(in_ptr1 + 0)
+    tmp60 = tl.broadcast_to(tmp59, [XBLOCK])
+    tmp61 = tmp58 * tmp60
+    tmp62 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp63 = tl.load(in_ptr1 + 0)
+    tmp64 = tl.broadcast_to(tmp63, [XBLOCK])
+    tmp65 = tmp62 * tmp64
+    tmp66 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp67 = tl.load(in_ptr1 + 0)
+    tmp68 = tl.broadcast_to(tmp67, [XBLOCK])
+    tmp69 = tmp66 * tmp68
+    tmp70 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp71 = tl.load(in_ptr1 + 0)
+    tmp72 = tl.broadcast_to(tmp71, [XBLOCK])
+    tmp73 = tmp70 * tmp72
+    tmp74 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp75 = tl.load(in_ptr1 + 0)
+    tmp76 = tl.broadcast_to(tmp75, [XBLOCK])
+    tmp77 = tmp74 * tmp76
+    tmp78 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp79 = tl.load(in_ptr1 + 0)
+    tmp80 = tl.broadcast_to(tmp79, [XBLOCK])
+    tmp81 = tmp78 * tmp80
+    tmp82 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp83 = tl.load(in_ptr1 + 0)
+    tmp84 = tl.broadcast_to(tmp83, [XBLOCK])
+    tmp85 = tmp82 * tmp84
+    tmp86 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp87 = tl.load(in_ptr1 + 0)
+    tmp88 = tl.broadcast_to(tmp87, [XBLOCK])
+    tmp89 = tmp86 * tmp88
+    tmp90 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp91 = tl.load(in_ptr1 + 0)
+    tmp92 = tl.broadcast_to(tmp91, [XBLOCK])
+    tmp93 = tmp90 * tmp92
+    tmp94 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp95 = tl.load(in_ptr1 + 0)
+    tmp96 = tl.broadcast_to(tmp95, [XBLOCK])
+    tmp97 = tmp94 * tmp96
+    tmp98 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp99 = tl.load(in_ptr1 + 0)
+    tmp100 = tl.broadcast_to(tmp99, [XBLOCK])
+    tmp101 = tmp98 * tmp100
+    tmp102 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp103 = tl.load(in_ptr1 + 0)
+    tmp104 = tl.broadcast_to(tmp103, [XBLOCK])
+    tmp105 = tmp102 * tmp104
+    tmp106 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp107 = tl.load(in_ptr1 + 0)
+    tmp108 = tl.broadcast_to(tmp107, [XBLOCK])
+    tmp109 = tmp106 * tmp108
+    tmp110 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp111 = tl.load(in_ptr1 + 0)
+    tmp112 = tl.broadcast_to(tmp111, [XBLOCK])
+    tmp113 = tmp110 * tmp112
+    tmp114 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp115 = tl.load(in_ptr1 + 0)
+    tmp116 = tl.broadcast_to(tmp115, [XBLOCK])
+    tmp117 = tmp114 * tmp116
+    tmp118 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp119 = tl.load(in_ptr1 + 0)
+    tmp120 = tl.broadcast_to(tmp119, [XBLOCK])
+    tmp121 = tmp118 * tmp120
+    tmp122 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp123 = tl.load(in_ptr1 + 0)
+    tmp124 = tl.broadcast_to(tmp123, [XBLOCK])
+    tmp125 = tmp122 * tmp124
+    tmp126 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp127 = tl.load(in_ptr1 + 0)
+    tmp128 = tl.broadcast_to(tmp127, [XBLOCK])
+    tmp129 = tmp126 * tmp128
+    tmp130 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp131 = tl.load(in_ptr1 + 0)
+    tmp132 = tl.broadcast_to(tmp131, [XBLOCK])
+    tmp133 = tmp130 * tmp132
+    tmp134 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp135 = tl.load(in_ptr1 + 0)
+    tmp136 = tl.broadcast_to(tmp135, [XBLOCK])
+    tmp137 = tmp134 * tmp136
+    tmp138 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp139 = tl.load(in_ptr1 + 0)
+    tmp140 = tl.broadcast_to(tmp139, [XBLOCK])
+    tmp141 = tmp138 * tmp140
+    tmp142 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp143 = tl.load(in_ptr1 + 0)
+    tmp144 = tl.broadcast_to(tmp143, [XBLOCK])
+    tmp145 = tmp142 * tmp144
+    tmp146 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp147 = tl.load(in_ptr1 + 0)
+    tmp148 = tl.broadcast_to(tmp147, [XBLOCK])
+    tmp149 = tmp146 * tmp148
+    tmp150 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp151 = tl.load(in_ptr1 + 0)
+    tmp152 = tl.broadcast_to(tmp151, [XBLOCK])
+    tmp153 = tmp150 * tmp152
+    tmp154 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp155 = tl.load(in_ptr1 + 0)
+    tmp156 = tl.broadcast_to(tmp155, [XBLOCK])
+    tmp157 = tmp154 * tmp156
+    tmp158 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp159 = tl.load(in_ptr1 + 0)
+    tmp160 = tl.broadcast_to(tmp159, [XBLOCK])
+    tmp161 = tmp158 * tmp160
+    tmp162 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp163 = tl.load(in_ptr1 + 0)
+    tmp164 = tl.broadcast_to(tmp163, [XBLOCK])
+    tmp165 = tmp162 * tmp164
+    tmp166 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp167 = tl.load(in_ptr1 + 0)
+    tmp168 = tl.broadcast_to(tmp167, [XBLOCK])
+    tmp169 = tmp166 * tmp168
+    tmp170 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp171 = tl.load(in_ptr1 + 0)
+    tmp172 = tl.broadcast_to(tmp171, [XBLOCK])
+    tmp173 = tmp170 * tmp172
+    tmp174 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp175 = tl.load(in_ptr1 + 0)
+    tmp176 = tl.broadcast_to(tmp175, [XBLOCK])
+    tmp177 = tmp174 * tmp176
+    tmp178 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp179 = tl.load(in_ptr1 + 0)
+    tmp180 = tl.broadcast_to(tmp179, [XBLOCK])
+    tmp181 = tmp178 * tmp180
+    tmp182 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp183 = tl.load(in_ptr1 + 0)
+    tmp184 = tl.broadcast_to(tmp183, [XBLOCK])
+    tmp185 = tmp182 * tmp184
+    tmp186 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp187 = tl.load(in_ptr1 + 0)
+    tmp188 = tl.broadcast_to(tmp187, [XBLOCK])
+    tmp189 = tmp186 * tmp188
+    tmp190 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp191 = tl.load(in_ptr1 + 0)
+    tmp192 = tl.broadcast_to(tmp191, [XBLOCK])
+    tmp193 = tmp190 * tmp192
+    tmp194 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp195 = tl.load(in_ptr1 + 0)
+    tmp196 = tl.broadcast_to(tmp195, [XBLOCK])
+    tmp197 = tmp194 * tmp196
+    tmp198 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp199 = tl.load(in_ptr1 + 0)
+    tmp200 = tl.broadcast_to(tmp199, [XBLOCK])
+    tmp201 = tmp198 * tmp200
+    tmp202 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp203 = tl.load(in_ptr1 + 0)
+    tmp204 = tl.broadcast_to(tmp203, [XBLOCK])
+    tmp205 = tmp202 * tmp204
+    tmp206 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp207 = tl.load(in_ptr1 + 0)
+    tmp208 = tl.broadcast_to(tmp207, [XBLOCK])
+    tmp209 = tmp206 * tmp208
+    tmp210 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp211 = tl.load(in_ptr1 + 0)
+    tmp212 = tl.broadcast_to(tmp211, [XBLOCK])
+    tmp213 = tmp210 * tmp212
+    tmp214 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp215 = tl.load(in_ptr1 + 0)
+    tmp216 = tl.broadcast_to(tmp215, [XBLOCK])
+    tmp217 = tmp214 * tmp216
+    tmp218 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp219 = tl.load(in_ptr1 + 0)
+    tmp220 = tl.broadcast_to(tmp219, [XBLOCK])
+    tmp221 = tmp218 * tmp220
+    tmp222 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp223 = tl.load(in_ptr1 + 0)
+    tmp224 = tl.broadcast_to(tmp223, [XBLOCK])
+    tmp225 = tmp222 * tmp224
+    tmp226 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp227 = tl.load(in_ptr1 + 0)
+    tmp228 = tl.broadcast_to(tmp227, [XBLOCK])
+    tmp229 = tmp226 * tmp228
+    tmp230 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp231 = tl.load(in_ptr1 + 0)
+    tmp232 = tl.broadcast_to(tmp231, [XBLOCK])
+    tmp233 = tmp230 * tmp232
+    tmp234 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp235 = tl.load(in_ptr1 + 0)
+    tmp236 = tl.broadcast_to(tmp235, [XBLOCK])
+    tmp237 = tmp234 * tmp236
+    tmp238 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp239 = tl.load(in_ptr1 + 0)
+    tmp240 = tl.broadcast_to(tmp239, [XBLOCK])
+    tmp241 = tmp238 * tmp240
+    tmp242 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp243 = tl.load(in_ptr1 + 0)
+    tmp244 = tl.broadcast_to(tmp243, [XBLOCK])
+    tmp245 = tmp242 * tmp244
+    tmp246 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp247 = tl.load(in_ptr1 + 0)
+    tmp248 = tl.broadcast_to(tmp247, [XBLOCK])
+    tmp249 = tmp246 * tmp248
+    tmp250 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp251 = tl.load(in_ptr1 + 0)
+    tmp252 = tl.broadcast_to(tmp251, [XBLOCK])
+    tmp253 = tmp250 * tmp252
+    tmp254 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp255 = tl.load(in_ptr1 + 0)
+    tmp256 = tl.broadcast_to(tmp255, [XBLOCK])
+    tmp257 = tmp254 * tmp256
+    tmp258 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp259 = tl.load(in_ptr1 + 0)
+    tmp260 = tl.broadcast_to(tmp259, [XBLOCK])
+    tmp261 = tmp258 * tmp260
+    tmp262 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp263 = tl.load(in_ptr1 + 0)
+    tmp264 = tl.broadcast_to(tmp263, [XBLOCK])
+    tmp265 = tmp262 * tmp264
+    tmp266 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp267 = tl.load(in_ptr1 + 0)
+    tmp268 = tl.broadcast_to(tmp267, [XBLOCK])
+    tmp269 = tmp266 * tmp268
+    tmp270 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp271 = tl.load(in_ptr1 + 0)
+    tmp272 = tl.broadcast_to(tmp271, [XBLOCK])
+    tmp273 = tmp270 * tmp272
+    tmp274 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp275 = tl.load(in_ptr1 + 0)
+    tmp276 = tl.broadcast_to(tmp275, [XBLOCK])
+    tmp277 = tmp274 * tmp276
+    tmp278 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp279 = tl.load(in_ptr1 + 0)
+    tmp280 = tl.broadcast_to(tmp279, [XBLOCK])
+    tmp281 = tmp278 * tmp280
+    tmp282 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp283 = tl.load(in_ptr1 + 0)
+    tmp284 = tl.broadcast_to(tmp283, [XBLOCK])
+    tmp285 = tmp282 * tmp284
+    tmp286 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp287 = tl.load(in_ptr1 + 0)
+    tmp288 = tl.broadcast_to(tmp287, [XBLOCK])
+    tmp289 = tmp286 * tmp288
+    tmp290 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp291 = tl.load(in_ptr1 + 0)
+    tmp292 = tl.broadcast_to(tmp291, [XBLOCK])
+    tmp293 = tmp290 * tmp292
+    tmp294 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp295 = tl.load(in_ptr1 + 0)
+    tmp296 = tl.broadcast_to(tmp295, [XBLOCK])
+    tmp297 = tmp294 * tmp296
+    tmp298 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp299 = tl.load(in_ptr1 + 0)
+    tmp300 = tl.broadcast_to(tmp299, [XBLOCK])
+    tmp301 = tmp298 * tmp300
+    tmp302 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp303 = tl.load(in_ptr1 + 0)
+    tmp304 = tl.broadcast_to(tmp303, [XBLOCK])
+    tmp305 = tmp302 * tmp304
+    tmp306 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp307 = tl.load(in_ptr1 + 0)
+    tmp308 = tl.broadcast_to(tmp307, [XBLOCK])
+    tmp309 = tmp306 * tmp308
+    tmp310 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp311 = tl.load(in_ptr1 + 0)
+    tmp312 = tl.broadcast_to(tmp311, [XBLOCK])
+    tmp313 = tmp310 * tmp312
+    tmp314 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp315 = tl.load(in_ptr1 + 0)
+    tmp316 = tl.broadcast_to(tmp315, [XBLOCK])
+    tmp317 = tmp314 * tmp316
+    tmp318 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp319 = tl.load(in_ptr1 + 0)
+    tmp320 = tl.broadcast_to(tmp319, [XBLOCK])
+    tmp321 = tmp318 * tmp320
+    tmp322 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp323 = tl.load(in_ptr1 + 0)
+    tmp324 = tl.broadcast_to(tmp323, [XBLOCK])
+    tmp325 = tmp322 * tmp324
+    tmp326 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp327 = tl.load(in_ptr1 + 0)
+    tmp328 = tl.broadcast_to(tmp327, [XBLOCK])
+    tmp329 = tmp326 * tmp328
+    tmp330 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp331 = tl.load(in_ptr1 + 0)
+    tmp332 = tl.broadcast_to(tmp331, [XBLOCK])
+    tmp333 = tmp330 * tmp332
+    tmp334 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp335 = tl.load(in_ptr1 + 0)
+    tmp336 = tl.broadcast_to(tmp335, [XBLOCK])
+    tmp337 = tmp334 * tmp336
+    tmp338 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp339 = tl.load(in_ptr1 + 0)
+    tmp340 = tl.broadcast_to(tmp339, [XBLOCK])
+    tmp341 = tmp338 * tmp340
+    tmp342 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp343 = tl.load(in_ptr1 + 0)
+    tmp344 = tl.broadcast_to(tmp343, [XBLOCK])
+    tmp345 = tmp342 * tmp344
+    tmp346 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp347 = tl.load(in_ptr1 + 0)
+    tmp348 = tl.broadcast_to(tmp347, [XBLOCK])
+    tmp349 = tmp346 * tmp348
+    tmp350 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp351 = tl.load(in_ptr1 + 0)
+    tmp352 = tl.broadcast_to(tmp351, [XBLOCK])
+    tmp353 = tmp350 * tmp352
+    tmp354 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp355 = tl.load(in_ptr1 + 0)
+    tmp356 = tl.broadcast_to(tmp355, [XBLOCK])
+    tmp357 = tmp354 * tmp356
+    tmp358 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp359 = tl.load(in_ptr1 + 0)
+    tmp360 = tl.broadcast_to(tmp359, [XBLOCK])

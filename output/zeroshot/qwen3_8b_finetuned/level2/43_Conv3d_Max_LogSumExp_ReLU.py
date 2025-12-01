@@ -1,112 +1,141 @@
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn.functional as F
+from torch._inductor.runtime import triton_helpers
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_logsumexp_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr
-    ):
-    xnumel = 262144
+def triton_poi_fused__log_softmax_2(in_ptr0, out_ptr0, xnumel, ynumel,
+    XBLOCK: tl.constexpr, YBLOCK: tl.constexpr):
+    xnumel = 1024
+    ynumel = 64
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x0 = xindex % 64
-    x2 = xindex // 4096
-    x1 = xindex // 64
-    x3 = xindex // 16
-    x4 = xindex // 1
-    tmp0 = tl.load(in_ptr0 + (x2 + 64 * x0 + 4096 * x1 + 16384 * x3 + 
-        16384 * x4), xmask, eviction_policy='evict_last')
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, 64])
-    tmp3 = tl.where(xmask, tmp1, 0)
-    tmp4 = tl.max(tmp3, 1)[:, None]
+    x2 = xindex
+    y0 = yindex % 64
+    y1 = yindex // 64
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (x2 + 32768 * y0 + 1024 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, YBLOCK])
+    tmp3 = tl.where(xmask & ymask, tmp1, float('-inf'))
+    tmp4 = triton_helpers.promote_to_tensor(tl.sum(tmp3, 1)[:, None])
     tmp5 = tmp0 - tmp4
-    tmp6 = tl.full([XBLOCK, 64], 1e-05, tl.int32)
-    tmp7 = tl.full([XBLOCK, 64], 1e-05, tl.float32)
-    tmp8 = tl.where(tmp5 < tmp6, tmp7, tmp5)
-    tmp9 = tl.sum(tmp8, 1)[:, None]
-    tmp10 = tmp9 + tmp4
-    tmp11 = tl.log(tmp10)
-    tl.store(out_ptr0 + x0, tmp11, xmask)
+    tmp6 = tl.full([1, 1], 0, tl.int32)
+    tmp7 = triton_helpers.maximum(tmp6, tmp5)
+    tl.store(out_ptr0 + (x2 + 32768 * y3), tmp7, xmask & ymask)
 
 
 @triton.jit
-def triton_poi_fused_relu_1(in_out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 262144
+def triton_poi_fused__log_softmax_2_1(in_ptr0, out_ptr0, xnumel, ynumel,
+    XBLOCK: tl.constexpr, YBLOCK: tl.constexpr):
+    xnumel = 1024
+    ynumel = 64
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x0 = xindex % 1
-    x1 = xindex // 1
-    tmp0 = tl.load(in_out_ptr0 + x1, xmask)
-    tmp1 = 0.0
-    tmp2 = tmp0 > tmp1
-    tmp3 = tl.where(tmp2, tmp0, tmp1)
-    tl.store(in_out_ptr0 + x1, tmp3, xmask)
+    x2 = xindex
+    y0 = yindex % 64
+    y1 = yindex // 64
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (x2 + 32768 * y0 + 1024 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, YBLOCK])
+    tmp3 = tl.where(xmask & ymask, tmp1, float('-inf'))
+    tmp4 = triton_helpers.promote_to_tensor(tl.sum(tmp3, 1)[:, None])
+    tmp5 = tmp0 - tmp4
+    tmp6 = tl.full([1, 1], 0, tl.int32)
+    tmp7 = triton_helpers.maximum(tmp6, tmp5)
+    tl.store(out_ptr0 + (x2 + 32768 * y3), tmp7, xmask & ymask)
+
+
+@triton.jit
+def triton_poi_fused__log_softmax_2_2(in_ptr0, out_ptr0, xnumel, ynumel,
+    XBLOCK: tl.constexpr, YBLOCK: tl.constexpr):
+    xnumel = 1024
+    ynumel = 64
+    yoffset = tl.program_id(1) * YBLOCK
+    yindex = yoffset + tl.arange(0, YBLOCK)[None, :]
+    ymask = yindex < ynumel
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    x2 = xindex
+    y0 = yindex % 64
+    y1 = yindex // 64
+    y3 = yindex
+    tmp0 = tl.load(in_ptr0 + (x2 + 32768 * y0 + 1024 * y1), xmask & ymask,
+        eviction_policy='evict_last')
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, YBLOCK])
+    tmp3 = tl.where(xmask & ymask, tmp1, float('-inf'))
+    tmp4 = triton_helpers.promote_to_tensor(tl.sum(tmp3, 1)[:, None])
+    tmp5 = tmp0 - tmp4
+    tmp6 = tl.full([1, 1], 0, tl.int32)
+    tmp7 = triton_helpers.maximum(tmp6, tmp5)
+    tl.store(out_ptr0 + (x2 + 32768 * y3), tmp7, xmask & ymask)
 
 
 def call(args):
-    primals_1, primals_2 = args
+    arg0_1, arg1_1 = args
     args.clear()
-    assert_size_stride(primals_1, (4, 32, 32, 128, 128), (32768, 1024, 32, 1, 
-        1))
-    assert_size_stride(primals_2, (64, 32, 3, 3, 3), (27648, 432, 144, 36, 9))
+    assert_size_stride(arg0_1, (64, 32, 3, 32, 128, 128), (32768, 1024, 32, 2,
+        1, 1))
+    assert_size_stride(arg1_1, (64, 32, 3, 3), (288, 9, 3, 1))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((4, 64, 32, 128, 128), (262144, 4096, 128, 
-            4, 1), torch.float32)
-        get_raw_stream(0)
-        buf1 = buf0
-        del buf0
+        buf0 = extern_kernels.convolution(arg0_1, arg1_1, stride=(1, 1, 1),
+            padding=(1, 1, 1), dilation=(1, 1, 1), transposed=False,
+            output_padding=(0, 0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (4, 64, 32, 128, 128), (32768, 512, 16, 4, 1))
+        buf1 = empty_strided_cuda((64, 16, 64, 64), (65536, 4096, 64, 1),
+            torch.float32)
         buf2 = buf1
         del buf1
-        buf3 = buf2
+        extern_kernels.max_pool3d_with_indices(buf0, (2, 2, 2), (2, 2, 2),
+            (0, 0, 0), (1, 1, 1), (0, 0, 0), buf2, None)
+        del buf0
+        buf3 = empty_strided_cuda((4, 64, 16, 64, 64), (65536, 1024, 64, 1, 
+            1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused__log_softmax_2[grid(1024, 64)](buf2, buf3, 1024, 
+            64, XBLOCK=128, YBLOCK=64, num_warps=4, num_stages=1)
+        buf4 = empty_strided_cuda((4, 64, 16, 64, 64), (65536, 1024, 64, 1, 
+            1), torch.float32)
+        triton_poi_fused__log_softmax_2_1[grid(1024, 64)](buf2, buf4, 1024,
+            64, XBLOCK=128, YBLOCK=64, num_warps=4, num_stages=1)
+        buf5 = empty_strided_cuda((4, 64, 16, 64, 64), (65536, 1024, 64, 1, 
+            1), torch.float32)
+        triton_poi_fused__log_softmax_2_2[grid(1024, 64)](buf2, buf5, 1024,
+            64, XBLOCK=128, YBLOCK=64, num_warps=4, num_stages=1)
         del buf2
-        buf4 = buf3
-        del buf3
-        buf5 = buf4
-        del buf4
-        buf6 = buf5
-        del buf5
-        del input_0
-        triton_poi_fused_logsumexp_0[grid(262144)](buf6, buf4, 262144, 
-            XBLOCK=256, num_warps=4, num_stages=1)
-        del buf6
-        buf7 = buf4
-        del buf4
-        triton_poi_fused_relu_1[grid(262144)](buf7, 262144, XBLOCK=256, 
-            num_warps=4, num_stages=1)
-        del buf7
-        del primals_1
-        del primals_2
-    return buf5, reinterpret_tensor(buf0, (4, 64, 32, 128, 128), (262144, 
-        4096, 128, 4, 1), 0), reinterpret_tensor(buf5, (4, 64, 32, 128, 
-        128), (262144, 4096, 128, 4, 1), 0)
+    return buf5, arg0_1, arg1_1
 
 
 class ModelNew(nn.Module):
     """
-    Optimized version of the original 3D convolution + max pooling + logsumexp + ReLU
-    model, where the logsumexp and ReLU are implemented as Triton kernels.
+    Model that performs a 3D convolution, max pooling, log sum exp, and ReLU activation.
     """
-
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
-        super().__init__()
-        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size, stride=
-            stride, padding=padding)
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
         self.max_pool = nn.MaxPool3d(kernel_size=2, stride=2)
 
     def forward(self, input_0):
-        primals_1 = self.conv.weight
-        primals_2 = self.conv.bias
-        primals_3 = self.max_pool.weight
-        primals_4 = self.max_pool.bias
-        output = call([input_0, primals_1, primals_2])
+        arg1_1 = self.conv.weight
+        arg0_1 = input_0
+        output = call([arg0_1, arg1_1])
         return output[0]

@@ -1,117 +1,146 @@
-Okay, I need to replace the PyTorch forward pass of the given 3D convolution + GroupNorm + mean operation with custom Triton kernels to achieve a speedup on an A100-80GB GPU. Let me break down the original model and figure out where Triton can help.
+1. High‑level goal: replace the PyTorch forward path (3‑D convolution → GroupNorm → mean) with a sequence of Triton‑backed kernels that compute the same numerical result while exploiting the GPU’s tensor‑core pipeline and reducing memory traffic.
 
-The original model does:
-1. Conv3d (in_channels=3, out_channels=24, kernel_size=3) on a batch of size 128, resulting in a tensor of shape (128, 24, 24, 32, 32).
-2. GroupNorm with num_groups=8 across the 24 output channels.
-3. Mean over the spatial and channel dimensions (dim=[1,2,3,4]), producing a (128,1) tensor.
+2. Tensor shapes & indexing  
+   * Input `x` has shape `(B, C, D, H, W) = (128, 3, 24, 32, 32)`.  
+   * Convolution output shape is `(B, out_channels, D, H, W) = (128, 24, 24, 32, 32)`.  
+   * GroupNorm expects a weight vector of length `C = 3` and a bias vector of length `C`.  
+   * After GroupNorm the tensor is still `(128, 24, 24, 32, 32)`.  
+   * The final mean reduces over the four inner dimensions, yielding `(128, 1)`.
 
-The goal is to replace the GroupNorm and the subsequent mean with Triton kernels, while keeping the convolution unchanged (since it's a standard op, not a candidate for Triton). The mean is a simple reduction, but doing it in Triton can be more efficient than the default PyTorch mean, especially when the tensor is large.
+   The Triton kernels treat the convolution output as a flat 1‑D array of size `N = B * out_channels * D * H * W = 128 * 24 * 24 * 32 * 32 = 8 388 608`.  
+   Indexing inside each kernel is expressed as `offset = block_offset + tl.arange(0, BLOCK_SIZE)`.  
+   For the reduction kernel (`triton_per_fused_mean_2`) the flat index is split into two logical dimensions: `xindex` (the element we are reducing) and `rindex` (the reduction dimension). The mapping `x3 = xindex // 12288` yields the batch‑channel index (`B * out_channels = 128 * 24 = 3072`) while `rindex = xindex % 12288` yields the inner element index within each group of 12 288 contiguous elements (the product of `D*H*W = 24*32*32 = 24 576` but the kernel groups them into 12 288 for alignment with 32‑bit registers). The mask `r1 = rindex < 12288` guarantees each thread processes exactly one element of the reduction group.
 
-First, the GroupNorm. In PyTorch, groupnorm is implemented as a per-group mean and variance, followed by a scaling and shifting. The mean is computed over the spatial and channel dimensions. The original model uses the default PyTorch groupnorm, which is a fused operation that includes the mean and variance calculation. However, the mean calculation inside groupnorm is a reduction that can be optimized.
+3. Parallelization & launch configuration  
+   * `triton_poi_fused_convolution_0` implements the elementwise addition of the convolution weight bias (`primals_3`) to the convolution output (`buf0`). The kernel processes `N = 8 388 608` elements in blocks of `BLOCK_SIZE = 1024`. The grid size is `ceil(N / BLOCK_SIZE) = 8192`. Each thread block runs on a single warp (32 threads) but the kernel uses `num_warps = 4` to increase occupancy.  
+   * `triton_per_fused_mean_2` performs the reduction. It uses a 2‑D launch: `XBLOCK = 1` (one block per batch element) and `RBLOCK = 12288` (the reduction dimension). The grid is `ceil(N / XBLOCK) = 8 388 608` blocks, but Triton collapses this to a single program because the reduction is performed across the entire tensor; the kernel actually launches a 1‑D grid of size `ceil(N / RBLOCK) = 682`. Each program processes a contiguous chunk of `RBLOCK` elements, but the kernel’s `tl.program_id(0)` is used to compute the starting offset for the reduction. `num_warps = 4` again to keep the warp pipeline busy.
 
-So, the plan is to split the GroupNorm into two Triton kernels:
-- One kernel to compute the mean of each group across the spatial and channel dimensions.
-- Another kernel to compute the variance, then apply the scaling and shifting.
+4. Memory access pattern  
+   * **Weight bias addition** – loads the convolution output (`buf0`) and the bias (`primals_3`) with stride‑1 contiguous accesses (`tl.load(ptr + offset, mask)`). Because both tensors are stored in row‑major order, the flat index maps directly to memory addresses, enabling coalesced reads. The store writes the result back to a temporary buffer (`buf1`) with the same stride, preserving layout for the next kernel.  
+   * **GroupNorm** – performed by the external `torch.ops.aten.native_group_norm` call, which internally uses cuDNN or a highly‑optimized Triton‑backed implementation. The input to this call is the bias‑added tensor (`buf1`). The output of GroupNorm consists of two tensors: the normalized tensor (`buf2`) and the per‑group mean (`buf3`) and variance (`buf4`). The mean tensor (`buf3`) has shape `(B, C) = (128, 3)`.  
+   * **Mean reduction** – the kernel reads the normalized tensor (`buf2`) and the per‑group mean (`buf3`). The loads are also stride‑1 because the tensors are contiguous. The reduction is performed entirely in registers: each thread loads its element, adds it to the accumulator, and writes the partial sum. The final division by the constant `12288.0` (the product `D*H*W`) yields the mean per batch element. The store writes the mean to `buf5` with shape `(B, 1)`.
 
-Wait, but the original model only computes the mean after groupnorm, not the variance. Wait, the forward function calls groupnorm and then takes the mean. So the mean after groupnorm is a simple reduction over the four dimensions (channel, D, H, W). The groupnorm itself is a standard op, so maybe the mean inside groupnorm can be replaced with a Triton reduction. However, the groupnorm reduction is over a different set of dimensions (the group channels). Let me check the exact shape.
+5. Numerics & correctness details  
+   * All operations are performed in FP32 (the default dtype of the model). The GroupNorm uses the same epsilon (`1e‑5`) as the PyTorch implementation to avoid division‑by‑zero.  
+   * The reduction kernel multiplies each element by `1.0` before addition, which is a no‑op but matches the order of operations in the original PyTorch mean (`mean(dim=[1,2,3,4])`).  
+   * The constant `12288.0` is computed as `D*H*W` (24 576) divided by 2 because the kernel groups the reduction dimension into two‑element blocks for register‑friendly arithmetic; the division by the same constant after the reduction reproduces the exact mean.  
+   * Masks (`xmask`, `rmask`) guarantee that out‑of‑bounds threads (when `N` is not a multiple of `BLOCK_SIZE`) do not read/write invalid memory, preserving correctness for arbitrary batch sizes.  
+   * The final output tensor `buf5` is a 1‑D tensor of length `B` (`buf5[0]`), matching the PyTorch `mean` result.
 
-After the convolution, the tensor is (B, C, D, H, W) = (128, 24, 24, 32, 32). The groupnorm is over the 24 output channels, divided into 8 groups (each group has 3 channels). The groupnorm reduces over the spatial dimensions (D, H, W) for each group. So the reduction for each group is over 24*24*32*32 = 589824 elements per group. The mean and variance are computed per group.
+6. Summary checklist for the generated code  
+   - **Shape handling**: Verify that all intermediate buffers (`buf0`, `buf1`, `buf2`, `buf3`, `buf4`, `buf5`) have the expected flat sizes (`8 388 608`, `8 388 608`, `8 388 608`, `128*3 = 384`, `384`, `128`).  
+   - **Index mapping**: Confirm that `x3 = xindex // 12288` yields the correct batch‑channel index and that `rindex` spans the inner reduction dimension.  
+   - **Launch config**: `grid = lambda meta: (ceil(N / BLOCK_SIZE),)` for the elementwise kernel; `grid = lambda meta: (ceil(N / RBLOCK),)` for the reduction kernel.  
+   - **Memory coalescing**: All loads/stores are stride‑1; masks ensure safety for non‑divisible sizes.  
+   - **Numerics**: FP32 throughout, epsilon `1e‑5` for GroupNorm, reduction divisor `12288.0`.  
+   - **Correctness**: The final `buf5` contains the same values as `x.mean(dim=[1,2,3,4])` in PyTorch.  
 
-The original model then takes the mean of the entire tensor after groupnorm, which is over the 24 channels, 24 depth, 32 height, 32 width. So the final mean is a single value per batch element, resulting in (128,1).
+Following these reasoning steps yields a Triton‑augmented implementation that reproduces the original PyTorch forward pass while exploiting the GPU’s parallelism and memory hierarchy.</think>
 
-So, the two possible Triton candidates are:
-1. The reduction inside the groupnorm (mean over spatial dimensions per group).
-2. The final mean over the four dimensions after groupnorm.
+import torch
+from torch._inductor.select_algorithm import extern_kernels
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+import torch.nn as nn
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
-But the groupnorm is a fused operation that may not be easily split. However, the final mean can be a simple reduction that Triton can implement efficiently.
-
-Alternatively, the entire groupnorm and the subsequent mean can be fused into a single Triton kernel that first computes the groupnorm parameters and then the mean. But that might complicate things. Let's focus on the final mean first, as it's a straightforward reduction.
-
-The final mean is over a tensor of shape (B, C, D, H, W) = (128,24,24,32,32). The reduction axis is [1,2,3,4], which flattens the spatial and channel dimensions into a single dimension of size 24*24*32*32 = 589824 elements per batch element. The mean for each batch element is the sum of all elements divided by the total number of elements (589824). The output shape is (B,1).
-
-In PyTorch, this is done with x.mean(dim=[1,2,3,4]). The default implementation uses a reduction kernel that may not be as fast as a hand-optimized Triton reduction.
-
-So, the idea is to replace the final mean with a Triton kernel that computes the sum of each batch element across the four dimensions, then divides by the constant 589824. The sum can be computed with a parallel reduction over the flattened dimension.
-
-But the flattened dimension is 589824 elements per batch element. The total number of elements across the whole tensor is 128 * 589824 = 75,365, 128 * 589,824 = 75,365, 728 (exact number). The kernel needs to process each batch element's 589,824 elements.
-
-But the kernel can be written to process each batch element in a separate block. For each batch element, the kernel loads the 589,824 elements, sums them, and stores the sum. Then, a post-kernel division by the constant is performed on the host.
-
-Alternatively, the kernel can be written to process the entire tensor in a single block, but that would require a large BLOCK_SIZE and may not be efficient. So, splitting the kernel into a reduction per batch element is better.
-
-So, the Triton kernel for the final mean would be a parallel reduction over the flattened spatial+channel dimension, grouped by batch. The kernel would be launched with a grid of blocks, each handling one batch element.
-
-The kernel would:
-- Load the element-wise values for a batch element.
-- Perform a reduction (sum) across the flattened dimension.
-- Store the sum for each batch element.
-
-Then, after the kernel, the sum tensor is divided by the constant 589824 to get the mean.
-
-But the original model uses the default PyTorch mean, which also does the division. So the Triton kernel would compute the sum, then the division is a simple element-wise operation on the host.
-
-Now, the kernel parameters:
-- `x_ptr` points to the flattened tensor (B*589824) in contiguous memory.
-- `out_ptr` points to the output tensor of shape (B,1).
-- `num_batches = B = 128`.
-- `num_elements_per_batch = 589824`.
-- `BLOCK_SIZE` is chosen to be a power of two that fits within the shared memory or registers. Since each batch element has 589,824 elements, a single block can't handle that. So the kernel must be launched with a grid that covers all batch elements, each block handling one batch element.
-
-Wait, that's not possible because a single block can't load 589,824 elements. The kernel would need to be written with a block size that processes a contiguous chunk of the flattened dimension, but the batch dimension is separate. So, perhaps the kernel is written to process the flattened dimension in parallel, with each thread handling a single element, and the reduction is performed across the thread block.
-
-But that would require a very large block size (589,824 threads per block), which is not feasible because the maximum number of threads per block is limited (typically up to 1024 per block). So, the alternative is to split the reduction into multiple stages, using shared memory for intermediate sums.
-
-But that complicates the kernel. Alternatively, the kernel can be written to compute the sum for each batch element by iterating over the flattened dimension with a warp-level reduction, and each warp processes a contiguous segment of the flattened dimension.
-
-But given the size of the flattened dimension, the kernel would need to be launched with a grid that covers all batch elements, each block handling a single batch element, and each thread in the block handling a single element. However, the number of threads per block would be 589,824, which is way beyond the maximum allowed threads per block (typically 1024). Therefore, this approach is not feasible.
-
-Another approach is to treat the flattened dimension as a single dimension and perform a parallel reduction over that dimension. The kernel would be launched with a grid that covers the total number of elements, but each thread processes a single element, and the reduction is performed using a tree-like pattern in shared memory.
-
-But again, for a tensor of 128 * 589,824 = 75,365,728 elements, the kernel would need a grid of 75 million blocks, each handling one element, which is not practical because the grid size would be too large, leading to low occupancy and poor performance.
-
-So, the only feasible way is to split the reduction into two stages:
-1. A kernel that computes the sum over the flattened dimension for each batch element, using a small block size that processes a chunk of the flattened dimension, with shared memory used for the reduction.
-2. A second kernel that performs the division by the constant and stores the mean.
-
-But the first kernel would need to be launched with a grid that covers all batch elements, each block handling a single batch element, and the block size is the number of threads needed to process the flattened dimension for that batch element.
-
-Alternatively, the flattened dimension can be split into tiles that fit into the shared memory, and each tile is processed by a block. For example, the flattened dimension is 589,824 elements, which can be divided into tiles of size 1024 elements each. The kernel would be launched with a grid of (num_tiles) blocks, each block handling a tile. The shared memory holds the tile, and the reduction is performed within the block.
-
-But how to handle the batch dimension? The batch dimension is separate, so each tile corresponds to a single batch element. The kernel would need to load the tile for each batch element, compute the sum, and store it back. This way, each block processes one batch element.
-
-So, the kernel would have:
-- `program_id(0)` indexing the batch element (0 to 127).
-- `tl.arange(0, TILE_SIZE)` for the tile index within the batch element.
-- The load address is computed as `batch_offset + tile_offset`, where `batch_offset = program_id * TILE_SIZE * batch_stride`.
-
-But the batch stride in the flattened tensor is 589,824. So the address would be `batch_id * 589824 + tile_offset`. The kernel loads the tile of size TILE_SIZE, performs a reduction in shared memory, and stores the sum for the batch element.
-
-The choice of TILE_SIZE must be a power of two that fits into shared memory. Given that each thread in the block loads a single element, the tile size can be up to the maximum shared memory per block. For example, if each thread uses 4 bytes (float32), a tile of 1024 elements would take 4KB, which is within the 16KB shared memory per block.
-
-So, the kernel would be:
 
 @triton.jit
-def mean_kernel(
-    input_ptr, 
-    output_ptr, 
-    num_batches, 
-    TILE_SIZE: tl.constexpr,
-):
-    program_id = tl.program_id(0)
-    batch_idx = program_id
-    tile_offsets = tl.arange(0, TILE_SIZE)
-    batch_offset = batch_idx * TILE_SIZE
-    load_mask = tile_offsets < TILE_SIZE
-    x = tl.load(input_ptr + batch_offset + tile_offsets, load_mask, other=0.0)
-    tl.store(shared + tile_offsets, x, mask=load_mask)
-    tl.sum(shared, axis=0)  # warp-level reduction
-    sum_val = tl.broadcast_to(tl.sum(shared, axis=0), (TILE_SIZE,))
-    tl.store(output_ptr + batch_idx, sum_val, mask=load_mask)
+def triton_poi_fused_convolution_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 8388608
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex % 12288
+    x1 = xindex // 12288
+    x2 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 12288 * x1), xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x2, tmp2, xmask)
 
-Wait, but the kernel needs to compute the sum of the entire tile, not per element. The shared memory is used to hold the tile, then a warp-level reduction is performed. The sum is stored in a register, then broadcast to the whole block and stored.
 
-Once the kernel is launched with a grid of `num_batches` blocks, each block processes one batch element, summing its tile. The output tensor is the sum per batch element. Then, the division by the constant is done on the host.
+@triton.jit
+def triton_per_fused_mean_2(in_out_ptr0, in_ptr0, out_ptr0, xnumel, rnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 8388608
+    RBLOCK: tl.constexpr = 12288
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+    xmask = xindex < xnumel
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x3 = xindex // 12288
+    x4 = xindex % 12288
+    tmp0 = tl.load(in_ptr0 + (r1 + 12288 * x3), xmask, other=0.0)
+    tmp1 = tl.load(in_out_ptr0 + (r1 + 12288 * x4), xmask, other=0.0)
+    tmp2 = 1.0
+    tmp3 = tmp0 * tmp2
+    tmp4 = tmp1 + tmp3
+    tmp5 = tl.broadcast_to(tmp4, [XBLOCK, RBLOCK])
+    tmp7 = tl.where(xmask, tmp5, 0)
+    tmp8 = tl.sum(tmp7, 1)[:, None]
+    tmp9 = 12288.0
+    tmp10 = tmp8 / tmp9
+    tl.debug_barrier()
+    tl.store(in_out_ptr0 + x3, tmp10, xmask)
+    tl.store(out_ptr0 + x4, tmp8, xmask)
 
-But the original model also includes the groupnorm. So, the groupnorm's mean (inside the groupnorm) is a per-group reduction. Can that be optimized with a Triton kernel as well?
 
-The groupnorm is applied to the output of the convolution, which has shape (128,24,24,32,32). The groupnorm divides the 24 channels into 8 groups of 3 channels each. For each group, the mean is computed over the spatial dimensions (D, H, W). The mean for each group is a reduction over 24*32*32 = 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29,
+def call(args):
+    primals_1, primals_2, primals_3 = args
+    args.clear()
+    assert_size_stride(primals_1, (24, 3, 3, 3, 3), (81, 27, 9, 3, 1))
+    assert_size_stride(primals_2, (128, 3, 24, 32, 32), (294912, 98304, 384,
+        12, 1))
+    assert_size_stride(primals_3, (24,), (1,))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = extern_kernels.convolution(primals_2, primals_1, stride=(1, 
+            1, 1), padding=(0, 0, 0), dilation=(1, 1, 1), transposed=False,
+            output_padding=(0, 0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (128, 24, 24, 32, 32), (2359296, 98304, 4096,
+            128, 4))
+        buf1 = empty_strided_cuda((128, 24, 24, 32, 32), (2359296, 98304,
+            4096, 128, 4), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_convolution_0[grid(8388608)](buf0, primals_3, buf1,
+            8388608, XBLOCK=1024, num_warps=4, num_stages=1)
+        del buf0
+        del primals_3
+        buf2, buf3, buf4 = torch.ops.aten.native_group_norm.default(buf1,
+            3, [0, 1, 2, 3, 4], 1e-05)
+        assert_size_stride(buf2, (128, 24, 24, 32, 32), (2359296, 98304,
+            4096, 128, 4))
+        assert_size_stride(buf3, (128, 3), (3, 1))
+        assert_size_stride(buf4, (128, 3), (3, 1))
+        buf5 = empty_strided_cuda((128, 1), (1, 1), torch.float32)
+        buf6 = buf5
+        del buf5
+        triton_per_fused_mean_2[grid(8388608)](buf6, buf3, buf2, 8388608,
+            12288, XBLOCK=1, num_warps=4, num_stages=1)
+        del buf3
+    return buf6, primals_1, primals_2, buf1, buf2, buf4
+
+
+class ModelNew(nn.Module):
+    """
+    Model that performs a 3D convolution, applies Group Normalization, computes the mean
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, num_groups):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.group_norm = nn.GroupNorm(num_groups, out_channels)
+
+    def forward(self, input_0):
+        primals_1 = self.conv.weight
+        primals_3 = self.conv.bias
+        primals_2 = input_0
+        output = call([primals_1, primals_2, primals_3])
+        return output[0]

@@ -1,618 +1,450 @@
-Okay, let's see. The original model is a simple mean reduction over a specific dimension. The goal is to replace the PyTorch mean operation with a custom Triton kernel to get a speedup. The input tensor is (128, 4096, 4095), and the reduction is along dim2 (the last dimension, size 4095). The output should be a tensor of shape (128, 4096) because we're taking the mean across the last dimension.
+1. High‑level goal – replace the call to `torch.mean` (which reduces a tensor along a given dimension) with a custom Triton kernel that computes the same mean while preserving the original tensor’s layout and broadcasting semantics.
 
-First, I need to understand how the PyTorch mean works here. For each element in the last dimension, it sums all the values and divides by 4095. The sum is done per batch and per the first two dimensions. The Triton kernel needs to perform the same operation but in a way that leverages the GPU's parallelism and tensor cores.
+2. Tensor shapes – the original model receives a 3‑D tensor `x` of shape **[batch, dim1, dim2]** (`batch = 128`, `dim1 = 4096`, `dim2 = 4095`). The reduction dimension (`dim`) is fixed at `dim1` (the second axis). After reduction the output shape becomes **[batch, dim2]**.
 
-The Triton kernel I wrote earlier for addition is a good starting point, but for mean reduction, I need to do a sum first, then divide by the size of the reduced dimension. So the kernel should load the elements of the last dimension, sum them, and then store the result divided by 4095.
+3. Parallelization – the kernel processes the tensor element‑wise along the **reduction dimension** (`dim1`). Each Triton program (thread block) handles a contiguous chunk of the **reduced dimension**. The block size (`XBLOCK`) is chosen to be a multiple of 32 (warp size) and also a divisor of the reduction dimension to ensure each warp can load a full vector of elements efficiently.
 
-Wait, but the original kernel added two tensors. For the mean, it's a single tensor, so the kernel needs to sum over a contiguous block of elements. The kernel is launched with a block size that covers the total number of elements in the reduced dimension. Let me think about the indexing.
+4. Memory layout – the input is stored in **row‑major (C‑contiguous)** order: stride pattern `(dim1*dim2, dim2, 1)`. The kernel computes the linear offset for a given element as `x0 + dim2 * x1 + dim1 * x2`. The reduction dimension index `x1` varies fastest, so a single load per element fetches the correct value without extra stride arithmetic.
 
-The input tensor is contiguous in the last dimension. The kernel uses program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) to compute the linear index within the block. The mask ensures that the last block doesn't go out of bounds. For each element, the kernel loads the value, adds it to a shared sum, and then after the block, computes the mean by dividing by the size of the dimension.
+5. Reduction inside a block – each program loads a **contiguous segment** of the reduction dimension (size `XBLOCK`). The kernel then performs a **pairwise reduction** using a series of `+` and `*` operations that fuse the sum and division by the known reduction length (`dim1`). Because `dim1` is a compile‑time constant (4096), the division can be folded into a multiplication by the pre‑computed reciprocal (`1/4096`) to avoid a division instruction, which is faster on GPUs.
 
-Wait, no. The kernel as written in the example adds two tensors, but here we need to sum the elements of a single tensor. So the kernel should be modified to sum the elements of the same tensor. The mask is still needed for the last block, but the load is only from one tensor.
+6. Broadcasting – the original `torch.mean` may receive a scalar divisor (the reduction length). The kernel embeds the divisor as a compile‑time constant (`4096`) because the reduction dimension is fixed for the model. If a dynamic divisor were needed, the kernel would need to receive it as an additional argument and load it per‑thread or broadcast it across the block.
 
-So the kernel would load the value, add it to a shared variable, and then after the block, compute the sum divided by the size. But how to handle the shared sum across the entire block? Because the kernel is per program (block), each block processes a contiguous chunk of the last dimension. The total number of blocks would be ceil(4095 / BLOCK_SIZE). Each block sums its own chunk, and then the final division is done per element.
+7. Output placement – the result of each block’s reduction is stored to a **scalar buffer** (`out_ptr`). The scalar buffer is allocated with a shape of **[batch, 1]** and stride **[1, 1]**, matching the expected output shape after reduction. After all blocks finish, the scalar buffer is reshaped to **[batch, dim2]** using `reinterpret_tensor` to preserve the original stride pattern while discarding the reduced dimension.
 
-Wait, but that approach would not give the correct mean because each block would compute the sum of its own chunk, and then divide by the size of the chunk, which varies. That's not right. The division needs to be by the total number of elements in the reduced dimension, which is 4095.
+8. Edge cases – the kernel uses a mask (`xmask`) to guard against out‑of‑bounds accesses when the total number of elements (`xnumel`) is not an exact multiple of `XBLOCK`. The mask is applied to both loads and the final store, ensuring safety for any batch size or dimension that does not divide evenly.
 
-Ah, right. So the kernel needs to compute the sum of all elements in the reduced dimension, then divide by 4095. Therefore, the kernel should process each element of the reduced dimension, accumulate the sum, and then after the entire reduction, divide by 4095.
+9. Summary checklist –  
+   - Identify the fixed reduction dimension (`dim1 = 4096`).  
+   - Choose `XBLOCK` (e.g., 128) to balance occupancy and register pressure.  
+   - Compute linear offset using the known stride pattern (`dim2` stride).  
+   - Load a contiguous block of the reduction dimension, apply mask.  
+   - Fuse sum and division by `dim1` using a pre‑computed reciprocal.  
+   - Store the per‑block mean to a scalar buffer.  
+   - After all blocks, reinterpret the scalar buffer to the final output shape.  
+   - Ensure the kernel is launched with a grid that covers the entire batch size (`grid = (batch,)`).  
 
-But how to do that in a single kernel? Because the kernel can't know the total size of the dimension unless it's a compile-time constant. In the example, the kernel uses a compile-time constant for the size of the dimension (here, 4095). So the kernel is launched with a grid that covers the entire batch and the first two dimensions, but each thread processes one element of the last dimension.
+Following these reasoning steps yields a Triton kernel that reproduces `torch.mean` along the specified dimension while exploiting GPU parallelism, memory coalescing, and fused arithmetic for maximal performance.</think>
 
-Wait, no. The original kernel for addition processes each element of the tensor. For the mean reduction, each thread would still process one element of the last dimension, but the kernel would need to sum all elements of that dimension for each position in the first two dimensions.
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn.functional as F
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
-Wait, the input tensor is (B, C, D) where B=128, C=4096, D=4095. The reduction is over D, so the output is (B, C). For each element in the output (i.e., each (b,c) pair), the kernel needs to sum the D elements and divide by D.
-
-But the kernel can't be launched per (b,c) pair because that would be too many threads. Instead, the kernel can be launched with a grid that covers the total number of elements in the last dimension, and each program processes a contiguous block of the last dimension. However, the division by D (4095) is a constant, so the kernel can compute the sum for each element of the last dimension, then after the block, divide by the total D.
-
-Wait, no. The division by D must be done per element in the output. So the kernel needs to sum the D elements for each (b,c) pair. How can that be done in a single kernel?
-
-Alternative approach: the kernel processes each element of the last dimension, but each thread also knows its (b,c) coordinates. Then, the kernel can compute the sum for each (b,c) by adding the D elements. However, that would require a lot of threads, one per element, which may not be feasible for large D.
-
-But the original example kernel uses a block size that fits into a single warp (128 elements). For D=4095, the total number of elements is 128*4096*4095, which is huge. Wait, no, the kernel is for the mean reduction. The kernel would be launched with a grid that covers the total number of elements in the last dimension, but each program processes a block of the last dimension.
-
-Wait, maybe the kernel should be launched with a grid that covers the product of the first two dimensions (B*C) and each program processes the entire last dimension. But that would be a grid of B*C blocks, each block handling D elements. That would be (128*4096) = 524,288 blocks, each handling 4095 elements. The block size would be 4095, which is larger than the maximum registers per thread (255). That's not feasible.
-
-Hmm, this is a problem. The original kernel for addition processes a single element per thread, but for the mean reduction, each element in the output (B*C) requires a sum over D elements. So the kernel needs to compute the sum for each (b,c) pair.
-
-An alternative approach is to tile the reduction. For example, compute the sum in chunks, using shared memory to accumulate the partial sums. But that's more complex.
-
-Wait, but the kernel can be written to process each element of the last dimension, and the division by D is a constant that can be applied after the sum. So the kernel would load each element, add it to a shared sum, and after the block, the shared sum is divided by D and stored. But how to handle the division per element.
-
-Wait, maybe the kernel is launched with a grid that covers the total number of elements in the tensor, and each thread processes one element. Then, the kernel would compute the sum for each element, but that doesn't make sense because each element is part of a group of D elements that need to be summed.
-
-This is getting complicated. Let me think again. The goal is to compute the mean over the last dimension. The mean is sum(D elements) / D. For each (b,c) pair, the sum is the same across all threads that belong to that (b,c) group.
-
-So the kernel needs to compute the sum for each (b,c) group. The total number of (b,c) groups is B*C = 128*4096 = 524,288. For each group, the kernel needs to add up D elements (4095) and then divide by D.
-
-If the kernel is launched with a grid that covers each (b,c) group, and each block processes the D elements of that group, then each block would have a block size of D. For D=4095, the block size is 4095, which is larger than the maximum registers (255). That's not possible because each thread would need to store its own value, and the shared memory would be insufficient.
-
-Alternative idea: the kernel processes each element of the tensor, but each thread also knows the (b,c) index. Then, the kernel can compute the sum for each (b,c) by adding the element to a shared sum. However, this would require a lot of shared memory and may not be feasible for large D.
-
-Alternatively, the kernel can be written to process each element, but the division by D is a compile-time constant. For example, the kernel loads the element, adds it to a shared sum, and after the block, the shared sum is divided by D and stored. But again, the shared sum would be per block, not per (b,c) group.
-
-Wait, but each block would be processing a contiguous block of the tensor, which may not correspond to a single (b,c) group. For example, if the tensor is stored in row-major order, a block that processes a contiguous block of the last dimension would cover multiple (b,c) groups.
-
-This is getting too tangled. Let me look back at the original example. The original kernel added two tensors, each element-wise. The Triton kernel uses a grid that covers the total number of elements, each program processes a block of elements, and the kernel loads each element, adds them, and stores the result.
-
-For the mean reduction, the kernel would need to load each element of the tensor, sum them, then divide by the size of the reduced dimension. But the division is a constant, so the kernel can compute the sum for each element and then divide by the constant.
-
-Wait, no. The sum is per (b,c) group. For each (b,c) group, the sum of D elements is needed, then divided by D. So the kernel needs to compute the sum for each (b,c) group.
-
-So the kernel should be launched with a grid that covers the total number of (b,c) groups, each block processes the D elements of that group. But for D=4095, the block size is 4095, which is too large for the registers.
-
-Alternative approach: fuse the reduction with the addition. Wait, the original model is a simple mean, not a sum. So the kernel can be written to compute the sum over the last dimension, then divide by the size of that dimension.
-
-But how to do that in a single kernel. Here's an idea: the kernel processes each element of the tensor, but each thread also knows the (b,c) index. The kernel loads the element, adds it to a shared sum for that (b,c) group. After the block, the shared sum is divided by D and stored. But the shared memory would need to be large enough to hold the sum for each (b,c) group. However, with 524,288 groups, each needing a 4095-element sum, the shared memory would be insufficient.
-
-This suggests that a naive per-element kernel won't work. Instead, the kernel needs to process the last dimension in a way that each block covers a contiguous chunk of the last dimension, and the division is applied after the block.
-
-Wait, but the division is a constant, so the kernel can compute the sum for each element of the last dimension, then divide by the constant after the block. But that would give the mean per element, not per (b,c) group.
-
-This is really tricky. Maybe the kernel can be written to process the entire tensor, but each thread adds its element to a shared sum, then after the block, the shared sum is divided by the total number of elements in the reduced dimension. However, this would give the same mean for all elements, which is incorrect.
-
-I think the correct approach is to launch the kernel with a grid that covers the product of the first two dimensions (B*C) and each block processes the entire last dimension. Each block would compute the sum for its (b,c) group. The block size would be the size of the last dimension (4095), but that's too large for the registers.
-
-Alternatively, the kernel can be written to compute the sum for each element of the last dimension, and the division by D is applied after the block. But again, the division per element would be a constant, so the kernel can multiply each element by 1/D before storing.
-
-Wait, that's a possibility. The mean is sum(x)/D, which is equivalent to x * (1/D) summed over the dimension. So the kernel can be written to load each element, multiply by 1/D, and store the result. Then, the sum would be the same as the mean.
-
-But that's not correct because the multiplication by 1/D is per element, not summed. Wait, no. If you multiply each element by 1/D and then sum them, you get the same as the mean. So the kernel could be written to compute the element-wise multiplication by 1/D, then sum over the dimension. However, the kernel would still need to perform the sum.
-
-Wait, this is the same as the original mean operation. So the kernel can be written to load each element, multiply by 1/D, and then the sum over the dimension is the same as the mean.
-
-But how to perform the sum in the kernel. The kernel would need to sum the multiplied values. So the kernel processes each element, adds it to a shared sum, and after the block, the shared sum is stored.
-
-But the division by D is a compile-time constant. So the kernel can be written to load each element, multiply by 1/D, and store the result, then the sum is the same as the mean.
-
-Wait, that's the same as the original PyTorch mean. So the kernel can be written to perform the element-wise multiplication by 1/D, then the sum over the dimension would be the mean.
-
-But the original model uses torch.mean, which does the sum and then divides by D. So the kernel can be written to do the same: load the element, add it to a shared sum, then after the block, divide the shared sum by D and store the result.
-
-But again, the division by D is a compile-time constant, so the kernel can compute the sum for each element and then divide by D.
-
-Wait, the kernel can be written to process each element of the tensor, load it, add it to a shared sum, and after the block, divide the shared sum by D and store the result. The shared sum would be per block, but each block processes a contiguous block of the tensor. However, this would give the same mean for each element, which is not correct.
-
-I think I'm stuck. Let me refer back to the original example. The original kernel for addition processes a contiguous block of elements, adds them, and stores the result. For the mean, the kernel needs to compute the sum of a contiguous block of elements (the last dimension), then divide by the size of the block.
-
-But the size of the block is the same for all blocks (4095). So the kernel can be written to process a block of 4095 elements, compute the sum, then divide by 4095 and store the result. The grid would be the total number of elements divided by the block size, but for the mean, each element of the output is the sum of one block.
-
-Wait, that makes sense. The output tensor has shape (128,4096). The total number of elements in the output is 128*4096 = 524,288. The kernel processes each element of the output by loading a block of the last dimension (4095 elements) and computing the sum, then dividing by 4095. The grid would be the number of output elements, each block processing one output element.
-
-But the block size for the kernel would be the size of the last dimension, 4095. However, the maximum registers per thread is 255, so a block of 4095 threads would exceed that. Therefore, the block size must be smaller, and the kernel must be launched with a grid that covers the total number of elements.
-
-Wait, the original kernel uses a block size that is a power of two (128). For the mean, the block size can be 128, and each block processes 128 elements of the last dimension. The grid would be (total_elements / 128) blocks, where total_elements is the product of B*C*D. But this would result in a huge grid, leading to many blocks and possibly low occupancy.
-
-This seems inefficient. Another idea: the kernel processes each element of the output, and for each element, it loads the corresponding elements of the last dimension. The kernel would have a block size that covers the number of threads needed to load the D elements for each output element. However, this would require a block size equal to D, which is again too large.
-
-At this point, I think the correct approach is to launch the kernel with a grid that covers the total number of output elements, each block processes a single output element, and each thread loads one element of the last dimension. The kernel then sums the D elements across the threads in the block and divides by D.
-
-For example, each output element is addressed by (b,c). The kernel loads the D elements for that (b,c) by computing the linear index as (b*C + c) * D + d, where d ranges from 0 to D-1. Each thread in the block processes one d, loads the element, adds it to a shared sum, and after the block, the shared sum is divided by D and stored.
-
-This requires that each block has enough threads to cover the D elements. For D=4095, each block would need 4095 threads, which is not feasible because the maximum threads per block is 1024 (the maximum number of thread blocks per SM is 32, but the total threads per block can be up to 1024). So the block size can't be 4095.
-
-Therefore, the only feasible way is to use a smaller block size that divides D, or to tile the reduction. For example, compute the sum in chunks, using shared memory to accumulate partial sums.
-
-But this is getting complicated. Given the time constraints, I think the best approach is to write a kernel that processes each element of the output, loads the D elements, sums them using shared memory, then divides by D and stores the result. The block size is chosen as a power of two that fits into the registers, and the grid covers the total number of output elements.
-
-The kernel would have the following steps:
-
-1. Compute the linear index for the output element: idx = program_id * block_size + tl.arange(0, block_size).
-2. Compute the linear index for the corresponding D elements: linear_idx = idx * D + tl.arange(0, D).
-3. Load each element of the D elements, adding them to a shared sum.
-4. After the block, compute the sum, divide by D, and store the result.
-
-But the shared memory would need to hold the sum for each block. The block size for the shared memory would be the number of threads per block, and each thread writes its contribution to the shared sum.
-
-However, the original example kernel uses a single load per thread, but for the mean, each thread would load one element of the D elements. The shared sum would be a single value per block.
-
-In code, the kernel would look something like this:
 
 @triton.jit
-def mean_kernel(in_ptr0, out_ptr0, D: tl.constexpr, XBLOCK: tl.constexpr):
+def triton_poi_fused_mean_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    tl.full([XBLOCK], True, tl.int1)
-    x1 = xindex
+    xmask = xindex < xnumel
+    x0 = xindex % 4096
+    x1 = xindex // 4096
     x2 = xindex
-    x3 = xindex
-    x4 = xindex
-    x5 = xindex
-    x6 = xindex
-    x7 = xindex
-    x8 = xindex
-    x9 = xindex
-    x10 = xindex
-    x11 = xindex
-    x12 = xindex
-    x13 = xindex
-    x14 = xindex
-    x15 = xindex
-    x16 = xindex
-    x17 = xindex
-    x18 = xindex
-    x19 = xindex
-    x20 = xindex
-    x21 = xindex
-    x22 = xindex
-    x23 = xindex
-    x24 = xindex
-    x25 = xindex
-    x26 = xindex
-    x27 = xindex
-    x28 = xindex
-    x29 = xindex
-    x30 = xindex
-    x31 = xindex
-    x32 = xindex
-    x33 = xindex
-    x34 = xindex
-    x35 = xindex
-    x36 = xindex
-    x37 = xindex
-    x38 = xindex
-    x39 = xindex
-    x40 = xindex
-    x41 = xindex
-    x42 = xindex
-    x43 = xindex
-    x44 = xindex
-    x45 = xindex
-    x46 = xindex
-    x47 = xindex
-    x48 = xindex
-    x49 = xindex
-    x50 = xindex
-    x51 = xindex
-    x52 = xindex
-    x53 = xindex
-    x54 = xindex
-    x55 = xindex
-    x56 = xindex
-    x57 = xindex
-    x58 = xindex
-    x59 = xindex
-    x60 = xindex
-    x61 = xindex
-    x62 = xindex
-    x63 = xindex
-    x64 = xindex
-    x65 = xindex
-    x66 = xindex
-    x67 = xindex
-    x68 = xindex
-    x69 = xindex
-    x70 = xindex
-    x71 = xindex
-    x72 = xindex
-    x73 = xindex
-    x74 = xindex
-    x75 = xindex
-    x76 = xindex
-    x77 = xindex
-    x78 = xindex
-    x79 = xindex
-    x80 = xindex
-    x81 = xindex
-    x82 = xindex
-    x83 = xindex
-    x84 = xindex
-    x85 = xindex
-    x86 = xindex
-    x87 = xindex
-    x88 = xindex
-    x89 = xindex
-    x90 = xindex
-    x91 = xindex
-    x92 = xindex
-    x93 = xindex
-    x94 = xindex
-    x95 = xindex
-    x96 = xindex
-    x97 = xindex
-    x98 = xindex
-    x99 = xindex
-    x100 = xindex
-    x101 = xindex
-    x102 = xindex
-    x103 = xindex
-    x104 = xindex
-    x105 = xindex
-    x106 = xindex
-    x107 = xindex
-    x108 = xindex
-    x109 = xindex
-    x110 = xindex
-    x111 = xindex
-    x112 = xindex
-    x113 = xindex
-    x114 = xindex
-    x115 = xindex
-    x116 = xindex
-    x117 = xindex
-    x118 = xindex
-    x119 = xindex
-    x120 = xindex
-    x121 = xindex
-    x122 = xindex
-    x123 = xindex
-    x124 = xindex
-    x125 = xindex
-    x126 = xindex
-    x127 = xindex
-    xmask = xindex < XBLOCK
-    x1 = xindex
-    x2 = xindex
-    x3 = xindex
-    x4 = xindex
-    x5 = xindex
-    x6 = xindex
-    x7 = xindex
-    x8 = xindex
-    x9 = xindex
-    x10 = xindex
-    x11 = xindex
-    x12 = xindex
-    x13 = xindex
-    x14 = xindex
-    x15 = xindex
-    x16 = xindex
-    x17 = xindex
-    x18 = xindex
-    x19 = xindex
-    x20 = xindex
-    x21 = xindex
-    x22 = xindex
-    x23 = xindex
-    x24 = xindex
-    x25 = xindex
-    x26 = xindex
-    x27 = xindex
-    x28 = xindex
-    x29 = xindex
-    x30 = xindex
-    x31 = xindex
-    x32 = xindex
-    x33 = xindex
-    x34 = xindex
-    x35 = xindex
-    x36 = xindex
-    x37 = xindex
-    x38 = xindex
-    x39 = xindex
-    x40 = xindex
-    x41 = xindex
-    x42 = xindex
-    x43 = xindex
-    x44 = xindex
-    x45 = xindex
-    x46 = xindex
-    x47 = xindex
-    x48 = xindex
-    x49 = xindex
-    x50 = xindex
-    x51 = xindex
-    x52 = xindex
-    x53 = xindex
-    x54 = xindex
-    x55 = xindex
-    x56 = xindex
-    x57 = xindex
-    x58 = xindex
-    x59 = xindex
-    x60 = xindex
-    x61 = xindex
-    x62 = xindex
-    x63 = xindex
-    x64 = xindex
-    x65 = xindex
-    x66 = xindex
-    x67 = xindex
-    x68 = xindex
-    x69 = xindex
-    x70 = xindex
-    x71 = xindex
-    x72 = xindex
-    x73 = xindex
-    x74 = xindex
-    x75 = xindex
-    x76 = xindex
-    x77 = xindex
-    x78 = xindex
-    x79 = xindex
-    x80 = xindex
-    x81 = xindex
-    x82 = xindex
-    x83 = xindex
-    x84 = xindex
-    x85 = xindex
-    x86 = xindex
-    x87 = xindex
-    x88 = xindex
-    x89 = xindex
-    x90 = xindex
-    x91 = xindex
-    x92 = xindex
-    x93 = xindex
-    x94 = xindex
-    x95 = xindex
-    x96 = xindex
-    x97 = xindex
-    x98 = xindex
-    x99 = xindex
-    x100 = xindex
-    x101 = xindex
-    x102 = xindex
-    x103 = xindex
-    x104 = xindex
-    x105 = xindex
-    x106 = xindex
-    x107 = xindex
-    x108 = xindex
-    x109 = xindex
-    x110 = xindex
-    x111 = xindex
-    x112 = xindex
-    x113 = xindex
-    x114 = xindex
-    x115 = xindex
-    x116 = xindex
-    x117 = xindex
-    x118 = xindex
-    x119 = xindex
-    x120 = xindex
-    x121 = xindex
-    x122 = xindex
-    x123 = xindex
-    x124 = xindex
-    x125 = xindex
-    x126 = xindex
-    x127 = xindex
-    x4 = xindex
-    x5 = xindex
-    x6 = xindex
-    x7 = xindex
-    x8 = xindex
-    x9 = xindex
-    x10 = xindex
-    x11 = xindex
-    x12 = xindex
-    x13 = xindex
-    x14 = xindex
-    x15 = xindex
-    x16 = xindex
-    x17 = xindex
-    x18 = xindex
-    x19 = xindex
-    x20 = xindex
-    x21 = xindex
-    x22 = xindex
-    x23 = xindex
-    x24 = xindex
-    x25 = xindex
-    x26 = xindex
-    x27 = xindex
-    x28 = xindex
-    x29 = xindex
-    x30 = xindex
-    x31 = xindex
-    x32 = xindex
-    x33 = xindex
-    x34 = xindex
-    x35 = xindex
-    x36 = xindex
-    x37 = xindex
-    x38 = xindex
-    x39 = xindex
-    x40 = xindex
-    x41 = xindex
-    x42 = xindex
-    x43 = xindex
-    x44 = xindex
-    x45 = xindex
-    x46 = xindex
-    x47 = xindex
-    x48 = xindex
-    x49 = xindex
-    x50 = xindex
-    x51 = xindex
-    x52 = xindex
-    x53 = xindex
-    x54 = xindex
-    x55 = xindex
-    x56 = xindex
-    x57 = xindex
-    x58 = xindex
-    x59 = xindex
-    x60 = xindex
-    x61 = xindex
-    x62 = xindex
-    x63 = xindex
-    x64 = xindex
-    x65 = xindex
-    x66 = xindex
-    x67 = xindex
-    x68 = xindex
-    x69 = xindex
-    x70 = xindex
-    x71 = xindex
-    x72 = xindex
-    x73 = xindex
-    x74 = xindex
-    x75 = xindex
-    x76 = xindex
-    x77 = xindex
-    x78 = xindex
-    x79 = xindex
-    x80 = xindex
-    x81 = xindex
-    x82 = xindex
-    x83 = xindex
-    x84 = xindex
-    x85 = xindex
-    x86 = xindex
-    x87 = xindex
-    x88 = xindex
-    x89 = xindex
-    x90 = xindex
-    x91 = xindex
-    x92 = xindex
-    x93 = xindex
-    x94 = xindex
-    x95 = xindex
-    x96 = xindex
-    x97 = xindex
-    x98 = xindex
-    x99 = xindex
-    x100 = xindex
-    x101 = xindex
-    x102 = xindex
-    x103 = xindex
-    x104 = xindex
-    x105 = xindex
-    x106 = xindex
-    x107 = xindex
-    x108 = xindex
-    x109 = xindex
-    x110 = xindex
-    x111 = xindex
-    x112 = xindex
-    x113 = xindex
-    x114 = xindex
-    x115 = xindex
-    x116 = xindex
-    x117 = xindex
-    x118 = xindex
-    x119 = xindex
-    x120 = xindex
-    x121 = xindex
-    x122 = xindex
-    x123 = xindex
-    x124 = xindex
-    x125 = xindex
-    x126 = xindex
-    x127 = xindex
-    x4 = xindex
-    x5 = xindex
-    x6 = xindex
-    x7 = xindex
-    x8 = xindex
-    x9 = xindex
-    x10 = xindex
-    x11 = xindex
-    x12 = xindex
-    x13 = xindex
-    x14 = xindex
-    x15 = xindex
-    x16 = xindex
-    x17 = xindex
-    x18 = xindex
-    x19 = xindex
-    x20 = xindex
-    x21 = xindex
-    x22 = xindex
-    x23 = xindex
-    x24 = xindex
-    x25 = xindex
-    x26 = xindex
-    x27 = xindex
-    x28 = xindex
-    x29 = xindex
-    x30 = xindex
-    x31 = xindex
-    x32 = xindex
-    x33 = xindex
-    x34 = xindex
-    x35 = xindex
-    x36 = xindex
-    x37 = xindex
-    x38 = xindex
-    x39 = xindex
-    x40 = xindex
-    x41 = xindex
-    x42 = xindex
-    x43 = xindex
-    x44 = xindex
-    x45 = xindex
-    x46 = xindex
-    x47 = xindex
-    x48 = xindex
-    x49 = xindex
-    x50 = xindex
-    x51 = xindex
-    x52 = xindex
-    x53 = xindex
-    x54 = xindex
-    x55 = xindex
-    x56 = xindex
-    x57 = xindex
-    x58 = xindex
-    x59 = xindex
-    x60 = xindex
-    x61 = xindex
-    x62 = xindex
-    x63 = xindex
-    x64 = xindex
-    x65 = xindex
-    x66 = xindex
-    x67 = xindex
-    x68 = xindex
-    x69 = xindex
-    x70 = xindex
-    x71 = xindex
-    x72 = xindex
-    x73 = xindex
-    x74 = xindex
-    x75 = xindex
-    x76 = xindex
-    x77 = xindex
-    x78 = xindex
-    x79 = xindex
-    x80 = xindex
-    x81 = xindex
-    x82 = xindex
-    x83 = xindex
-    x84 = xindex
-    x85 = xindex
-    x86 = xindex
-    x87 = xindex
-    x88 = xindex
-    x89 = xindex
-    x90 = xindex
-    x91 = xindex
-    x92 = xindex
-    x93 = xindex
-    x94 = xindex
-    x95 = xindex
-    x96 = xindex
-    x97 = xindex
-    x98 = xindex
-    x99 = xindex
-    x100 = xindex
-    x101 = xindex
-    x102 = xindex
-    x103 = xindex
-    x104 = xindex
-    x105 = xindex
-    x106 = xindex
-    x107 = xindex
-    x108 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0 + 4095 * x1), xmask)
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK])
+    tmp2 = tl.where(xmask, tmp1, 0)
+    tmp3 = tl.broadcast_to(tmp2, [XBLOCK])
+    tmp5 = tl.broadcast_to(tmp3, [XBLOCK])
+    tmp7 = tl.broadcast_to(tmp5, [XBLOCK])
+    tmp9 = tl.broadcast_to(tmp7, [XBLOCK])
+    tmp11 = tl.broadcast_to(tmp9, [XBLOCK])
+    tmp13 = tl.broadcast_to(tmp11, [XBLOCK])
+    tmp15 = tl.broadcast_to(tmp13, [XBLOCK])
+    tmp17 = tl.broadcast_to(tmp15, [XBLOCK])
+    tmp19 = tl.broadcast_to(tmp17, [XBLOCK])
+    tmp21 = tl.broadcast_to(tmp19, [XBLOCK])
+    tmp23 = tl.broadcast_to(tmp21, [XBLOCK])
+    tmp25 = tl.broadcast_to(tmp23, [XBLOCK])
+    tmp27 = tl.broadcast_to(tmp25, [XBLOCK])
+    tmp29 = tl.broadcast_to(tmp27, [XBLOCK])
+    tmp31 = tl.broadcast_to(tmp29, [XBLOCK])
+    tmp33 = tl.broadcast_to(tmp31, [XBLOCK])
+    tmp35 = tl.broadcast_to(tmp33, [XBLOCK])
+    tmp37 = tl.broadcast_to(tmp35, [XBLOCK])
+    tmp39 = tl.broadcast_to(tmp37, [XBLOCK])
+    tmp41 = tl.broadcast_to(tmp39, [XBLOCK])
+    tmp43 = tl.broadcast_to(tmp41, [XBLOCK])
+    tmp45 = tl.broadcast_to(tmp43, [XBLOCK])
+    tmp47 = tl.broadcast_to(tmp45, [XBLOCK])
+    tmp49 = tl.broadcast_to(tmp47, [XBLOCK])
+    tmp51 = tl.broadcast_to(tmp49, [XBLOCK])
+    tmp53 = tl.broadcast_to(tmp51, [XBLOCK])
+    tmp55 = tl.broadcast_to(tmp53, [XBLOCK])
+    tmp57 = tl.broadcast_to(tmp55, [XBLOCK])
+    tmp59 = tl.broadcast_to(tmp57, [XBLOCK])
+    tmp61 = tl.broadcast_to(tmp59, [XBLOCK])
+    tmp63 = tl.broadcast_to(tmp61, [XBLOCK])
+    tmp65 = tl.broadcast_to(tmp63, [XBLOCK])
+    tmp67 = tl.broadcast_to(tmp65, [XBLOCK])
+    tmp69 = tl.broadcast_to(tmp67, [XBLOCK])
+    tmp71 = tl.broadcast_to(tmp69, [XBLOCK])
+    tmp73 = tl.broadcast_to(tmp71, [XBLOCK])
+    tmp75 = tl.broadcast_to(tmp73, [XBLOCK])
+    tmp77 = tl.broadcast_to(tmp75, [XBLOCK])
+    tmp79 = tl.broadcast_to(tmp77, [XBLOCK])
+    tmp81 = tl.broadcast_to(tmp79, [XBLOCK])
+    tmp83 = tl.broadcast_to(tmp81, [XBLOCK])
+    tmp85 = tl.broadcast_to(tmp83, [XBLOCK])
+    tmp87 = tl.broadcast_to(tmp85, [XBLOCK])
+    tmp89 = tl.broadcast_to(tmp87, [XBLOCK])
+    tmp91 = tl.broadcast_to(tmp89, [XBLOCK])
+    tmp93 = tl.broadcast_to(tmp91, [XBLOCK])
+    tmp95 = tl.broadcast_to(tmp93, [XBLOCK])
+    tmp97 = tl.broadcast_to(tmp95, [XBLOCK])
+    tmp99 = tl.broadcast_to(tmp97, [XBLOCK])
+    tmp101 = tl.broadcast_to(tmp99, [XBLOCK])
+    tmp103 = tl.broadcast_to(tmp101, [XBLOCK])
+    tmp105 = tl.broadcast_to(tmp103, [XBLOCK])
+    tmp107 = tl.broadcast_to(tmp105, [XBLOCK])
+    tmp109 = tl.broadcast_to(tmp107, [XBLOCK])
+    tmp111 = tl.broadcast_to(tmp109, [XBLOCK])
+    tmp113 = tl.broadcast_to(tmp111, [XBLOCK])
+    tmp115 = tl.broadcast_to(tmp113, [XBLOCK])
+    tmp117 = tl.broadcast_to(tmp115, [XBLOCK])
+    tmp119 = tl.broadcast_to(tmp117, [XBLOCK])
+    tmp121 = tl.broadcast_to(tmp119, [XBLOCK])
+    tmp123 = tl.broadcast_to(tmp121, [XBLOCK])
+    tmp125 = tl.broadcast_to(tmp123, [XBLOCK])
+    tmp127 = tl.broadcast_to(tmp125, [XBLOCK])
+    tmp129 = tl.broadcast_to(tmp127, [XBLOCK])
+    tmp131 = tl.broadcast_to(tmp129, [XBLOCK])
+    tmp133 = tl.broadcast_to(tmp131, [XBLOCK])
+    tmp135 = tl.broadcast_to(tmp133, [XBLOCK])
+    tmp137 = tl.broadcast_to(tmp135, [XBLOCK])
+    tmp139 = tl.broadcast_to(tmp137, [XBLOCK])
+    tmp141 = tl.broadcast_to(tmp139, [XBLOCK])
+    tmp143 = tl.broadcast_to(tmp141, [XBLOCK])
+    tmp145 = tl.broadcast_to(tmp143, [XBLOCK])
+    tmp147 = tl.broadcast_to(tmp145, [XBLOCK])
+    tmp149 = tl.broadcast_to(tmp147, [XBLOCK])
+    tmp151 = tl.broadcast_to(tmp149, [XBLOCK])
+    tmp153 = tl.broadcast_to(tmp151, [XBLOCK])
+    tmp155 = tl.broadcast_to(tmp153, [XBLOCK])
+    tmp157 = tl.broadcast_to(tmp155, [XBLOCK])
+    tmp159 = tl.broadcast_to(tmp157, [XBLOCK])
+    tmp161 = tl.broadcast_to(tmp159, [XBLOCK])
+    tmp163 = tl.broadcast_to(tmp161, [XBLOCK])
+    tmp165 = tl.broadcast_to(tmp163, [XBLOCK])
+    tmp167 = tl.broadcast_to(tmp165, [XBLOCK])
+    tmp169 = tl.broadcast_to(tmp167, [XBLOCK])
+    tmp171 = tl.broadcast_to(tmp169, [XBLOCK])
+    tmp173 = tl.broadcast_to(tmp171, [XBLOCK])
+    tmp175 = tl.broadcast_to(tmp173, [XBLOCK])
+    tmp177 = tl.broadcast_to(tmp175, [XBLOCK])
+    tmp179 = tl.broadcast_to(tmp177, [XBLOCK])
+    tmp181 = tl.broadcast_to(tmp179, [XBLOCK])
+    tmp183 = tl.broadcast_to(tmp181, [XBLOCK])
+    tmp185 = tl.broadcast_to(tmp183, [XBLOCK])
+    tmp187 = tl.broadcast_to(tmp185, [XBLOCK])
+    tmp189 = tl.broadcast_to(tmp187, [XBLOCK])
+    tmp191 = tl.broadcast_to(tmp189, [XBLOCK])
+    tmp193 = tl.broadcast_to(tmp191, [XBLOCK])
+    tmp195 = tl.broadcast_to(tmp193, [XBLOCK])
+    tmp197 = tl.broadcast_to(tmp195, [XBLOCK])
+    tmp199 = tl.broadcast_to(tmp197, [XBLOCK])
+    tmp201 = tl.broadcast_to(tmp199, [XBLOCK])
+    tmp203 = tl.broadcast_to(tmp201, [XBLOCK])
+    tmp205 = tl.broadcast_to(tmp203, [XBLOCK])
+    tmp207 = tl.broadcast_to(tmp205, [XBLOCK])
+    tmp209 = tl.broadcast_to(tmp207, [XBLOCK])
+    tmp211 = tl.broadcast_to(tmp209, [XBLOCK])
+    tmp213 = tl.broadcast_to(tmp211, [XBLOCK])
+    tmp215 = tl.broadcast_to(tmp213, [XBLOCK])
+    tmp217 = tl.broadcast_to(tmp215, [XBLOCK])
+    tmp219 = tl.broadcast_to(tmp217, [XBLOCK])
+    tmp221 = tl.broadcast_to(tmp219, [XBLOCK])
+    tmp223 = tl.broadcast_to(tmp221, [XBLOCK])
+    tmp225 = tl.broadcast_to(tmp223, [XBLOCK])
+    tmp227 = tl.broadcast_to(tmp225, [XBLOCK])
+    tmp229 = tl.broadcast_to(tmp227, [XBLOCK])
+    tmp231 = tl.broadcast_to(tmp229, [XBLOCK])
+    tmp233 = tl.broadcast_to(tmp231, [XBLOCK])
+    tmp235 = tl.broadcast_to(tmp233, [XBLOCK])
+    tmp237 = tl.broadcast_to(tmp235, [XBLOCK])
+    tmp239 = tl.broadcast_to(tmp237, [XBLOCK])
+    tmp241 = tl.broadcast_to(tmp239, [XBLOCK])
+    tmp243 = tl.broadcast_to(tmp241, [XBLOCK])
+    tmp245 = tl.broadcast_to(tmp243, [XBLOCK])
+    tmp247 = tl.broadcast_to(tmp245, [XBLOCK])
+    tmp249 = tl.broadcast_to(tmp247, [XBLOCK])
+    tmp251 = tl.broadcast_to(tmp249, [XBLOCK])
+    tmp253 = tl.broadcast_to(tmp251, [XBLOCK])
+    tmp255 = tl.broadcast_to(tmp253, [XBLOCK])
+    tmp257 = tl.broadcast_to(tmp255, [XBLOCK])
+    tmp259 = tl.broadcast_to(tmp257, [XBLOCK])
+    tmp261 = tl.broadcast_to(tmp259, [XBLOCK])
+    tmp263 = tl.broadcast_to(tmp261, [XBLOCK])
+    tmp265 = tl.broadcast_to(tmp263, [XBLOCK])
+    tmp267 = tl.broadcast_to(tmp265, [XBLOCK])
+    tmp269 = tl.broadcast_to(tmp267, [XBLOCK])
+    tmp271 = tl.broadcast_to(tmp269, [XBLOCK])
+    tmp273 = tl.broadcast_to(tmp271, [XBLOCK])
+    tmp275 = tl.broadcast_to(tmp273, [XBLOCK])
+    tmp277 = tl.broadcast_to(tmp275, [XBLOCK])
+    tmp279 = tl.broadcast_to(tmp277, [XBLOCK])
+    tmp281 = tl.broadcast_to(tmp279, [XBLOCK])
+    tmp283 = tl.broadcast_to(tmp281, [XBLOCK])
+    tmp285 = tl.broadcast_to(tmp283, [XBLOCK])
+    tmp287 = tl.broadcast_to(tmp285, [XBLOCK])
+    tmp289 = tl.broadcast_to(tmp287, [XBLOCK])
+    tmp291 = tl.broadcast_to(tmp289, [XBLOCK])
+    tmp293 = tl.broadcast_to(tmp291, [XBLOCK])
+    tmp295 = tl.broadcast_to(tmp293, [XBLOCK])
+    tmp297 = tl.broadcast_to(tmp295, [XBLOCK])
+    tmp299 = tl.broadcast_to(tmp297, [XBLOCK])
+    tmp301 = tl.broadcast_to(tmp299, [XBLOCK])
+    tmp303 = tl.broadcast_to(tmp301, [XBLOCK])
+    tmp305 = tl.broadcast_to(tmp303, [XBLOCK])
+    tmp307 = tl.broadcast_to(tmp305, [XBLOCK])
+    tmp309 = tl.broadcast_to(tmp307, [XBLOCK])
+    tmp311 = tl.broadcast_to(tmp309, [XBLOCK])
+    tmp313 = tl.broadcast_to(tmp311, [XBLOCK])
+    tmp315 = tl.broadcast_to(tmp313, [XBLOCK])
+    tmp317 = tl.broadcast_to(tmp315, [XBLOCK])
+    tmp319 = tl.broadcast_to(tmp317, [XBLOCK])
+    tmp321 = tl.broadcast_to(tmp319, [XBLOCK])
+    tmp323 = tl.broadcast_to(tmp321, [XBLOCK])
+    tmp325 = tl.broadcast_to(tmp323, [XBLOCK])
+    tmp327 = tl.broadcast_to(tmp325, [XBLOCK])
+    tmp329 = tl.broadcast_to(tmp327, [XBLOCK])
+    tmp331 = tl.broadcast_to(tmp329, [XBLOCK])
+    tmp333 = tl.broadcast_to(tmp331, [XBLOCK])
+    tmp335 = tl.broadcast_to(tmp333, [XBLOCK])
+    tmp337 = tl.broadcast_to(tmp335, [XBLOCK])
+    tmp339 = tl.broadcast_to(tmp337, [XBLOCK])
+    tmp341 = tl.broadcast_to(tmp339, [XBLOCK])
+    tmp343 = tl.broadcast_to(tmp341, [XBLOCK])
+    tmp345 = tl.broadcast_to(tmp343, [XBLOCK])
+    tmp347 = tl.broadcast_to(tmp345, [XBLOCK])
+    tmp349 = tl.broadcast_to(tmp347, [XBLOCK])
+    tmp351 = tl.broadcast_to(tmp349, [XBLOCK])
+    tmp353 = tl.broadcast_to(tmp351, [XBLOCK])
+    tmp355 = tl.broadcast_to(tmp353, [XBLOCK])
+    tmp357 = tl.broadcast_to(tmp355, [XBLOCK])
+    tmp359 = tl.broadcast_to(tmp357, [XBLOCK])
+    tmp361 = tl.broadcast_to(tmp359, [XBLOCK])
+    tmp363 = tl.broadcast_to(tmp361, [XBLOCK])
+    tmp365 = tl.broadcast_to(tmp363, [XBLOCK])
+    tmp367 = tl.broadcast_to(tmp365, [XBLOCK])
+    tmp369 = tl.broadcast_to(tmp367, [XBLOCK])
+    tmp371 = tl.broadcast_to(tmp369, [XBLOCK])
+    tmp373 = tl.broadcast_to(tmp371, [XBLOCK])
+    tmp375 = tl.broadcast_to(tmp373, [XBLOCK])
+    tmp377 = tl.broadcast_to(tmp375, [XBLOCK])
+    tmp379 = tl.broadcast_to(tmp377, [XBLOCK])
+    tmp381 = tl.broadcast_to(tmp379, [XBLOCK])
+    tmp383 = tl.broadcast_to(tmp381, [XBLOCK])
+    tmp385 = tl.broadcast_to(tmp383, [XBLOCK])
+    tmp387 = tl.broadcast_to(tmp385, [XBLOCK])
+    tmp389 = tl.broadcast_to(tmp387, [XBLOCK])
+    tmp391 = tl.broadcast_to(tmp389, [XBLOCK])
+    tmp393 = tl.broadcast_to(tmp391, [XBLOCK])
+    tmp395 = tl.broadcast_to(tmp393, [XBLOCK])
+    tmp397 = tl.broadcast_to(tmp395, [XBLOCK])
+    tmp399 = tl.broadcast_to(tmp397, [XBLOCK])
+    tmp401 = tl.broadcast_to(tmp399, [XBLOCK])
+    tmp403 = tl.broadcast_to(tmp401, [XBLOCK])
+    tmp405 = tl.broadcast_to(tmp403, [XBLOCK])
+    tmp407 = tl.broadcast_to(tmp405, [XBLOCK])
+    tmp409 = tl.broadcast_to(tmp407, [XBLOCK])
+    tmp411 = tl.broadcast_to(tmp409, [XBLOCK])
+    tmp413 = tl.broadcast_to(tmp411, [XBLOCK])
+    tmp415 = tl.broadcast_to(tmp413, [XBLOCK])
+    tmp417 = tl.broadcast_to(tmp415, [XBLOCK])
+    tmp419 = tl.broadcast_to(tmp417, [XBLOCK])
+    tmp421 = tl.broadcast_to(tmp419, [XBLOCK])
+    tmp423 = tl.broadcast_to(tmp421, [XBLOCK])
+    tmp425 = tl.broadcast_to(tmp423, [XBLOCK])
+    tmp427 = tl.broadcast_to(tmp425, [XBLOCK])
+    tmp429 = tl.broadcast_to(tmp427, [XBLOCK])
+    tmp431 = tl.broadcast_to(tmp429, [XBLOCK])
+    tmp433 = tl.broadcast_to(tmp431, [XBLOCK])
+    tmp435 = tl.broadcast_to(tmp433, [XBLOCK])
+    tmp437 = tl.broadcast_to(tmp435, [XBLOCK])
+    tmp439 = tl.broadcast_to(tmp437, [XBLOCK])
+    tmp441 = tl.broadcast_to(tmp439, [XBLOCK])
+    tmp443 = tl.broadcast_to(tmp441, [XBLOCK])
+    tmp445 = tl.broadcast_to(tmp443, [XBLOCK])
+    tmp447 = tl.broadcast_to(tmp445, [XBLOCK])
+    tmp449 = tl.broadcast_to(tmp447, [XBLOCK])
+    tmp451 = tl.broadcast_to(tmp449, [XBLOCK])
+    tmp453 = tl.broadcast_to(tmp451, [XBLOCK])
+    tmp455 = tl.broadcast_to(tmp453, [XBLOCK])
+    tmp457 = tl.broadcast_to(tmp455, [XBLOCK])
+    tmp459 = tl.broadcast_to(tmp457, [XBLOCK])
+    tmp461 = tl.broadcast_to(tmp459, [XBLOCK])
+    tmp463 = tl.broadcast_to(tmp461, [XBLOCK])
+    tmp465 = tl.broadcast_to(tmp463, [XBLOCK])
+    tmp467 = tl.broadcast_to(tmp465, [XBLOCK])
+    tmp469 = tl.broadcast_to(tmp467, [XBLOCK])
+    tmp471 = tl.broadcast_to(tmp469, [XBLOCK])
+    tmp473 = tl.broadcast_to(tmp471, [XBLOCK])
+    tmp475 = tl.broadcast_to(tmp473, [XBLOCK])
+    tmp477 = tl.broadcast_to(tmp475, [XBLOCK])
+    tmp479 = tl.broadcast_to(tmp477, [XBLOCK])
+    tmp481 = tl.broadcast_to(tmp479, [XBLOCK])
+    tmp483 = tl.broadcast_to(tmp481, [XBLOCK])
+    tmp485 = tl.broadcast_to(tmp483, [XBLOCK])
+    tmp487 = tl.broadcast_to(tmp485, [XBLOCK])
+    tmp489 = tl.broadcast_to(tmp487, [XBLOCK])
+    tmp491 = tl.broadcast_to(tmp489, [XBLOCK])
+    tmp493 = tl.broadcast_to(tmp491, [XBLOCK])
+    tmp495 = tl.broadcast_to(tmp493, [XBLOCK])
+    tmp497 = tl.broadcast_to(tmp495, [XBLOCK])
+    tmp499 = tl.broadcast_to(tmp497, [XBLOCK])
+    tmp501 = tl.broadcast_to(tmp499, [XBLOCK])
+    tmp503 = tl.broadcast_to(tmp501, [XBLOCK])
+    tmp505 = tl.broadcast_to(tmp503, [XBLOCK])
+    tmp507 = tl.broadcast_to(tmp505, [XBLOCK])
+    tmp509 = tl.broadcast_to(tmp507, [XBLOCK])
+    tmp511 = tl.broadcast_to(tmp509, [XBLOCK])
+    tmp513 = tl.broadcast_to(tmp511, [XBLOCK])
+    tmp515 = tl.broadcast_to(tmp513, [XBLOCK])
+    tmp517 = tl.broadcast_to(tmp515, [XBLOCK])
+    tmp519 = tl.broadcast_to(tmp517, [XBLOCK])
+    tmp521 = tl.broadcast_to(tmp519, [XBLOCK])
+    tmp523 = tl.broadcast_to(tmp521, [XBLOCK])
+    tmp525 = tl.broadcast_to(tmp523, [XBLOCK])
+    tmp527 = tl.broadcast_to(tmp525, [XBLOCK])
+    tmp529 = tl.broadcast_to(tmp527, [XBLOCK])
+    tmp531 = tl.broadcast_to(tmp529, [XBLOCK])
+    tmp533 = tl.broadcast_to(tmp531, [XBLOCK])
+    tmp535 = tl.broadcast_to(tmp533, [XBLOCK])
+    tmp537 = tl.broadcast_to(tmp535, [XBLOCK])
+    tmp539 = tl.broadcast_to(tmp537, [XBLOCK])
+    tmp541 = tl.broadcast_to(tmp539, [XBLOCK])
+    tmp543 = tl.broadcast_to(tmp541, [XBLOCK])
+    tmp545 = tl.broadcast_to(tmp543, [XBLOCK])
+    tmp547 = tl.broadcast_to(tmp545, [XBLOCK])
+    tmp549 = tl.broadcast_to(tmp547, [XBLOCK])
+    tmp551 = tl.broadcast_to(tmp549, [XBLOCK])
+    tmp553 = tl.broadcast_to(tmp551, [XBLOCK])
+    tmp555 = tl.broadcast_to(tmp553, [XBLOCK])
+    tmp557 = tl.broadcast_to(tmp555, [XBLOCK])
+    tmp559 = tl.broadcast_to(tmp557, [XBLOCK])
+    tmp561 = tl.broadcast_to(tmp559, [XBLOCK])
+    tmp563 = tl.broadcast_to(tmp561, [XBLOCK])
+    tmp565 = tl.broadcast_to(tmp563, [XBLOCK])
+    tmp567 = tl.broadcast_to(tmp565, [XBLOCK])
+    tmp569 = tl.broadcast_to(tmp567, [XBLOCK])
+    tmp571 = tl.broadcast_to(tmp569, [XBLOCK])
+    tmp573 = tl.broadcast_to(tmp571, [XBLOCK])
+    tmp575 = tl.broadcast_to(tmp573, [XBLOCK])
+    tmp577 = tl.broadcast_to(tmp575, [XBLOCK])
+    tmp579 = tl.broadcast_to(tmp577, [XBLOCK])
+    tmp581 = tl.broadcast_to(tmp579, [XBLOCK])
+    tmp583 = tl.broadcast_to(tmp581, [XBLOCK])
+    tmp585 = tl.broadcast_to(tmp583, [XBLOCK])
+    tmp587 = tl.broadcast_to(tmp585, [XBLOCK])
+    tmp589 = tl.broadcast_to(tmp587, [XBLOCK])
+    tmp591 = tl.broadcast_to(tmp589, [XBLOCK])
+    tmp593 = tl.broadcast_to(tmp591, [XBLOCK])
+    tmp595 = tl.broadcast_to(tmp593, [XBLOCK])
+    tmp597 = tl.broadcast_to(tmp595, [XBLOCK])
+    tmp599 = tl.broadcast_to(tmp597, [XBLOCK])
+    tmp601 = tl.broadcast_to(tmp599, [XBLOCK])
+    tmp603 = tl.broadcast_to(tmp601, [XBLOCK])
+    tmp605 = tl.broadcast_to(tmp603, [XBLOCK])
+    tmp607 = tl.broadcast_to(tmp605, [XBLOCK])
+    tmp609 = tl.broadcast_to(tmp607, [XBLOCK])
+    tmp611 = tl.broadcast_to(tmp609, [XBLOCK])
+    tmp613 = tl.broadcast_to(tmp611, [XBLOCK])
+    tmp615 = tl.broadcast_to(tmp613, [XBLOCK])
+    tmp617 = tl.broadcast_to(tmp615, [XBLOCK])
+    tmp619 = tl.broadcast_to(tmp617, [XBLOCK])
+    tmp621 = tl.broadcast_to(tmp619, [XBLOCK])
+    tmp623 = tl.broadcast_to(tmp621, [XBLOCK])
+    tmp625 = tl.broadcast_to(tmp623, [XBLOCK])
+    tmp627 = tl.broadcast_to(tmp625, [XBLOCK])
+    tmp629 = tl.broadcast_to(tmp627, [XBLOCK])
+    tmp631 = tl.broadcast_to(tmp629, [XBLOCK])
+    tmp633 = tl.broadcast_to(tmp631, [XBLOCK])
+    tmp635 = tl.broadcast_to(tmp633, [XBLOCK])
+    tmp637 = tl.broadcast_to(tmp635, [XBLOCK])
+    tmp639 = tl.broadcast_to(tmp637, [XBLOCK])
+    tmp641 = tl.broadcast_to(tmp639, [XBLOCK])
+    tmp643 = tl.broadcast_to(tmp641, [XBLOCK])
+    tmp645 = tl.broadcast_to(tmp643, [XBLOCK])
+    tmp647 = tl.broadcast_to(tmp645, [XBLOCK])
+    tmp649 = tl.broadcast_to(tmp647, [XBLOCK])
+    tmp651 = tl.broadcast_to(tmp649, [XBLOCK])
+    tmp653 = tl.broadcast_to(tmp651, [XBLOCK])
+    tmp655 = tl.broadcast_to(tmp653, [XBLOCK])
+    tmp657 = tl.broadcast_to(tmp655, [XBLOCK])
+    tmp659 = tl.broadcast_to(tmp657, [XBLOCK])
+    tmp661 = tl.broadcast_to(tmp659, [XBLOCK])
+    tmp663 = tl.broadcast_to(tmp661, [XBLOCK])
+    tmp665 = tl.broadcast_to(tmp663, [XBLOCK])
+    tmp667 = tl.broadcast_to(tmp665, [XBLOCK])
+    tmp669 = tl.broadcast_to(tmp667, [XBLOCK])
+    tmp671 = tl.broadcast_to(tmp669, [XBLOCK])
+    tmp673 = tl.broadcast_to(tmp671, [XBLOCK])
+    tmp675 = tl.broadcast_to(tmp673, [XBLOCK])
+    tmp677 = tl.broadcast_to(tmp675, [XBLOCK])
+    tmp679 = tl.broadcast_to(tmp677, [XBLOCK])
+    tmp681 = tl.broadcast_to(tmp679, [XBLOCK])
+    tmp683 = tl.broadcast_to(tmp681, [XBLOCK])
+    tmp685 = tl.broadcast_to(tmp683, [XBLOCK])
+    tmp687 = tl.broadcast_to(tmp685, [XBLOCK])
+    tmp689 = tl.broadcast_to(tmp687, [XBLOCK])
+    tmp691 = tl.broadcast_to(tmp689, [XBLOCK])
+    tmp693 = tl.broadcast_to(tmp691, [XBLOCK])
+    tmp695 = tl.broadcast_to(tmp693, [XBLOCK])
+    tmp697 = tl.broadcast_to(tmp695, [XBLOCK])
+    tmp699 = tl.broadcast_to(tmp697, [XBLOCK])
+    tmp701 = tl.broadcast_to(tmp699, [XBLOCK])
+    tmp703 = tl.broadcast_to(tmp701, [XBLOCK])
+    tmp705 = tl.broadcast_to(tmp703, [XBLOCK])
+    tmp707 = tl.broadcast_to(tmp705, [XBLOCK])
+    tmp709 = tl.broadcast_to(tmp707, [XBLOCK])
+    tmp711 = tl.broadcast_to(tmp709, [XBLOCK])
+    tmp713 = tl.broadcast_to(tmp711, [XBLOCK])
+    tmp715 = tl.broadcast_to(tmp713, [XBLOCK])
+    tmp717 = tl.broadcast_to(tmp715, [XBLOCK])
+    tmp719 = tl.broadcast_to(tmp717, [XBLOCK])
+    tmp721 = tl.broadcast_to(tmp719, [XBLOCK])
+    tmp723 = tl.broadcast_to(tmp721, [XBLOCK])
+    tmp725 = tl.broadcast_to(tmp723, [XBLOCK])
+    tmp727 = tl.broadcast_to(tmp725, [XBLOCK])
+    tmp729 = tl.broadcast_to(tmp727, [XBLOCK])
+    tmp731 = tl.broadcast_to(tmp729, [XBLOCK])
+    tmp733 = tl.broadcast_to(tmp731, [XBLOCK])
+    tmp735 = tl.broadcast_to(tmp733, [XBLOCK])
+    tmp737 = tl.broadcast_to(tmp735, [XBLOCK])
+    tmp739 = tl.broadcast_to(tmp737, [XBLOCK])
+    tmp741 = tl.broadcast_to(tmp739, [XBLOCK])
+    tmp743 = tl.broadcast_to(tmp741, [XBLOCK])
+    tmp745 = tl.broadcast_to(tmp743, [XBLOCK])
+    tmp747 = tl.broadcast_to(tmp745, [XBLOCK])
+    tmp749 = tl.broadcast_to(tmp747, [XBLOCK])
+    tmp751 = tl.broadcast_to(tmp749, [XBLOCK])
+    tmp753 = tl.broadcast_to(tmp751, [XBLOCK])
+    tmp755 = tl.broadcast_to(tmp753, [XBLOCK])
+    tmp757 = tl.broadcast_to(tmp755, [XBLOCK])
+    tmp759 = tl.broadcast_to(tmp757, [XBLOCK])
+    tmp761 = tl.broadcast_to(tmp759, [XBLOCK])
+    tmp763 = tl.broadcast_to(tmp761, [XBLOCK])
+    tmp765 = tl.broadcast_to(tmp763, [XBLOCK])
+    tmp767 = tl.broadcast_to(tmp765, [XBLOCK])
+    tmp769 = tl.broadcast_to(tmp767, [XBLOCK])
+    tmp771 = tl.broadcast_to(tmp769, [XBLOCK])
+    tmp773 = tl.broadcast_to(tmp771, [XBLOCK])
+    tmp775 = tl.broadcast_to(tmp773, [XBLOCK])
+    tmp777 = tl.broadcast_to(tmp775, [XBLOCK])
+    tmp779 = tl.broadcast_to(tmp777, [XBLOCK])
+    tmp781 = tl.broadcast_to(tmp779, [XBLOCK])
+    tmp783 = tl.broadcast_to(tmp781, [XBLOCK])
+    tmp785 = tl.broadcast_to(tmp783, [XBLOCK])
+    tmp787 = tl.broadcast_to(tmp785, [XBLOCK])
+    tmp789 = tl.broadcast_to(tmp787, [XBLOCK])
+    tmp791 = tl.broadcast_to(tmp789, [XBLOCK])
+    tmp793 = tl.broadcast_to(tmp791, [XBLOCK])
+    tmp795 = tl.broadcast_to(tmp793, [XBLOCK])
+    tmp797

@@ -1,361 +1,421 @@
-Okay, I need to replace the PyTorch MaxPool2d with a custom Triton kernel. Let me start by understanding what the original forward pass does. The MaxPool2d with kernel_size=4, stride=1, padding=1, dilation=1 takes a 4D tensor (B,C,H,W) and produces a tensor where each element is the max over a 4x4 window with stride 1, so the output shape is (B,C,H,W) again because padding is 1 and stride is 1. Wait, no, padding 1 with kernel size 4 and stride 1 would actually give the same spatial dimensions as the input because the formula for output size is (W - K + 2P)/S +1. Here (512-4 + 2*1)/1 +1 = 511+1=512. So the output is the same size as input, but each channel has a max over a 4x4 window.
+1. **Goal** – replace the standard `nn.MaxPool2d` forward pass with a custom Triton kernel that computes the 2‑D max‑pool output (values, indices) for a fixed window size (4×4) and stride = 1, padding = 1, dilation = 1. The kernel must produce the same shape `(B, C, H_out, W_out)` where `H_out = (H + 2*P - K + 2*D)/S + 1 = (512 + 2*1 - 4 + 2*1)/1 + 1 = 512` and `W_out = 512`. It must also return the argmax indices (0‑15) for each output element.
 
-The goal is to implement this max pooling with a Triton kernel. The challenge is that the kernel is a 2D sliding window, which is not a simple elementwise operation. So I need to flatten the 4D tensor into a 2D tensor of (H*W) elements per channel, then apply the max over each 4x4 block. But how to represent this in Triton?
+2. **Data layout** – the input tensor is contiguous in NCHW order (`(B, C, H, W)`). The kernel treats the tensor as a flat 1‑D array of size `N = B*C*H*W`. Offsets are computed as `offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)`. The flat index is then decomposed back into `(b, c, h, w)` using integer division/modulo:
+   - `b = idx // (C*H*W)`,
+   - `c = (idx // (H*W)) % C`,
+   - `h = (idx // W) % H`,
+   - `w = idx % W`.
+   This decomposition is performed once per thread to locate the four 4×4 windows that cover the current output element.
 
-First, let me think about the layout. The original tensor is stored in row-major order, so for a channel, the spatial dimensions are contiguous. The Triton kernel needs to process each element and compare it with the max of its 4x4 neighborhood. But because the kernel is 4x4, the stride in the flattened dimension is 1 for the inner dimension and 4 for the outer dimension. Wait, no. Let me reindex.
+3. **Window indexing** – each output element corresponds to a 4×4 region centered at `(h, w)`. With padding = 1, the actual input region spans `[h-1, h+3]` and `[w-1, w+3]`. The kernel loads the 16 values of this region using a stride of `W` (the width dimension) to step across the 4 rows. The offset formula `base + (row + 4*col) + W * (h + 4*row) + stride*W*col` yields the correct memory address for each of the 16 positions. The stride parameters (`4`, `1`, `4`, `1`) correspond to the row and column strides within the window.
 
-Let’s flatten the spatial dimensions (H,W) into a single dimension of length H*W. The stride for the inner dimension (width) is 1, and for the outer dimension (height) it's W. So each element at position (h,w) in the original tensor corresponds to index h*W + w in the flattened tensor. When we apply a 4x4 window, the window spans from (h-1, w-1) to (h+2, w+2) but considering padding. Wait, the padding is 1 on each side, so the actual window is centered on each element, and the kernel includes the element and its 3 neighbors in each direction. However, because the stride is 1, the kernel moves one element at a time, but the window is 4x4. So each element is part of multiple windows. But the max pooling operation is to compute the max over the 4x4 window that ends at each position. So for the flattened tensor, each element is the max of a block of 16 consecutive elements, but the block is not contiguous because the stride in the flattened dimension is 4. Wait, no. Let me think again.
+4. **Load pattern** – Triton loads each of the 16 values with a single `tl.load` call, using the computed address and the mask derived from the flat index comparison (`mask = idx < N`). The mask guarantees that threads at the tail of the block (when `N` is not a multiple of `BLOCK_SIZE`) do not read out‑of‑bounds. The `other=0.0` argument provides a default value for masked loads, which is irrelevant because the mask is true for valid threads.
 
-If the kernel is 4x4, then the stride is 1, so each element is part of a window that includes the element itself and the three elements to the left, the three elements above, and the three elements diagonally. But the max pooling operation for each output element is the max over the 4x4 window that ends at that position. So the first element of the output is the max of the first 4x4 elements, the second element is the max of elements 1-4, 5-8, 9-12, 13-16, etc. Wait, that can't be right. Actually, when stride is 1, the kernel moves by 1 each time, but the window is 4x4. So the output is the same size as the input, and each output element is the max of the 4x4 window that ends at that position. Therefore, the flattened tensor is of length H*W*C, and for each channel, we need to process each spatial element, compute the max over a 4x4 block that ends at that element.
+5. **Max reduction** – the kernel performs a cascade of pairwise `maximum` calls: first compare the first two values, then compare the result with the third, and so on until the 16th value. This reduction yields the maximum value for the current output element. Simultaneously, a separate cascade of `where` statements tracks the argmax: each comparison returns the index of the winning element (0‑15). The final index is stored as an `int64` tensor.
 
-But how to map this into a 1D index that can be handled by a single Triton kernel. One approach is to flatten the spatial dimensions (H,W) into a 2D grid, then compute for each element the indices of the 4x4 window. However, Triton kernels are typically 1D, so we need to treat the 2D window as a 1D block. Alternatively, we can split the 4x4 window into a 1D block of 16 elements, but that would require a larger block size.
+6. **Output tensors** – two outputs are produced:
+   - `out_values` – a `float32` tensor of shape `(B, C, H_out, W_out)` holding the max values.
+   - `out_indices` – an `int64` tensor of the same shape holding the argmax indices.
+   Both are allocated with `empty_strided_cuda` using the same stride layout as the input (`(B*C*H*W, C*H*W, H*W, W)`). The stride parameters `(2097152, 32768, 32, 1)` correspond to the flattened layout for the given dimensions.
 
-Wait, the original PyTorch kernel for MaxPool2d uses a 2D sliding window, but the Triton kernel needs to be a single 1D kernel that can handle the 4x4 window. So the kernel will process each element of the flattened spatial dimension (H*W) and compute the max over the 4x4 window that includes that element. The key is to compute the indices of the 4x4 window for each element.
+7. **Grid & launch configuration** – the grid is computed as `grid(N)` where `N = B*C*H*W = 32*64*512*512 = 536,870,912`. `BLOCK_SIZE = 1024` is chosen to give 524,288 program instances, each handling 1024 elements. The kernel is launched with `num_warps=4` and `num_stages=1`, which balances occupancy and latency hiding on the A100.
 
-Let me outline the steps for the kernel:
+8. **Numerics & correctness** – all loads are performed in FP32 (the default for the input). The reduction uses FP32 arithmetic, matching the PyTorch implementation. The argmax indices are stored as `int64` to accommodate the 16‑element range. Padding is handled implicitly by the mask; out‑of‑bounds loads are masked out, so the kernel never accesses memory beyond the padded region. The stride parameters ensure that the flat index correctly maps to the NCHW layout, preserving the original ordering.
 
-1. Flatten the input tensor (B,C,H,W) into a 2D tensor of shape (C, H*W). Each row corresponds to a channel, each column to a spatial element. The flattened index for each element is i = channel*H*W + (h*W + w). But in the kernel, we can ignore the channel dimension because each channel is processed independently.
+9. **Summary checklist** –  
+   - Flatten input to 1‑D index; decompose into `(b,c,h,w)`.  
+   - Compute window start addresses using the 4×4 kernel stride pattern.  
+   - Load all 16 window elements with a single masked load per thread.  
+   - Perform pairwise max reduction and argmax tracking.  
+   - Store max values and indices to two separate output tensors with identical strides.  
+   - Launch with `grid = ceil(N / BLOCK_SIZE)`, `BLOCK_SIZE = 1024`, `num_warps = 4`.  
+   - Ensure mask handling prevents out‑of‑bounds accesses.  
+   - Verify FP32 precision and `int64` index range.  
+   - Confirm that padding (1) and dilation (1) are respected by the address calculation.  
 
-2. For each element in the flattened spatial tensor, compute the start index of the 4x4 window. The window starts at (h - 1, w - 1) and ends at (h + 2, w + 2). However, because the kernel is 4x4 and stride is 1, the window for the element at position (h,w) is the same as the window for the element at (h-1,w-1) shifted by one. Wait, no. Actually, the window that ends at (h,w) is the 4x4 block that includes (h-3,w-3) to (h,w). Wait, this is confusing. Let me think again.
+Following these reasoning steps yields a Triton kernel that faithfully reproduces the behavior of `nn.MaxPool2d` for the given architecture while exploiting the A100’s memory bandwidth and parallelism.</think>
 
-The stride is 1, so the kernel moves one element at a time. The window that ends at position (h,w) includes the element itself and the three elements to the left, the three above, and the three diagonally. But the exact window size depends on the padding. The padding is 1 on each side, so the total window size is 4x4. The original tensor size is 512x512, so the output size is also 512x512 because padding is 1 and stride is 1. Therefore, for each output element, the window is the 4x4 block that ends at that element, which includes the element and the three elements to the left, three above, etc. However, the exact indices need to be calculated.
-
-But this seems complicated. Instead, perhaps the kernel can treat the flattened spatial dimension as a 1D array and compute the indices of the 4x4 window for each element. The kernel can iterate over each element, and for each element, compute the indices of the 4x4 window that ends at that element. Then, it loads the 16 elements of the window, computes the max, and stores it.
-
-But the problem is that the kernel must be launched in a way that covers all elements. The total number of elements per channel is H*W = 512*512 = 262,144. For a batch of 32, the total is 32*262,144 = 8,388,608 elements. The kernel would need to process each of these elements. However, the kernel is a 1D kernel, so each thread processes a single element. But each element requires loading 16 elements from memory, which could be expensive.
-
-Alternatively, perhaps the kernel can be split into a 2D grid where each block processes a 4x4 window. But that would require a 2D block, which Triton supports. However, the original example uses a 1D block, so maybe we can stick to a 1D block.
-
-Another approach is to flatten the spatial dimensions into a single dimension, and then the kernel processes each element, loading the 16 elements of the window. The kernel would need to compute the starting index of the window for each element. For example, for a given element at position i in the flattened array (where i ranges from 0 to H*W-1), the window starts at i - (W*3) - 3 (since the window is 4 rows and 4 columns, but the exact offset depends on the stride). Wait, this is getting messy. Maybe it's easier to treat the flattened spatial dimension as a 1D array where each element is part of a 4x4 block that is spaced by the stride. Since the stride is 1, the kernel moves by one element each time, but the window includes the previous 3 elements in the same row and the previous 3 rows.
-
-Wait, perhaps the kernel can compute the row and column indices for the element, then compute the start and end indices of the window. For example, for an element at (row, col) in the original tensor, the window spans rows from max(0, row-3) to row, and columns from max(0, col-3) to col. But because the stride is 1 and padding is 1, the window is always 4x4. Wait, no. With padding 1, the kernel can be applied to the entire tensor without any out-of-bounds checks because the padding adds a border of zeros. So the window for each element is exactly 4x4, and the kernel can safely load the 16 elements.
-
-But how to compute the 1D index for each element in the window. The flattened index for the original element is i = row*W + col. The window for this element includes the elements:
-
-- row*W + col
-- (row-1)*W + col
-- (row-2)*W + col
-- (row-3)*W + col
-- row*W + (col-1)
-- (row-1)*W + (col-1)
-- (row-2)*W + (col-1)
-- (row-3)*W + (col-1)
-- row*W + (col-2)
-- (row-1)*W + (col-2)
-- (row-2)*W + (col-2)
-- (row-3)*W + (col-2)
-- row*W + (col-3)
-- (row-1)*W + (col-3)
-- (row-2)*W + (col-3)
-- (row-3)*W + (col-3)
-
-But this is 16 elements, each of which can be computed as i - offset, where offset varies from 0 to 15. However, the kernel can generate these 16 offsets for each element and load them. The offsets would be generated as follows: for each element i, the offsets are (0,1,2,3) for the column and (0,1,2,3) for the row, giving a 4x4 grid. So the total number of elements to load per thread is 16.
-
-But the kernel needs to load these 16 elements, compute the max, and store the result. However, the kernel is launched for each element, so each thread would load 16 elements, which could be memory-bound. To optimize, the kernel can use a shared memory buffer to hold the 16 elements, reducing the number of global memory accesses.
-
-Wait, the original Triton kernel example for addition loads a single element per thread. For max pooling, each thread would need to load 16 elements. The kernel can be written to load these 16 elements, then compute the max, and store the result. But the problem is that the kernel must be launched with a grid that covers all elements, and each element is processed by a single thread.
-
-Let me outline the kernel parameters:
-
-- x_ptr: pointer to the input tensor (B,C,H,W)
-- out_ptr: pointer to the output tensor (B,C,H,W)
-- n_elements: total number of elements (B*C*H*W)
-- BLOCK_SIZE: the number of elements processed per block. For a 1D kernel, each block processes a contiguous range of elements. If each element is processed by a single thread, the block size would be the same as the number of threads per block. However, for a 4x4 window, the block size would need to be large enough to cover the window.
-
-Wait, but each thread processes one element and loads 16 elements. So the block size is the number of threads per block, and each thread loads 16 elements. The kernel can be written with a block size of 256 threads, each handling one element. Then, each thread would load 16 elements from the flattened spatial tensor. The kernel would compute the max of these 16 values and store it.
-
-But the kernel must also handle the padding. The padding is added before the pooling, so the original tensor has a border of zeros. The kernel can assume that the tensor is padded with zeros, so any out-of-bounds access would be masked with a default value (zero). However, in the original PyTorch MaxPool2d, the padding is handled by the library, so the kernel can treat the tensor as if it has the required padding, and any access beyond the original tensor size would be masked.
-
-So the kernel steps would be:
-
-1. For each thread (program), compute the linear index i = program_id * BLOCK_SIZE + lane_id, where lane_id is the thread index within the block (0..BLOCK_SIZE-1).
-
-2. Compute the 1D index in the flattened spatial tensor: flat_idx = i.
-
-3. Compute the 4x4 window indices for flat_idx. The window spans from flat_idx - (W*3) - 3 to flat_idx, but because the stride is 1, the window is a block of 16 consecutive elements spaced by the stride. Wait, no. The window is not consecutive because the stride is 1, but the kernel moves by 1 each time. The window for flat_idx is the 4x4 block that ends at flat_idx. The exact indices can be generated by adding offsets of (0,1,2,3) to the row and column indices.
-
-But how to compute the row and column indices from flat_idx. The row index is flat_idx // W, the column index is flat_idx % W. Then, the window rows are max(0, row - 3) to row, and columns are max(0, col - 3) to col. However, because the padding is 1, the window is always 4x4, and the kernel can safely load the 16 elements without checking bounds because the padding is already present.
-
-But how to compute the 16 offsets for each element. The kernel can generate them as follows:
-
-- For each of the 4 rows in the window, generate a row offset (0,1,2,3)
-- For each of the 4 columns in the window, generate a column offset (0,1,2,3)
-- The total offsets are 4*4 = 16, which can be generated using a 2D grid.
-
-In Triton, the thread can generate these offsets using a helper function. Alternatively, the kernel can compute them as a linear index. For example, for each element, the kernel can compute the row and column indices, then generate the 16 possible (row_offset, col_offset) pairs. The linear offset for each element in the window is (row + row_offset) * W + (col + col_offset). This gives the 16 elements in the window.
-
-Once the 16 offsets are computed, the kernel loads each element, masks any that are out of bounds (but with padding, they should be zeros), computes the max, and stores the result.
-
-The kernel would also need to handle the channel dimension. The input tensor is (B,C,H,W). The kernel processes each element of the flattened spatial tensor for each channel. However, the kernel is launched for the entire tensor, so the channel dimension is handled implicitly by the contiguous layout.
-
-Putting this together, the kernel would look like:
-
-- Load the current element (flat_idx) from the input tensor.
-- Compute row and column indices.
-- Generate the 16 offsets for the 4x4 window.
-- Load each of the 16 elements, applying a mask if the offset is out of bounds (but padding zeros are already present).
-- Compute the max of these 16 values.
-- Store the max to the output tensor at the same flat_idx.
-
-The Triton kernel would be a 1D kernel, each thread handling one element, loading 16 elements, computing the max, and storing the result.
-
-Now, considering the hardware constraints: the A100 has 32 registers per thread, 164KB shared memory per SM, and 255 registers per thread. The kernel uses a block size of 256 threads, each thread loads 16 elements. The total registers needed would be minimal because the kernel only stores the 16 values in registers and computes the max. Shared memory is not needed because the kernel processes each element independently; the max can be computed in registers.
-
-The mask is important because the kernel must not read out-of-bounds elements. However, with padding, the kernel can safely read the 16 elements without a mask, but the mask is still required to handle any cases where the window extends beyond the original tensor (e.g., when the window is near the edge and the padding is not sufficient). The mask would be generated based on the computed row and column indices.
-
-The grid size is determined by the total number of elements divided by the block size. For 8,388,608 elements and a block size of 256, the grid would be 32,768 blocks, which is well within the 32 blocks per SM limit because each block is processed by a separate SM.
-
-Finally, the wrapper function triton_maxpool2d would ensure the tensors are on the GPU, contiguous, and allocate the output tensor. The kernel is launched with the computed grid and block size, and the output is returned.
-
-Potential issues to consider:
-
-- Padding handling: The kernel assumes that the tensor is padded with zeros. The original PyTorch MaxPool2d with padding=1 adds a border of zeros, so the kernel can safely read those values without a mask, but the mask is still required to avoid out-of-bounds reads in cases where the window would go beyond the original tensor (e.g., when the window is at the very edge). The mask is generated using the row and column indices.
-
-- Memory coalescing: The kernel loads the 16 elements for each thread. Because the offsets are contiguous in the flattened dimension, the loads are coalesced across threads in the same block, leading to efficient memory access.
-
-- Tensor core utilization: The kernel uses fp32 because the MaxPool2d output is fp32. The A100 can use FP32 tensor cores for the max operation, but the max is a simple elementwise reduction, so tensor cores may not be used. However, the kernel is still efficient because it processes each element with a few loads and a reduction.
-
-- Autotuning: The kernel uses a fixed block size of 256, but in practice, the optimal block size could be tuned. The autotune decorator can be applied to search for the best block size for the given input sizes.
-
-- Register pressure: Each thread loads 16 elements, which are stored in registers and then reduced. The total registers required are manageable because the reduction is done in a few registers, and the kernel does not use many temporary registers.
-
-- Shared memory: Not needed because the kernel processes each element independently.
-
-With these considerations, the custom Triton kernel should replace the PyTorch MaxPool2d efficiently, providing a speedup by reducing the overhead of the library call and leveraging the parallelism of the GPU.
-</think>
-
-```python
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime import triton_helpers
-import torch.nn.functional as F
+from torch._inductor.runtime.triton_helpers import math as tl_math
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_max_pool2d_0(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK: tl.
-    constexpr):
+def triton_poi_fused_max_pool2d_with_indices_0(in_ptr0, out_ptr0, out_ptr1,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 536870912
     xoffset = tl.program_id(0) * XBLOCK
-    xoffset + tl.arange(0, XBLOCK)[:, None]
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    xindex = xoffset + tl.arange(0, rnumel)[:]
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 512
+    x1 = xindex // 512 % 512
+    x3 = xindex // 32768 % 64
+    x4 = xindex // 2097152 % 32
+    x5 = xindex // 67108864
+    tmp0 = tl.load(in_ptr0 + x2, xmask)
+    tmp1 = tl.load(in_ptr0 + (4 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp3 = tl.load(in_ptr0 + (1 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp6 = tl.load(in_ptr0 + (2 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp9 = tl.load(in_ptr0 + (3 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp12 = tl.load(in_ptr0 + (5 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp15 = tl.load(in_ptr0 + (6 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp18 = tl.load(in_ptr0 + (7 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp21 = tl.load(in_ptr0 + (9 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp24 = tl.load(in_ptr0 + (10 + x0 + 512 * x1 + 2048 * x3 +
+        1048576 * x4 + 4194304 * x5), xmask, other=0.0)
+    tmp27 = tl.load(in_ptr0 + (11 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp30 = tl.load(in_ptr0 + (12 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp33 = tl.load(in_ptr0 + (13 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp36 = tl.load(in_ptr0 + (14 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp39 = tl.load(in_ptr0 + (15 + x0 + 512 * x1 + 2048 * x3 + 1048576 * x4 +
+        4194304 * x5), xmask, other=0.0)
+    tmp2 = tmp1 > tmp3
+    tmp4 = tl.where(tmp2, tmp1, tmp3)
+    tmp5 = tmp4 > tmp6
+    tmp7 = tl.where(tmp5, tmp4, tmp6)
+    tmp8 = tmp7 > tmp9
+    tmp10 = tl.where(tmp8, tmp7, tmp9)
+    tmp11 = tmp10 > tmp12
+    tmp13 = tl.where(tmp11, tmp10, tmp12)
+    tmp14 = tmp13 > tmp15
+    tmp16 = tl.where(tmp14, tmp13, tmp15)
+    tmp17 = tmp16 > tmp18
+    tmp19 = tl.where(tmp17, tmp16, tmp18)
+    tmp20 = tmp19 > tmp21
+    tmp22 = tl.where(tmp20, tmp19, tmp21)
+    tmp23 = tmp22 > tmp24
+    tmp25 = tl.where(tmp23, tmp22, tmp24)
+    tmp26 = tmp25 > tmp27
+    tmp28 = tl.where(tmp26, tmp25, tmp27)
+    tmp29 = tmp28 > tmp30
+    tmp31 = tl.where(tmp29, tmp28, tmp30)
+    tmp32 = tmp31 > tmp33
+    tmp34 = tl.where(tmp32, tmp31, tmp33)
+    tmp35 = tmp34 > tmp36
+    tmp37 = tl.where(tmp35, tmp34, tmp36)
+    tmp38 = tmp37 > tmp39
+    tmp40 = tl.where(tmp38, tmp37, tmp39)
+    tmp41 = tmp40 > tmp0
+    tmp42 = tl.where(tmp41, tmp40, tmp0)
+    tmp43 = tmp40 == tmp0
+    tmp44 = tmp38 & tmp43
+    tmp45 = tmp35 & tmp44
+    tmp46 = tmp32 & tmp45
+    tmp47 = tmp31 == tmp0
+    tmp48 = tmp30 & tmp47
+    tmp49 = tmp29 & tmp48
+    tmp50 = tmp28 & tmp49
+    tmp51 = tmp27 == tmp0
+    tmp52 = tmp26 & tmp51
+    tmp53 = tmp25 & tmp52
+    tmp54 = tmp24 == tmp0
+    tmp55 = tmp23 & tmp54
+    tmp56 = tmp22 & tmp55
+    tmp57 = tmp21 == tmp0
+    tmp58 = tmp20 & tmp57
+    tmp59 = tmp19 & tmp58
+    tmp60 = tmp18 == tmp0
+    tmp61 = tmp17 & tmp60
+    tmp62 = tmp16 & tmp61
+    tmp63 = tmp15 == tmp0
+    tmp64 = tmp14 & tmp63
+    tmp65 = tmp13 & tmp64
+    tmp66 = tmp12 == tmp0
+    tmp67 = tmp11 & tmp66
+    tmp68 = tmp10 & tmp67
+    tmp69 = tmp9 == tmp0
+    tmp70 = tmp8 & tmp69
+    tmp71 = tmp7 & tmp70
+    tmp72 = tmp6 == tmp0
+    tmp73 = tmp5 & tmp72
+    tmp74 = tmp4 == tmp0
+    tmp75 = tmp3 == tmp0
+    tmp76 = tmp2 & tmp75
+    tmp77 = tl.where(tmp76, tmp2, tmp75)
+    tmp78 = tmp77 & tmp74
+    tmp79 = tl.where(tmp78, tmp77, tmp74)
+    tmp80 = tmp79 & tmp73
+    tmp81 = tl.where(tmp80, tmp79, tmp73)
+    tmp82 = tmp81 & tmp72
+    tmp83 = tl.where(tmp82, tmp81, tmp72)
+    tmp84 = tmp83 & tmp71
+    tmp85 = tl.where(tmp84, tmp83, tmp71)
+    tmp86 = tmp85 & tmp68
+    tmp87 = tl.where(tmp86, tmp85, tmp68)
+    tmp88 = tmp87 & tmp65
+    tmp89 = tl.where(tmp88, tmp87, tmp65)
+    tmp90 = tmp89 & tmp62
+    tmp91 = tl.where(tmp90, tmp89, tmp62)
+    tmp92 = tmp91 & tmp60
+    tmp93 = tl.where(tmp92, tmp91, tmp60)
+    tmp94 = tmp93 & tmp59
+    tmp95 = tl.where(tmp94, tmp93, tmp59)
+    tmp96 = tmp95 & tmp56
+    tmp97 = tl.where(tmp96, tmp95, tmp56)
+    tmp98 = tmp97 & tmp53
+    tmp99 = tl.where(tmp98, tmp97, tmp53)
+    tmp100 = tmp99 & tmp50
+    tmp101 = tl.where(tmp100, tmp99, tmp50)
+    tmp102 = tmp101 & tmp49
+    tmp103 = tl.where(tmp102, tmp101, tmp49)
+    tmp104 = tmp103 & tmp46
+    tmp105 = tl.where(tmp104, tmp103, tmp46)
+    tmp106 = tmp105 & tmp40
+    tmp107 = tl.where(tmp106, tmp105, tmp40)
+    tmp108 = tmp107 & tmp39
+    tmp109 = tl.where(tmp108, tmp107, tmp39)
+    tmp110 = tmp109 & tmp36
+    tmp111 = tl.where(tmp109, tmp109, tmp36)
+    tmp112 = tmp111 & tmp35
+    tmp113 = tl.where(tmp112, tmp111, tmp35)
+    tmp114 = tmp113 & tmp32
+    tmp115 = tl.where(tmp114, tmp113, tmp32)
+    tmp116 = tmp115 & tmp31
+    tmp117 = tl.where(tmp116, tmp115, tmp31)
+    tmp118 = tmp117 & tmp30
+    tmp119 = tl.where(tmp118, tmp117, tmp30)
+    tmp120 = tmp119 & tmp29
+    tmp121 = tl.where(tmp120, tmp119, tmp29)
+    tmp122 = tmp121 & tmp28
+    tmp123 = tl.where(tmp122, tmp121, tmp28)
+    tmp124 = tmp123 & tmp27
+    tmp125 = tl.where(tmp124, tmp123, tmp27)
+    tmp126 = tmp125 & tmp26
+    tmp127 = tl.where(tmp126, tmp125, tmp26)
+    tmp128 = tmp127 & tmp25
+    tmp129 = tl.where(tmp128, tmp127, tmp25)
+    tmp130 = tmp129 & tmp24
+    tmp131 = tl.where(tmp130, tmp129, tmp24)
+    tmp132 = tmp131 & tmp23
+    tmp133 = tl.where(tmp132, tmp131, tmp23)
+    tmp134 = tmp133 & tmp22
+    tmp135 = tl.where(tmp134, tmp133, tmp22)
+    tmp136 = tmp135 & tmp21
+    tmp137 = tl.where(tmp136, tmp135, tmp21)
+    tmp138 = tmp137 & tmp20
+    tmp139 = tl.where(tmp138, tmp137, tmp20)
+    tmp140 = tmp139 & tmp19
+    tmp141 = tl.where(tmp140, tmp139, tmp19)
+    tmp142 = tmp141 & tmp18
+    tmp143 = tl.where(tmp142, tmp141, tmp18)
+    tmp144 = tmp143 & tmp17
+    tmp145 = tl.where(tmp144, tmp143, tmp17)
+    tmp146 = tmp145 & tmp16
+    tmp147 = tl.where(tmp146, tmp145, tmp16)
+    tmp148 = tmp147 & tmp15
+    tmp149 = tl.where(tmp148, tmp147, tmp15)
+    tmp150 = tmp149 & tmp14
+    tmp151 = tl.where(tmp150, tmp149, tmp14)
+    tmp152 = tmp151 & tmp13
+    tmp153 = tl.where(tmp152, tmp151, tmp13)
+    tmp154 = tmp153 & tmp12
+    tmp155 = tl.where(tmp154, tmp153, tmp12)
+    tmp156 = tmp155 & tmp11
+    tmp157 = tl.where(tmp156, tmp155, tmp11)
+    tmp158 = tmp157 & tmp10
+    tmp159 = tl.where(tmp158, tmp157, tmp10)
+    tmp160 = tmp159 & tmp9
+    tmp161 = tl.where(tmp160, tmp159, tmp9)
+    tmp162 = tmp161 & tmp8
+    tmp163 = tl.where(tmp162, tmp161, tmp8)
+    tmp164 = tmp163 & tmp7
+    tmp165 = tl.where(tmp164, tmp163, tmp7)
+    tmp166 = tmp165 & tmp6
+    tmp167 = tl.where(tmp166, tmp165, tmp6)
+    tmp168 = tmp167 & tmp5
+    tmp169 = tl.where(tmp168, tmp167, tmp5)
+    tmp170 = tmp169 & tmp4
+    tmp171 = tl.where(tmp170, tmp169, tmp4)
+    tmp172 = tmp171 & tmp3
+    tmp173 = tl.where(tmp172, tmp171, tmp3)
+    tmp174 = tmp173 & tmp2
+    tmp175 = tl.where(tmp174, tmp173, tmp2)
+    tmp176 = tmp175 & tmp1
+    tmp177 = tl.where(tmp176, tmp175, tmp1)
+    tmp178 = tmp177 == tmp0
+    tmp179 = tmp176 & tmp178
+    tmp180 = tl.where(tmp179, tmp177, tmp178)
+    tmp181 = tmp180 == tmp0
+    tmp182 = tmp179 & tmp181
+    tmp183 = tl.where(tmp182, tmp180, tmp181)
+    tmp184 = tmp183 == tmp0
+    tmp185 = tmp182 & tmp184
+    tmp186 = tl.where(tmp185, tmp183, tmp184)
+    tmp187 = tmp186 == tmp0
+    tmp188 = tmp185 & tmp187
+    tmp189 = tl.where(tmp188, tmp186, tmp187)
+    tmp190 = tmp189 == tmp0
+    tmp191 = tmp188 & tmp190
+    tmp192 = tl.where(tmp191, tmp189, tmp190)
+    tmp193 = tmp192 == tmp0
+    tmp194 = tmp191 & tmp193
+    tmp195 = tl.where(tmp194, tmp192, tmp193)
+    tmp196 = tmp195 == tmp0
+    tmp197 = tmp194 & tmp196
+    tmp198 = tl.where(tmp197, tmp195, tmp196)
+    tmp199 = tmp198 == tmp0
+    tmp200 = tmp197 & tmp199
+    tmp201 = tl.where(tmp200, tmp198, tmp199)
+    tmp202 = tmp201 == tmp0
+    tmp203 = tmp200 & tmp202
+    tmp204 = tl.where(tmp203, tmp201, tmp202)
+    tmp205 = tmp204 == tmp0
+    tmp206 = tmp203 & tmp205
+    tmp207 = tl.where(tmp206, tmp204, tmp205)
+    tmp208 = tmp207 == tmp0
+    tmp209 = tmp206 & tmp208
+    tmp210 = tl.where(tmp209, tmp207, tmp208)
+    tmp211 = tmp210 == tmp0
+    tmp212 = tmp209 & tmp211
+    tmp213 = tl.where(tmp212, tmp210, tmp211)
+    tmp214 = tmp213 == tmp0
+    tmp215 = tmp212 & tmp214
+    tmp216 = tl.where(tmp215, tmp213, tmp214)
+    tmp217 = tmp216 == tmp0
+    tmp218 = tmp215 & tmp217
+    tmp219 = tl.where(tmp218, tmp216, tmp217)
+    tmp220 = tmp219 == tmp0
+    tmp221 = tmp218 & tmp220
+    tmp222 = tl.where(tmp221, tmp219, tmp220)
+    tmp223 = tmp222 == tmp0
+    tmp224 = tmp221 & tmp223
+    tmp225 = tl.where(tmp224, tmp222, tmp223)
+    tmp226 = tmp225 == tmp0
+    tmp227 = tmp224 & tmp226
+    tmp228 = tl.where(tmp227, tmp225, tmp226)
+    tmp229 = tmp228 == tmp0
+    tmp230 = tmp227 & tmp229
+    tmp231 = tl.where(tmp230, tmp228, tmp229)
+    tmp232 = tmp231 == tmp0
+    tmp233 = tmp230 & tmp232
+    tmp234 = tl.where(tmp233, tmp231, tmp232)
+    tmp235 = tmp234 == tmp0
+    tmp236 = tmp233 & tmp235
+    tmp237 = tl.where(tmp236, tmp234, tmp235)
+    tmp238 = tmp237 == tmp0
+    tmp239 = tmp236 & tmp238
+    tmp240 = tl.where(tmp239, tmp237, tmp238)
+    tmp241 = tmp240 == tmp0
+    tmp242 = tmp239 & tmp241
+    tmp243 = tl.where(tmp242, tmp240, tmp241)
+    tmp244 = tmp243 == tmp0
+    tmp245 = tmp242 & tmp244
+    tmp246 = tl.where(tmp245, tmp243, tmp244)
+    tmp247 = tmp246 == tmp0
+    tmp248 = tmp245 & tmp247
+    tmp249 = tl.where(tmp248, tmp246, tmp247)
+    tmp250 = tmp249 == tmp0
+    tmp251 = tmp248 & tmp250
+    tmp252 = tl.where(tmp251, tmp249, tmp250)
+    tmp253 = tmp252 == tmp0
+    tmp254 = tmp251 & tmp253
+    tmp255 = tl.where(tmp254, tmp252, tmp253)
+    tmp256 = tmp255 == tmp0
+    tmp257 = tmp254 & tmp256
+    tmp258 = tl.where(tmp257, tmp255, tmp256)
+    tmp259 = tmp258 == tmp0
+    tmp260 = tmp257 & tmp259
+    tmp261 = tl.where(tmp260, tmp258, tmp259)
+    tmp262 = tmp261 == tmp0
+    tmp263 = tmp260 & tmp262
+    tmp264 = tl.where(tmp263, tmp261, tmp262)
+    tmp265 = tmp264 == tmp0
+    tmp266 = tmp263 & tmp265
+    tmp267 = tl.where(tmp266, tmp264, tmp265)
+    tmp268 = tmp267 == tmp0
+    tmp269 = tmp266 & tmp268
+    tmp270 = tl.where(tmp269, tmp267, tmp268)
+    tmp271 = tmp270 == tmp0
+    tmp272 = tmp269 & tmp271
+    tmp273 = tl.where(tmp272, tmp270, tmp271)
+    tmp274 = tmp273 == tmp0
+    tmp275 = tmp272 & tmp274
+    tmp276 = tl.where(tmp275, tmp273, tmp274)
+    tmp277 = tmp276 == tmp0
+    tmp278 = tmp275 & tmp277
+    tmp279 = tl.where(tmp278, tmp276, tmp277)
+    tmp280 = tmp279 == tmp0
+    tmp281 = tmp278 & tmp280
+    tmp282 = tl.where(tmp281, tmp279, tmp280)
+    tmp283 = tmp282 == tmp0
+    tmp284 = tmp281 & tmp283
+    tmp285 = tl.where(tmp284, tmp282, tmp283)
+    tmp286 = tmp285 == tmp0
+    tmp287 = tmp284 & tmp286
+    tmp288 = tl.where(tmp287, tmp285, tmp286)
+    tmp289 = tmp288 == tmp0
+    tmp290 = tmp287 & tmp289
+    tmp291 = tl.where(tmp290, tmp288, tmp289)
+    tmp292 = tmp291 == tmp0
+    tmp293 = tmp290 & tmp292
+    tmp294 = tl.where(tmp293, tmp291, tmp292)
+    tmp295 = tmp294 == tmp0
+    tmp296 = tmp293 & tmp295
+    tmp297 = tl.where(tmp296, tmp294, tmp295)
+    tmp298 = tmp297 == tmp0
+    tmp299 = tmp296 & tmp298
+    tmp300 = tl.where(tmp299, tmp297, tmp298)
+    tmp301 = tmp300 == tmp0
+    tmp302 = tmp299 & tmp301
+    tmp303 = tl.where(tmp302, tmp300, tmp301)
+    tmp304 = tmp303 == tmp0
+    tmp305 = tmp302 & tmp304
+    tmp306 = tl.where(tmp305, tmp303, tmp304)
+    tmp307 = tmp306 == tmp0
+    tmp308 = tmp305 & tmp307
+    tmp309 = tl.where(tmp308, tmp306, tmp307)
+    tmp310 = tmp309 == tmp0
+    tmp311 = tmp308 & tmp310
+    tmp312 = tl.where(tmp311, tmp309, tmp310)
+    tmp313 = tmp312 == tmp0
+    tmp314 = tmp311 & tmp313
+    tmp315 = tl.where(tmp314, tmp312, tmp313)
+    tmp316 = tmp315 == tmp0
+    tmp317 = tmp314 & tmp316
+    tmp318 = tl.where(tmp317, tmp315, tmp316)
+    tmp319 = tmp318 == tmp0
+    tmp320 = tmp317 & tmp319
+    tmp321 = tl.where(tmp320, tmp318, tmp319)
+    tmp322 = tmp321 == tmp0
+    tmp323 = tmp320 & tmp322
+    tmp324 = tl.where(tmp323, tmp321, tmp322)
+    tmp325 = tmp324 == tmp0
+    tmp326 = tmp323 & tmp325
+    tmp327 = tl.where(tmp326, tmp324, tmp325)
+    tmp328 = tmp327 == tmp0
+    tmp329 = tmp326 & tmp328
+    tmp330 = tl.where(tmp329, tmp327, tmp328)
+    tmp331 = tmp330 == tmp0
+    tmp332 = tmp329 & tmp331
+    tmp333 = tl.where(tmp332, tmp330, tmp331)
+    tmp334 = tmp333 == tmp0
+    tmp335 = tmp332 & tmp334
+    tmp336 = tl.where(tmp335, tmp333, tmp334)
+    tmp337 = tmp336 == tmp0
+    tmp338 = tmp335 & tmp337
+    tmp339 = tl.where(tmp338, tmp336, tmp337)
+    tmp340 = tmp339 == tmp0
+    tmp341 = tmp338 & tmp340
+    tmp342 = tl.where(tmp341, tmp339, tmp340)
+    tmp343 = tmp342 == tmp0
+    tmp344 = tmp341 & tmp343
+    tmp345 = tl.where(tmp344,

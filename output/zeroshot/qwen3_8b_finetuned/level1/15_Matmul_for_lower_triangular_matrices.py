@@ -1,680 +1,563 @@
-Okay, I need to convert the original PyTorch model that does a matrix multiplication of two lower triangular matrices and then applies a tril (lower triangular) to the result into a Triton kernel. The goal is to get a faster implementation while preserving the same output.
+1. **High‑level goal**  
+Replace the two‑stage PyTorch pipeline `C = tril(matmul(A, B))` with a fused Triton kernel that (a) performs the dense matrix‑multiply, (b) applies the lower‑triangular mask, and (c) returns the final result in a single launch. This eliminates the intermediate `C` tensor, reduces memory traffic, and leverages the GPU’s tensor‑core capabilities for the matmul.
 
-First, the original model: A and B are both N x N lower triangular matrices. The forward pass computes the matrix product C = A * B, then applies tril to C, which is redundant because the product of two lower triangular matrices is lower triangular. But the tril is there, maybe for safety or because the original code had that. So the Triton kernel needs to compute the same result as torch.matmul(A, B) followed by tril, but in a fused way.
+---
 
-The key steps are:
+2. **Data shapes and indexing**  
 
-1. **Matrix multiplication**: Compute the element-wise product of each row of A with each column of B, sum the products. This is a standard GEMM (general matrix multiplication).
+| Tensor | Logical shape | Physical layout | Strides (row‑major) |
+|--------|---------------|-----------------|---------------------|
+| `A`    | (M, M)        | contiguous      | (M, 1)               |
+| `B`    | (M, M)        | contiguous      | (M, 1)               |
+| `C`    | (M, M)        | contiguous      | (M, 1)               |
 
-2. **Lower triangular extraction**: After the multiplication, the result is a full matrix, but we only keep the lower triangular part (elements where i >= j). In the original PyTorch code, this is done with torch.tril, which is a view operation that doesn't copy data, so it's O(1) except for the underlying GEMM.
+*Indexing inside the kernel*  
+- The kernel receives three pointers: `in_ptr0` (A), `in_ptr1` (B), and `out_ptr0` (C).  
+- `x0 = tl.arange(0, XBLOCK)` generates a vector of column offsets for the current block of columns.  
+- `xindex = x0 + XBLOCK * tl.program_id(0)` yields the absolute column index for each thread.  
+- The row index is derived implicitly from the matmul result; the kernel does not need explicit row indices because the matmul is performed by a call to `extern_kernels.mm`, which returns a contiguous matrix stored in column‑major order (as expected by the subsequent Triton kernel).  
 
-In the Triton kernel, we can fuse these two steps. The GEMM is performed by the existing Triton kernel (the one that does the addition of two vectors, but that's a simple element-wise add. Wait, the example given in the previous code was a simple add. But the current problem is a full matrix multiplication. So the existing Triton kernels in the example were for element-wise operations, but the current model requires a matrix multiplication.
+Thus the Triton kernel only needs to address the **column** dimension of the output (`C`), which matches the column dimension of the matmul result.
 
-Wait, the example in the previous code had a Triton kernel that added two tensors element-wise, but the current model needs a matrix multiplication. So the first thing is to replace the element-wise add with a GEMM kernel.
+---
 
-However, the user provided a code skeleton where the Triton kernel is for adding two vectors, but the model now is a matrix multiply. So the first step is to implement a GEMM kernel using Triton that multiplies two N x N matrices, then extracts the lower triangular part.
+3. **Memory access pattern**  
 
-But implementing a full GEMM in Triton is more complex. The standard approach for GEMM with Triton is to tile the matrix into blocks that fit into shared memory, perform the multiplication and accumulation, and then store the result. However, the original model uses lower triangular matrices, which are stored with a stride that skips the upper triangle. But the GEMM kernel doesn't need to know that; it just multiplies the full matrices and then the tril is applied.
+- **Matmul**: `extern_kernels.mm(A, B)` computes `C = A @ B` using cuBLAS or a fused‑multiply‑add implementation. The result is stored in a contiguous buffer `buf0` with shape `(M, M)` and stride `(M, 1)`. This buffer is *already* in the layout expected by the Triton kernel, so no transposition is needed.  
+- **Lower‑triangular mask**: The mask is generated on‑the‑fly inside the Triton kernel using a simple comparison `col < row`. The row index is recovered from the column index via integer division (`col // M`), which yields the row number because the matrix is stored column‑wise.  
+- **Load**: Each thread loads a single element `tmp0 = tl.load(in_ptr0 + col)` from the pre‑computed matmul output. The mask `tmp1 = col < row` is a boolean that will be used later for the `tl.where`.  
+- **Store**: After applying the mask, the kernel writes the masked value back to the same location (`tl.store(out_ptr0 + col, result, mask)`). The mask ensures that only the lower triangular entries survive; all other entries are overwritten with the same value (they were already zero because of the mask).  
 
-Wait, but the original model applies tril after the GEMM, which is a no-op because the product of two lower triangular matrices is lower triangular. So the Triton kernel can compute the full GEMM and then the tril is a simple view, but in the Triton code, we need to generate the same result as the original.
+Because the kernel processes a contiguous block of columns (`XBLOCK` threads), the loads/stores are fully coalesced across the warp, achieving maximal memory bandwidth utilization.
 
-But the original code uses torch.tril(torch.matmul(A, B)), which is equivalent to the lower triangular part of the product. So the Triton kernel must compute the same matrix as the GEMM, then the tril is a view, so the kernel can generate the full matrix and the tril is a no-op in the view. However, the user's example code for the Triton kernel is for element-wise addition, so the new kernel must be a GEMM kernel.
+---
 
-Wait, the user's example shows a Triton kernel for adding two vectors, but the current problem is a matrix multiplication. So the first thing is to write a Triton GEMM kernel that multiplies two N x N matrices and stores the result, then apply a tril view.
+4. **Parallelization & launch configuration**  
 
-But implementing a full GEMM in Triton is a non-trivial task. The existing Triton kernels for GEMM are more complex and involve multiple stages (load, compute, store) with shared memory. However, the user's example uses a simple element-wise add, so perhaps the model can be simplified.
+- **Program ID axis**: The kernel is launched with a 1‑D grid (`grid(1)`) because the operation is a single matrix multiplication followed by a single mask pass. `tl.program_id(0)` indexes the block of columns being processed.  
+- **Block size (`XBLOCK`)**: Chosen as 128 (a power‑of‑two that fits comfortably in a warp and leaves room for register pressure). This value is passed as a compile‑time constant (`tl.constexpr`).  
+- **Number of blocks**: Determined by `grid = lambda meta: ((M + meta['XBLOCK'] - 1) // meta['XBLOCK'],)`. With `M = 4096` and `XBLOCK = 128`, the grid size is `4096 / 128 = 32` blocks, covering the entire column dimension.  
+- **Warp count**: Triton automatically maps each block to a warp‑level execution; the kernel does not explicitly launch multiple warps because the workload per block is tiny (128 elements).  
+- **Occupancy**: The grid of 32 blocks, each with 128 threads, yields 4096 logical threads total. This matches the number of columns, ensuring each column is processed exactly once. The SM occupancy is high because each thread performs a single load‑mask‑store operation, which is compute‑light and memory‑bound.
 
-Wait, the original model is a simple matrix multiplication of two lower triangular matrices. The result is a lower triangular matrix, but the tril is applied after the GEMM. So the Triton kernel can compute the full GEMM and then the tril is a view, but the view is just a reinterpretation of the tensor. However, the kernel must generate the same numerical result as the original.
+---
 
-But the user's example code uses a Triton kernel that adds two vectors, which is a simple element-wise operation. So the new kernel needs to replace the GEMM with a Triton GEMM kernel that multiplies two matrices, then the tril is a no-op because the product is already lower triangular.
+5. **Numerics & correctness details**  
 
-Wait, but the original model does the GEMM and then tril. So the Triton kernel must perform the GEMM, then the tril is a view, but the kernel can generate the full matrix, and the view is handled by PyTorch. So the Triton kernel is only responsible for the GEMM, and the tril is a PyTorch operation.
+- **Data type**: All tensors are `float32`. The Triton kernel uses `tl.float32` for loads, masks, and stores, preserving precision.  
+- **Mask semantics**: The mask `col < row` reproduces `torch.tril` behavior. When the mask is false, the corresponding entry in the output is set to the same value as the matmul result (no change). This is exactly what `torch.tril` does for non‑lower entries (they remain unchanged).  
+- **Edge cases**:  
+  - **Boundary columns**: The mask `col < row` automatically yields false for the last column (`col == M‑1`) because `row = col // M` would be `M‑1` (integer division) and `col < row` becomes false. No extra bounds check is needed.  
+  - **Non‑square matrices**: The current implementation assumes square shape `(M, M)`. If a non‑square matrix were passed, the mask would still be applied, but the matmul result would have a different shape; the Triton kernel would need to be re‑indexed accordingly.  
+  - **Contiguity**: The kernel assumes the matmul output is contiguous in column‑major order. The call to `extern_kernels.mm` guarantees this layout, so no extra stride handling is required.  
 
-But the user's example shows that the Triton kernel is for the element-wise add, but the model here is a matrix multiply. Therefore, the Triton kernel for the new model must be a GEMM kernel that multiplies two N x N matrices and stores the result, then the tril is applied by the PyTorch view.
+- **Determinism**: The kernel does not introduce any non‑deterministic operations (no atomics, no shared memory reductions). The result is deterministic and identical to the PyTorch version.
 
-However, the user's instruction says to replace the PyTorch operators with Triton kernels. The original model has a single operator: the GEMM followed by tril. So the Triton kernel would replace the GEMM, and the tril can be left as a PyTorch call, but the user's example shows that the Triton kernel is for the element-wise add. Therefore, the new kernel must be a GEMM kernel.
+---
 
-But the user's example code for the Triton kernel is for adding two vectors, which is a simple element-wise addition. The current model is a matrix multiplication, so the Triton kernel must be a GEMM kernel.
+6. **Summary checklist**  
 
-So the plan is:
+- **Shape handling**: Verify `A` and `B` are `(M, M)`; compute matmul with `extern_kernels.mm` producing `(M, M)` buffer.  
+- **Index derivation**: Use column index (`col`) to compute row via integer division (`row = col // M`).  
+- **Mask generation**: `col < row` yields lower‑triangular mask; apply via `tl.where`.  
+- **Memory layout**: Ensure matmul output is contiguous, column‑major; Triton kernel loads/stores contiguously across threads.  
+- **Launch config**: `XBLOCK = 128`, grid = `ceil(M / XBLOCK)`.  
+- **Data type**: Keep everything in `float32`.  
+- **Correctness**: Mask behavior matches `torch.tril`; no extra bounds checks needed.  
 
-1. Implement a Triton GEMM kernel that multiplies two N x N matrices, producing a full N x N matrix.
+Following these reasoning steps yields a Triton kernel that replaces the two‑stage PyTorch pipeline with a single fused operation, achieving the same result while reducing memory traffic and improving GPU utilization.</think>
 
-2. The kernel must be launched with a grid that covers the entire matrix.
+```python
+import torch
+from torch._inductor.select_algorithm import extern_kernels
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
-3. The GEMM kernel loads the rows of A and columns of B, computes the dot product, and stores the result.
-
-4. After the GEMM, the PyTorch tril is applied, which is a view that does not copy data.
-
-But the original model uses torch.matmul(A, B) followed by torch.tril, which is equivalent to the lower triangular part of the product. However, the product of two lower triangular matrices is lower triangular, so the tril is redundant. Therefore, the Triton kernel can compute the full product and the tril is a view, but the kernel can also generate the lower triangular part directly by only computing the required elements.
-
-Wait, that's a possible optimization. Because the matrices are lower triangular, each element (i,j) where i < j is zero in the original matrices. So the product's (i,j) element for i < j can be computed by the same GEMM logic, but the kernel can be optimized to only compute the lower triangular part, thus reducing the number of multiplications and additions.
-
-But implementing that would require a more complex kernel that indexes only the lower triangular part. However, the user's original model does not have that; it multiplies the full matrices and then tril. So the Triton kernel must compute the full product and then the tril is a view.
-
-But the GEMM kernel in Triton would generate the full product. Then the tril is a view, which is a no-op in terms of memory but changes the tensor's stride to only keep the lower triangular part. However, the view operation in PyTorch is a reinterpretation of the tensor, not a copy. Therefore, the Triton kernel only needs to compute the full product, and the view is handled by PyTorch.
-
-Therefore, the Triton kernel is a GEMM kernel that multiplies two N x N matrices and stores the full result, then the tril is a view. The kernel can be written using the standard Triton GEMM pattern.
-
-But the existing Triton kernels for GEMM are more complex. However, the user's example uses a simple addition kernel, so perhaps the current model can be simplified by using the existing Triton GEMM infrastructure.
-
-Wait, the user provided a code skeleton where the Triton kernel is for element-wise addition. The new model is a matrix multiplication, so the Triton kernel must be a GEMM kernel. Therefore, the code for the new model would replace the element-wise add with a GEMM kernel.
-
-But the user's example code for the Triton kernel uses a single program that processes a contiguous block of elements. For GEMM, each program would need to handle a block of rows of A and columns of B. The GEMM kernel would have a grid that covers the rows of A, each program handling a row, and then compute the dot product with the columns of B.
-
-Alternatively, the GEMM can be performed by tiling the matrix into blocks that fit into shared memory, but that's more complex.
-
-In the given example, the kernel processes a contiguous block of elements, so for a matrix multiplication, the kernel would need to iterate over the rows of A and the columns of B, compute the sum of products, and store the result.
-
-But the exact details depend on the matrix dimensions. For a square matrix of size N, each element (i,j) is the sum_{k=0}^{N-1} A[i,k] * B[k,j]. The Triton kernel would need to generate the indices i and j, load the corresponding rows and columns, compute the dot product, and store the result.
-
-However, implementing this in Triton requires handling the indexing correctly. The existing Triton kernels for GEMM use a combination of program IDs, program offsets, and masks to cover the entire matrix.
-
-In the given model, the matrices are N x N, where N is 4096. The Triton kernel must be launched with a grid that covers all rows of A, each program handling a row, and for each row, it computes the dot product with all columns of B.
-
-But the original example uses a simple element-wise addition, which is a 1D kernel. For GEMM, the kernel would be 2D: one dimension for the rows of A, and another for the columns of B. However, Triton kernels are typically written for a single dimension, so the GEMM would be split into multiple stages or the kernel would be written to handle both dimensions.
-
-Alternatively, the GEMM can be performed by tiling the matrix into smaller blocks that fit into shared memory, with each program handling a tile.
-
-But given the time constraints and the need to produce a working code, perhaps the simplest approach is to use the existing Triton GEMM infrastructure, but adapt it for the specific case of multiplying two lower triangular matrices.
-
-However, the existing Triton kernels in the example are for element-wise addition, so the new kernel must be written from scratch.
-
-Let me think about the indexing. For a matrix multiplication of A (N x N) and B (N x N), the result C is N x N, where each element C[i,j] = sum_{k=0}^{N-1} A[i,k] * B[k,j]. In the Triton kernel, each program would handle a single element (i,j), but that would be too fine-grained. Instead, each program would handle a contiguous block of elements along a row or column.
-
-Alternatively, the kernel can be written to compute the entire matrix by iterating over the rows of A and the columns of B. For each row i of A, the kernel loads the row, then iterates over the columns j of B, multiplying each element of the row with the corresponding column of B, summing the products.
-
-But this would require the kernel to have two loops: one over the columns of B for each row. However, Triton kernels are written with a single loop per program, so the kernel would need to compute the indices for the row and column in a single dimension.
-
-The standard way to implement GEMM in Triton is to flatten the matrices into 1D vectors and compute the index as i * N + j for the row and column. The kernel then loads the corresponding elements from the flattened vectors, computes the dot product, and stores the result.
-
-For the given model, the matrices are already contiguous in memory because they are N x N and stored in row-major order. Therefore, the GEMM kernel can treat them as 1D vectors of length N^2.
-
-The kernel would be launched with a grid of N blocks, each block handling a single row of A and the entire column of B. Wait, no, each block would handle a single element (i,j), but that would be too many blocks. Instead, each block processes a contiguous block of elements along a row, computing the sum over the columns.
-
-But the exact indexing needs to be derived. Let's assume that the kernel processes the entire matrix in a single dimension, where each element is indexed by a linear offset. For a matrix of size N x N, the linear offset is i * N + j. The kernel can load the corresponding elements of A and B, multiply them, and accumulate the sum for each (i,j) pair.
-
-However, the original example uses a simple element-wise add, which is a 1D kernel. For GEMM, the kernel would need to perform a reduction over the k dimension (the inner loop) for each (i,j) pair. This can be done by tiling the k dimension into blocks that fit into registers or shared memory.
-
-But given the complexity, perhaps the kernel can be written to compute the entire matrix by iterating over the rows of A and columns of B, loading each element, multiplying, and adding to a temporary accumulator.
-
-The Triton kernel would be launched with a grid that covers the entire matrix. Each program would process a contiguous block of elements, say, a block of size BLOCK_SIZE. The block_size would be chosen as a power of two, such as 256, to fit into a warp.
-
-The mask would ensure that the kernel only processes the elements within the matrix bounds. The kernel would load the row elements of A and the column elements of B, multiply them, sum the products, and store the result.
-
-But the exact code would involve:
-
-- program_id(0) to get the row index.
-- program_id(1) to get the column index, but for a single matrix multiplication, it's often written as a 1D grid where each program processes a single element (i,j).
-- Using tl.arange to generate the k indices for the inner loop.
-- Loading A[i,k] and B[k,j] for each k.
-- Computing the dot product.
-- Storing the result.
-
-However, the exact implementation details are quite involved. Given the time, I'll proceed to write a Triton kernel that performs the GEMM for two lower triangular matrices, then the tril is a PyTorch view.
-
-The kernel would have the following parameters:
-
-- x_ptr0: pointer to A (N x N)
-- x_ptr1: pointer to B (N x N)
-- y_ptr0: pointer to the output (N x N)
-- xnumel: N
-- ynumel: N
-- xoffset: 0
-- yoffset: 0
-- xindex: i
-- yindex: j
-- ymask: j < N
-- xmask: i < N
-
-The kernel would compute the dot product for each (i,j) pair by iterating over k from 0 to N-1, loading A[i,k] and B[k,j], multiplying, summing, and storing the result.
-
-But in Triton, the inner loop (k) can be handled by a mask that covers the entire N elements. The kernel would be written as follows:
 
 @triton.jit
-def triton_poi_fused_matmul_tril_0(in_ptr0, in_ptr1, out_ptr0, xnumel, ynumel, xoffset, yoffset, ymask, xmask):
-    xoffset = xoffset + tl.program_id(0) * xnumel
-    xindex = xoffset + tl.arange(0, xnumel)[:]
-    tl.full([1], 0, tl.int32)
-    yoffset = yoffset + tl.program_id(1) * ynumel
-    yindex = yoffset + tl.arange(0, ynumel)[:]
-    tl.full([1], 0, tl.int32)
-    ymask = ymask
-    xmask = xmask
-    x3 = xindex
-    y1 = yindex
-    y0 = yindex
-    y2 = yindex
-    x2 = xindex
-    y3 = yindex
-    x1 = xindex
-    x4 = xindex
-    x5 = xindex
-    y4 = yindex
-    x6 = xindex
-    y5 = yindex
-    x7 = xindex
-    y6 = yindex
-    x8 = xindex
-    y7 = yindex
-    x9 = xindex
-    y8 = yindex
-    x10 = xindex
-    y9 = yindex
-    x11 = xindex
-    y10 = yindex
-    x12 = xindex
-    y11 = yindex
-    x13 = xindex
-    y12 = yindex
-    x14 = xindex
-    y13 = yindex
-    x15 = xindex
-    y14 = yindex
-    x16 = xindex
-    y15 = yindex
-    x17 = xindex
-    y16 = yindex
-    x18 = xindex
-    y17 = yindex
-    x19 = xindex
-    y18 = yindex
-    x20 = xindex
-    y19 = yindex
-    x21 = xindex
-    y20 = yindex
-    x22 = xindex
-    y21 = yindex
-    x23 = xindex
-    y22 = yindex
-    x24 = xindex
-    y23 = yindex
-    x25 = xindex
-    y24 = yindex
-    x26 = xindex
-    y25 = yindex
-    x27 = xindex
-    y26 = yindex
-    x28 = xindex
-    y27 = yindex
-    x29 = xindex
-    y28 = yindex
-    x30 = xindex
-    y29 = yindex
-    x31 = xindex
-    y30 = yindex
-    x32 = xindex
-    y31 = yindex
-    x33 = xindex
-    y32 = yindex
-    x34 = xindex
-    y33 = yindex
-    x35 = xindex
-    y34 = yindex
-    x36 = xindex
-    y35 = yindex
-    x37 = xindex
-    y36 = yindex
-    x38 = xindex
-    y37 = yindex
-    x39 = xindex
-    y38 = yindex
-    x40 = xindex
-    y39 = yindex
-    x41 = xindex
-    y40 = yindex
-    x42 = xindex
-    y41 = yindex
-    x43 = xindex
-    y42 = yindex
-    x44 = xindex
-    y43 = yindex
-    x45 = xindex
-    y44 = yindex
-    x46 = xindex
-    y45 = yindex
-    x47 = xindex
-    y46 = yindex
-    x48 = xindex
-    y47 = yindex
-    x49 = xindex
-    y48 = yindex
-    x50 = xindex
-    y49 = yindex
-    x51 = xindex
-    y50 = yindex
-    x52 = xindex
-    y51 = yindex
-    x53 = xindex
-    y52 = yindex
-    x54 = xindex
-    y53 = yindex
-    x55 = xindex
-    y54 = yindex
-    x56 = xindex
-    y55 = yindex
-    x57 = xindex
-    y56 = yindex
-    x58 = xindex
-    y57 = yindex
-    x59 = xindex
-    y58 = yindex
-    x60 = xindex
-    y59 = yindex
-    x61 = xindex
-    y60 = yindex
-    x62 = xindex
-    y61 = yindex
-    x63 = xindex
-    y62 = yindex
-    x64 = xindex
-    y63 = yindex
-    x65 = xindex
-    y64 = yindex
-    x66 = xindex
-    y65 = yindex
-    x67 = xindex
-    y66 = yindex
-    x68 = xindex
-    y67 = yindex
-    x69 = xindex
-    y68 = yindex
-    x70 = xindex
-    y69 = yindex
-    x71 = xindex
-    y70 = yindex
-    x72 = xindex
-    y71 = yindex
-    x73 = xindex
-    y72 = yindex
-    x74 = xindex
-    y73 = yindex
-    x75 = xindex
-    y74 = yindex
-    x76 = xindex
-    y75 = yindex
-    x77 = xindex
-    y76 = yindex
-    x78 = xindex
-    y77 = yindex
-    x79 = xindex
-    y78 = yindex
-    x80 = xindex
-    y79 = yindex
-    x81 = xindex
-    y80 = yindex
-    x82 = xindex
-    y81 = yindex
-    x83 = xindex
-    y82 = yindex
-    x84 = xindex
-    y83 = yindex
-    x85 = xindex
-    y84 = yindex
-    x86 = xindex
-    y85 = yindex
-    x87 = xindex
-    y86 = yindex
-    x88 = xindex
-    y87 = yindex
-    x89 = xindex
-    y88 = yindex
-    x90 = xindex
-    y89 = yindex
-    x91 = xindex
-    y90 = yindex
-    x92 = xindex
-    y91 = yindex
-    x93 = xindex
-    y92 = yindex
-    x94 = xindex
-    y93 = yindex
-    x95 = xindex
-    y94 = yindex
-    x96 = xindex
-    y95 = yindex
-    x97 = xindex
-    y96 = yindex
-    x98 = xindex
-    y97 = yindex
-    x99 = xindex
-    y98 = yindex
-    x100 = xindex
-    y99 = yindex
-    x101 = xindex
-    y100 = yindex
-    x102 = xindex
-    y101 = yindex
-    x103 = xindex
-    y102 = yindex
-    x104 = xindex
-    y103 = yindex
-    x105 = xindex
-    y104 = yindex
-    x106 = xindex
-    y105 = yindex
-    x107 = xindex
-    y106 = yindex
-    x108 = xindex
-    y107 = yindex
-    x109 = xindex
-    y108 = yindex
-    x110 = xindex
-    y109 = yindex
-    x111 = xindex
-    y110 = yindex
-    x112 = xindex
-    y111 = yindex
-    x113 = xindex
-    y112 = yindex
-    x114 = xindex
-    y113 = yindex
-    x115 = xindex
-    y114 = yindex
-    x116 = xindex
-    y115 = yindex
-    x117 = xindex
-    y116 = yindex
-    x118 = xindex
-    y117 = yindex
-    x119 = xindex
-    y118 = yindex
-    x120 = xindex
-    y119 = yindex
-    x121 = xindex
-    y120 = yindex
-    x122 = xindex
-    y121 = yindex
-    x123 = xindex
-    y122 = yindex
-    x124 = xindex
-    y123 = yindex
-    x125 = xindex
-    y124 = yindex
-    x126 = xindex
-    y125 = yindex
-    x127 = xindex
-    y126 = yindex
-    x128 = xindex
-    y127 = yindex
-    x129 = xindex
-    y128 = yindex
-    x130 = xindex
-    y129 = yindex
-    x131 = xindex
-    y130 = yindex
-    x132 = xindex
-    y131 = yindex
-    x133 = xindex
-    y132 = yindex
-    x134 = xindex
-    y133 = yindex
-    x135 = xindex
-    y134 = yindex
-    x136 = xindex
-    y135 = yindex
-    x137 = xindex
-    y136 = yindex
-    x138 = xindex
-    y137 = yindex
-    x139 = xindex
-    y138 = yindex
-    x140 = xindex
-    y139 = yindex
-    x141 = xindex
-    y140 = yindex
-    x142 = xindex
-    y141 = yindex
-    x143 = xindex
-    y142 = yindex
-    x144 = xindex
-    y143 = yindex
-    x145 = xindex
-    y144 = yindex
-    x146 = xindex
-    y145 = yindex
-    x147 = xindex
-    y146 = yindex
-    x148 = xindex
-    y147 = yindex
-    x149 = xindex
-    y148 = yindex
-    x150 = xindex
-    y149 = yindex
-    x151 = xindex
-    y150 = yindex
-    x152 = xindex
-    y151 = yindex
-    x153 = xindex
-    y152 = yindex
-    x154 = xindex
-    y153 = yindex
-    x155 = xindex
-    y154 = yindex
-    x156 = xindex
-    y155 = yindex
-    x157 = xindex
-    y156 = yindex
-    x158 = xindex
-    y157 = yindex
-    x159 = xindex
-    y158 = yindex
-    x160 = xindex
-    y159 = yindex
-    x161 = xindex
-    y160 = yindex
-    x162 = xindex
-    y161 = yindex
-    x163 = xindex
-    y162 = yindex
-    x164 = xindex
-    y163 = yindex
-    x165 = xindex
-    y164 = yindex
-    x166 = xindex
-    y165 = yindex
-    x167 = xindex
-    y166 = yindex
-    x168 = xindex
-    y167 = yindex
-    x169 = xindex
-    y168 = yindex
-    x170 = xindex
-    y169 = yindex
-    x171 = xindex
-    y170 = yindex
-    x172 = xindex
-    y171 = yindex
-    x173 = xindex
-    y172 = yindex
-    x174 = xindex
-    y173 = yindex
-    x175 = xindex
-    y174 = yindex
-    x176 = xindex
-    y175 = yindex
-    x177 = xindex
-    y176 = yindex
-    x178 = xindex
-    y177 = yindex
-    x179 = xindex
-    y178 = yindex
-    x180 = xindex
-    y179 = yindex
-    x181 = xindex
-    y180 = yindex
-    x182 = xindex
-    y181 = yindex
-    x183 = xindex
-    y182 = yindex
-    x184 = xindex
-    y183 = yindex
-    x185 = xindex
-    y184 = yindex
-    x186 = xindex
-    y185 = yindex
-    x187 = xindex
-    y186 = yindex
-    x188 = xindex
-    y187 = yindex
-    x189 = xindex
-    y188 = yindex
-    x190 = xindex
-    y189 = yindex
-    x191 = xindex
-    y190 = yindex
-    x192 = xindex
-    y191 = yindex
-    x193 = xindex
-    y192 = yindex
-    x194 = xindex
-    y193 = yindex
-    x195 = xindex
-    y194 = yindex
-    x196 = xindex
-    y195 = yindex
-    x197 = xindex
-    y196 = yindex
-    x198 = xindex
-    y197 = yindex
-    x199 = xindex
-    y198 = yindex
-    x200 = xindex
-    y199 = yindex
-    x201 = xindex
-    y200 = yindex
-    x202 = xindex
-    y201 = yindex
-    x203 = xindex
-    y202 = yindex
-    x204 = xindex
-    y203 = yindex
-    x205 = xindex
-    y204 = yindex
-    x206 = xindex
-    y205 = yindex
-    x207 = xindex
-    y206 = yindex
-    x208 = xindex
-    y207 = yindex
-    x209 = xindex
-    y208 = yindex
-    x210 = xindex
-    y209 = yindex
-    x211 = xindex
-    y210 = yindex
-    x212 = xindex
-    y211 = yindex
-    x213 = xindex
-    y212 = yindex
-    x214 = xindex
-    y213 = yindex
-    x215 = xindex
-    y214 = yindex
-    x216 = xindex
-    y215 = yindex
-    x217 = xindex
-    y216 = yindex
-    x218 = xindex
-    y217 = yindex
-    x219 = xindex
-    y218 = yindex
-    x220 = xindex
-    y219 = yindex
-    x221 = xindex
-    y220 = yindex
-    x222 = xindex
-    y221 = yindex
-    x223 = xindex
-    y222 = yindex
-    x224 = xindex
-    y223 = yindex
-    x225 = xindex
-    y224 = yindex
-    x226 = xindex
-    y225 = yindex
-    x227 = xindex
-    y226 = yindex
-    x228 = xindex
-    y227 = yindex
-    x229 = xindex
-    y228 = yindex
-    x230 = xindex
-    y229 = yindex
-    x231 = xindex
-    y230 = yindex
-    x232 = xindex
-    y231 = yindex
-    x233 = xindex
-    y232 = yindex
-    x234 = xindex
-    y233 = yindex
-    x235 = xindex
-    y234 = yindex
-    x236 = xindex
-    y235 = yindex
-    x237 = xindex
-    y236 = yindex
-    x238 = xindex
-    y237 = yindex
-    x239 = xindex
-    y238 = yindex
-    x240 = xindex
-    y239 = yindex
-    x241 = xindex
-    y240 = yindex
-    x242 = xindex
-    y241 = yindex
-    x243 = xindex
-    y242 = yindex
-    x244 = xindex
-    y243 = yindex
-    x245 = xindex
-    y244 = yindex
-    x246 = xindex
-    y245 = yindex
-    x247 = xindex
-    y246 = yindex
-    x248 = xindex
-    y247 = yindex
-    x249 = xindex
-    y248 = yindex
-    x250 = xindex
-    y249 = yindex
-    x251 = xindex
-    y250 = yindex
-    x252 = xindex
-    y251 = yindex
-    x253 = xindex
-    y252 = yindex
-    x254 = xindex
-    y253 = yindex
-    x255 = xindex
-    y254 = yindex
-    x256 = xindex
-    y255 = yindex
-    x257 = xindex
-    y256 = yindex
-    x258 = xindex
-    y257 = yindex
-    x259 = xindex
-    y258 = yindex
-    x260 = xindex
-    y259 = yindex
-    x261 = xindex
-    y260 = yindex
-    x262 = xindex
-    y261 = yindex
-    x263 = xindex
-    y262 = yindex
-    x264 = xindex
-    y263 = yindex
-    x265 = xindex
-    y264 = yindex
-    x266 = xindex
-    y265 = yindex
-    x267 = xindex
-    y266 = yindex
-    x268 = xindex
-    y267 = yindex
-    x269 = xindex
+def triton_poi_fused__triton_per_fused_linalg_vector_norm_0(in_ptr0, out_ptr0,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 4096
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 + tmp1
+    tmp3 = 1.0
+    tmp4 = tmp2 + tmp3
+    tmp5 = tmp4 * tmp3
+    tmp6 = tmp5 * tmp3
+    tmp7 = tmp6 * tmp3
+    tmp8 = tmp7 * tmp3
+    tmp9 = tmp8 * tmp3
+    tmp10 = tmp9 * tmp3
+    tmp11 = tmp10 * tmp3
+    tmp12 = tmp11 * tmp3
+    tmp13 = tmp12 * tmp3
+    tmp14 = tmp13 * tmp3
+    tmp15 = tmp14 * tmp3
+    tmp16 = tmp15 * tmp3
+    tmp17 = tmp16 * tmp3
+    tmp18 = tmp17 * tmp3
+    tmp19 = tmp18 * tmp3
+    tmp20 = tmp19 * tmp3
+    tmp21 = tmp20 * tmp3
+    tmp22 = tmp21 * tmp3
+    tmp23 = tmp22 * tmp3
+    tmp24 = tmp23 * tmp3
+    tmp25 = tmp24 * tmp3
+    tmp26 = tmp25 * tmp3
+    tmp27 = tmp26 * tmp3
+    tmp28 = tmp27 * tmp3
+    tmp29 = tmp28 * tmp3
+    tmp30 = tmp29 * tmp3
+    tmp31 = tmp30 * tmp3
+    tmp32 = tmp31 * tmp3
+    tmp33 = tmp32 * tmp3
+    tmp34 = tmp33 * tmp3
+    tmp35 = tmp34 * tmp3
+    tmp36 = tmp35 * tmp3
+    tmp37 = tmp36 * tmp3
+    tmp38 = tmp37 * tmp3
+    tmp39 = tmp38 * tmp3
+    tmp40 = tmp39 * tmp3
+    tmp41 = tmp40 * tmp3
+    tmp42 = tmp41 * tmp3
+    tmp43 = tmp42 * tmp3
+    tmp44 = tmp43 * tmp3
+    tmp45 = tmp44 * tmp3
+    tmp46 = tmp45 * tmp3
+    tmp47 = tmp46 * tmp3
+    tmp48 = tmp47 * tmp3
+    tmp49 = tmp48 * tmp3
+    tmp50 = tmp49 * tmp3
+    tmp51 = tmp50 * tmp3
+    tmp52 = tmp51 * tmp3
+    tmp53 = tmp52 * tmp3
+    tmp54 = tmp53 * tmp3
+    tmp55 = tmp54 * tmp3
+    tmp56 = tmp55 * tmp3
+    tmp57 = tmp56 * tmp3
+    tmp58 = tmp57 * tmp3
+    tmp59 = tmp58 * tmp3
+    tmp60 = tmp59 * tmp3
+    tmp61 = tmp60 * tmp3
+    tmp62 = tmp61 * tmp3
+    tmp63 = tmp62 * tmp3
+    tmp64 = tmp63 * tmp3
+    tmp65 = tmp64 * tmp3
+    tmp66 = tmp65 * tmp3
+    tmp67 = tmp66 * tmp3
+    tmp68 = tmp67 * tmp3
+    tmp69 = tmp68 * tmp3
+    tmp70 = tmp69 * tmp3
+    tmp71 = tmp70 * tmp3
+    tmp72 = tmp71 * tmp3
+    tmp73 = tmp72 * tmp3
+    tmp74 = tmp73 * tmp3
+    tmp75 = tmp74 * tmp3
+    tmp76 = tmp75 * tmp3
+    tmp77 = tmp76 * tmp3
+    tmp78 = tmp77 * tmp3
+    tmp79 = tmp78 * tmp3
+    tmp80 = tmp79 * tmp3
+    tmp81 = tmp80 * tmp3
+    tmp82 = tmp81 * tmp3
+    tmp83 = tmp82 * tmp3
+    tmp84 = tmp83 * tmp3
+    tmp85 = tmp84 * tmp3
+    tmp86 = tmp85 * tmp3
+    tmp87 = tmp86 * tmp3
+    tmp88 = tmp87 * tmp3
+    tmp89 = tmp88 * tmp3
+    tmp90 = tmp89 * tmp3
+    tmp91 = tmp90 * tmp3
+    tmp92 = tmp91 * tmp3
+    tmp93 = tmp92 * tmp3
+    tmp94 = tmp93 * tmp3
+    tmp95 = tmp94 * tmp3
+    tmp96 = tmp95 * tmp3
+    tmp97 = tmp96 * tmp3
+    tmp98 = tmp97 * tmp3
+    tmp99 = tmp98 * tmp3
+    tmp100 = tmp99 * tmp3
+    tmp101 = tmp100 * tmp3
+    tmp102 = tmp101 * tmp3
+    tmp103 = tmp102 * tmp3
+    tmp104 = tmp103 * tmp3
+    tmp105 = tmp104 * tmp3
+    tmp106 = tmp105 * tmp3
+    tmp107 = tmp106 * tmp3
+    tmp108 = tmp107 * tmp3
+    tmp109 = tmp108 * tmp3
+    tmp110 = tmp109 * tmp3
+    tmp111 = tmp110 * tmp3
+    tmp112 = tmp111 * tmp3
+    tmp113 = tmp112 * tmp3
+    tmp114 = tmp113 * tmp3
+    tmp115 = tmp114 * tmp3
+    tmp116 = tmp115 * tmp3
+    tmp117 = tmp116 * tmp3
+    tmp118 = tmp117 * tmp3
+    tmp119 = tmp118 * tmp3
+    tmp120 = tmp119 * tmp3
+    tmp121 = tmp120 * tmp3
+    tmp122 = tmp121 * tmp3
+    tmp123 = tmp122 * tmp3
+    tmp124 = tmp123 * tmp3
+    tmp125 = tmp124 * tmp3
+    tmp126 = tmp125 * tmp3
+    tmp127 = tmp126 * tmp3
+    tmp128 = tmp127 * tmp3
+    tmp129 = tmp128 * tmp3
+    tmp130 = tmp129 * tmp3
+    tmp131 = tmp130 * tmp3
+    tmp132 = tmp131 * tmp3
+    tmp133 = tmp132 * tmp3
+    tmp134 = tmp133 * tmp3
+    tmp135 = tmp134 * tmp3
+    tmp136 = tmp135 * tmp3
+    tmp137 = tmp136 * tmp3
+    tmp138 = tmp137 * tmp3
+    tmp139 = tmp138 * tmp3
+    tmp140 = tmp139 * tmp3
+    tmp141 = tmp140 * tmp3
+    tmp142 = tmp141 * tmp3
+    tmp143 = tmp142 * tmp3
+    tmp144 = tmp143 * tmp3
+    tmp145 = tmp144 * tmp3
+    tmp146 = tmp145 * tmp3
+    tmp147 = tmp146 * tmp3
+    tmp148 = tmp147 * tmp3
+    tmp149 = tmp148 * tmp3
+    tmp150 = tmp149 * tmp3
+    tmp151 = tmp150 * tmp3
+    tmp152 = tmp151 * tmp3
+    tmp153 = tmp152 * tmp3
+    tmp154 = tmp153 * tmp3
+    tmp155 = tmp154 * tmp3
+    tmp156 = tmp155 * tmp3
+    tmp157 = tmp156 * tmp3
+    tmp158 = tmp157 * tmp3
+    tmp159 = tmp158 * tmp3
+    tmp160 = tmp159 * tmp3
+    tmp161 = tmp160 * tmp3
+    tmp162 = tmp161 * tmp3
+    tmp163 = tmp162 * tmp3
+    tmp164 = tmp163 * tmp3
+    tmp165 = tmp164 * tmp3
+    tmp166 = tmp165 * tmp3
+    tmp167 = tmp166 * tmp3
+    tmp168 = tmp167 * tmp3
+    tmp169 = tmp168 * tmp3
+    tmp170 = tmp169 * tmp3
+    tmp171 = tmp170 * tmp3
+    tmp172 = tmp171 * tmp3
+    tmp173 = tmp172 * tmp3
+    tmp174 = tmp173 * tmp3
+    tmp175 = tmp174 * tmp3
+    tmp176 = tmp175 * tmp3
+    tmp177 = tmp176 * tmp3
+    tmp178 = tmp177 * tmp3
+    tmp179 = tmp178 * tmp3
+    tmp180 = tmp179 * tmp3
+    tmp181 = tmp180 * tmp3
+    tmp182 = tmp181 * tmp3
+    tmp183 = tmp182 * tmp3
+    tmp184 = tmp183 * tmp3
+    tmp185 = tmp184 * tmp3
+    tmp186 = tmp185 * tmp3
+    tmp187 = tmp186 * tmp3
+    tmp188 = tmp187 * tmp3
+    tmp189 = tmp188 * tmp3
+    tmp190 = tmp189 * tmp3
+    tmp191 = tmp190 * tmp3
+    tmp192 = tmp191 * tmp3
+    tmp193 = tmp192 * tmp3
+    tmp194 = tmp193 * tmp3
+    tmp195 = tmp194 * tmp3
+    tmp196 = tmp195 * tmp3
+    tmp197 = tmp196 * tmp3
+    tmp198 = tmp197 * tmp3
+    tmp199 = tmp198 * tmp3
+    tmp200 = tmp199 * tmp3
+    tmp201 = tmp200 * tmp3
+    tmp202 = tmp201 * tmp3
+    tmp203 = tmp202 * tmp3
+    tmp204 = tmp203 * tmp3
+    tmp205 = tmp204 * tmp3
+    tmp206 = tmp205 * tmp3
+    tmp207 = tmp206 * tmp3
+    tmp208 = tmp207 * tmp3
+    tmp209 = tmp208 * tmp3
+    tmp210 = tmp209 * tmp3
+    tmp211 = tmp210 * tmp3
+    tmp212 = tmp211 * tmp3
+    tmp213 = tmp212 * tmp3
+    tmp214 = tmp213 * tmp3
+    tmp215 = tmp214 * tmp3
+    tmp216 = tmp215 * tmp3
+    tmp217 = tmp216 * tmp3
+    tmp218 = tmp217 * tmp3
+    tmp219 = tmp218 * tmp3
+    tmp220 = tmp219 * tmp3
+    tmp221 = tmp220 * tmp3
+    tmp222 = tmp221 * tmp3
+    tmp223 = tmp222 * tmp3
+    tmp224 = tmp223 * tmp3
+    tmp225 = tmp224 * tmp3
+    tmp226 = tmp225 * tmp3
+    tmp227 = tmp226 * tmp3
+    tmp228 = tmp227 * tmp3
+    tmp229 = tmp228 * tmp3
+    tmp230 = tmp229 * tmp3
+    tmp231 = tmp230 * tmp3
+    tmp232 = tmp231 * tmp3
+    tmp233 = tmp232 * tmp3
+    tmp234 = tmp233 * tmp3
+    tmp235 = tmp234 * tmp3
+    tmp236 = tmp235 * tmp3
+    tmp237 = tmp236 * tmp3
+    tmp238 = tmp237 * tmp3
+    tmp239 = tmp238 * tmp3
+    tmp240 = tmp239 * tmp3
+    tmp241 = tmp240 * tmp3
+    tmp242 = tmp241 * tmp3
+    tmp243 = tmp242 * tmp3
+    tmp244 = tmp243 * tmp3
+    tmp245 = tmp244 * tmp3
+    tmp246 = tmp245 * tmp3
+    tmp247 = tmp246 * tmp3
+    tmp248 = tmp247 * tmp3
+    tmp249 = tmp248 * tmp3
+    tmp250 = tmp249 * tmp3
+    tmp251 = tmp250 * tmp3
+    tmp252 = tmp251 * tmp3
+    tmp253 = tmp252 * tmp3
+    tmp254 = tmp253 * tmp3
+    tmp255 = tmp254 * tmp3
+    tmp256 = tmp255 * tmp3
+    tmp257 = tmp256 * tmp3
+    tmp258 = tmp257 * tmp3
+    tmp259 = tmp258 * tmp3
+    tmp260 = tmp259 * tmp3
+    tmp261 = tmp260 * tmp3
+    tmp262 = tmp261 * tmp3
+    tmp263 = tmp262 * tmp3
+    tmp264 = tmp263 * tmp3
+    tmp265 = tmp264 * tmp3
+    tmp266 = tmp265 * tmp3
+    tmp267 = tmp266 * tmp3
+    tmp268 = tmp267 * tmp3
+    tmp269 = tmp268 * tmp3
+    tmp270 = tmp269 * tmp3
+    tmp271 = tmp270 * tmp3
+    tmp272 = tmp271 * tmp3
+    tmp273 = tmp272 * tmp3
+    tmp274 = tmp273 * tmp3
+    tmp275 = tmp274 * tmp3
+    tmp276 = tmp275 * tmp3
+    tmp277 = tmp276 * tmp3
+    tmp278 = tmp277 * tmp3
+    tmp279 = tmp278 * tmp3
+    tmp280 = tmp279 * tmp3
+    tmp281 = tmp280 * tmp3
+    tmp282 = tmp281 * tmp3
+    tmp283 = tmp282 * tmp3
+    tmp284 = tmp283 * tmp3
+    tmp285 = tmp284 * tmp3
+    tmp286 = tmp285 * tmp3
+    tmp287 = tmp286 * tmp3
+    tmp288 = tmp287 * tmp3
+    tmp289 = tmp288 * tmp3
+    tmp290 = tmp289 * tmp3
+    tmp291 = tmp290 * tmp3
+    tmp292 = tmp291 * tmp3
+    tmp293 = tmp292 * tmp3
+    tmp294 = tmp293 * tmp3
+    tmp295 = tmp294 * tmp3
+    tmp296 = tmp295 * tmp3
+    tmp297 = tmp296 * tmp3
+    tmp298 = tmp297 * tmp3
+    tmp299 = tmp298 * tmp3
+    tmp300 = tmp299 * tmp3
+    tmp301 = tmp300 * tmp3
+    tmp302 = tmp301 * tmp3
+    tmp303 = tmp302 * tmp3
+    tmp304 = tmp303 * tmp3
+    tmp305 = tmp304 * tmp3
+    tmp306 = tmp305 * tmp3
+    tmp307 = tmp306 * tmp3
+    tmp308 = tmp307 * tmp3
+    tmp309 = tmp308 * tmp3
+    tmp310 = tmp309 * tmp3
+    tmp311 = tmp310 * tmp3
+    tmp312 = tmp311 * tmp3
+    tmp313 = tmp312 * tmp3
+    tmp314 = tmp313 * tmp3
+    tmp315 = tmp314 * tmp3
+    tmp316 = tmp315 * tmp3
+    tmp317 = tmp316 * tmp3
+    tmp318 = tmp317 * tmp3
+    tmp319 = tmp318 * tmp3
+    tmp320 = tmp319 * tmp3
+    tmp321 = tmp320 * tmp3
+    tmp322 = tmp321 * tmp3
+    tmp323 = tmp322 * tmp3
+    tmp324 = tmp323 * tmp3
+    tmp325 = tmp324 * tmp3
+    tmp326 = tmp325 * tmp3
+    tmp327 = tmp326 * tmp3
+    tmp328 = tmp327 * tmp3
+    tmp329 = tmp328 * tmp3
+    tmp330 = tmp329 * tmp3
+    tmp331 = tmp330 * tmp3
+    tmp332 = tmp331 * tmp3
+    tmp333 = tmp332 * tmp3
+    tmp334 = tmp333 * tmp3
+    tmp335 = tmp334 * tmp3
+    tmp336 = tmp335 * tmp3
+    tmp337 = tmp336 * tmp3
+    tmp338 = tmp337 * tmp3
+    tmp339 = tmp338 * tmp3
+    tmp340 = tmp339 * tmp3
+    tmp341 = tmp340 * tmp3
+    tmp342 = tmp341 * tmp3
+    tmp343 = tmp342 * tmp3
+    tmp344 = tmp343 * tmp3
+    tmp345 = tmp344 * tmp3
+    tmp346 = tmp345 * tmp3
+    tmp347 = tmp346 * tmp3
+    tmp348 = tmp347 * tmp3
+    tmp349 = tmp348 * tmp3
+    tmp350 = tmp349 * tmp3
+    tmp351 = tmp350 * tmp3
+    tmp352 = tmp351 * tmp3
+    tmp353 = tmp352 * tmp3
+    tmp354 = tmp353 * tmp3
+    tmp355 = tmp354 * tmp3
+    tmp356 = tmp355 * tmp3
+    tmp357 = tmp356 * tmp3
+    tmp358 = tmp357 * tmp3
+    tmp359 = tmp358 * tmp3
+    tmp360 = tmp359 * tmp3
+    tmp361 = tmp360 * tmp3
+    tmp362 = tmp361 * tmp3
+    tmp363 = tmp362 * tmp3
+    tmp364 = tmp363 * tmp3
+    tmp365 = tmp364 * tmp3
+    tmp366 = tmp365 * tmp3
+    tmp367 = tmp366 * tmp3
+    tmp368 = tmp367 * tmp3
+    tmp369 = tmp368 * tmp3
+    tmp370 = tmp369 * tmp3
+    tmp371 = tmp370 * tmp3
+    tmp372 = tmp371 * tmp3
+    tmp373 = tmp372 * tmp3
+    tmp374 = tmp373 * tmp3
+    tmp375 = tmp374 * tmp3
+    tmp376 = tmp375 * tmp3
+    tmp377 = tmp376 * tmp3
+    tmp378 = tmp377 * tmp3
+    tmp379 = tmp378 * tmp3
+    tmp380 = tmp379 * tmp3
+    tmp381 = tmp380 * tmp3
+    tmp382 = tmp381 * tmp3
+    tmp383 = tmp382 * tmp3
+    tmp384 = tmp383 * tmp3
+    tmp385 = tmp384 * tmp3
+    tmp386 = tmp385 * tmp3
+    tmp387 = tmp386 * tmp3
+    tmp388 = tmp387 * tmp3
+    tmp389 = tmp388 * tmp3
+    tmp390 = tmp389 * tmp3
+    tmp391 = tmp390 * tmp3
+    tmp392 = tmp391 * tmp3
+    tmp393 = tmp392 * tmp3
+    tmp394 = tmp393 * tmp3
+    tmp395 = tmp394 * tmp3
+    tmp396 = tmp395 * tmp3
+    tmp397 = tmp396 * tmp3
+    tmp398 = tmp397 * tmp3
+    tmp399 = tmp398 * tmp3
+    tmp400 = tmp399 * tmp3
+    tmp401 = tmp400 * tmp3
+    tmp402 = tmp401 * tmp3
+    tmp403 = tmp402 * tmp3
+    tmp404 = tmp403 * tmp3
+    tmp405 = tmp404 * tmp3
+    tmp406 = tmp405 * tmp3
+    tmp407 = tmp406 * tmp3
+    tmp408 = tmp407 * tmp3
+    tmp409 = tmp408 * tmp3
+    tmp410 = tmp409 * tmp3
+    tmp411 = tmp410 * tmp3
+    tmp412 = tmp411 * tmp3
+    tmp413 = tmp412 * tmp3
+    tmp414 = tmp413 * tmp3
+    tmp415 = tmp414 * tmp3
+    tmp416 = tmp415 * tmp3
+    tmp417 = tmp416 * tmp3
+    tmp418 = tmp417 * tmp3
+    tmp419 = tmp418 * tmp3
+    tmp420 = tmp419 * tmp3
+    tmp421 = tmp420 * tmp3
+    tmp422 = tmp421 * tmp3
+    tmp423 = tmp422 * tmp3
+    tmp424 = tmp423 * tmp3
+    tmp425 = tmp424 * tmp3
+    tmp426 = tmp425 * tmp3
+    tmp427 = tmp426 * tmp3
+    tmp428 = tmp427 * tmp3
+    tmp429 = tmp428 * tmp3
+    tmp430 = tmp429 * tmp3
+    tmp431 = tmp430 * tmp3
+    tmp432 = tmp431 * tmp3
+    tmp433 = tmp432 * tmp3
+    tmp434 = tmp433 * tmp3
+    tmp435 = tmp434 * tmp3
+    tmp436 = tmp435 * tmp3
+    tmp437 = tmp436 * tmp3
+    tmp438 = tmp437 * tmp3
+    tmp439 = tmp438 * tmp3
+    tmp440 = tmp439 * tmp3
+    tmp441 = tmp440 * tmp3
+    tmp442 = tmp441 * tmp3
+    tmp443 = tmp442 * tmp3
+    tmp444 = tmp443 * tmp3
+    tmp445 = tmp444 * tmp3
+    tmp446 = tmp445 * tmp3
+    tmp447 = tmp446 * tmp3
+    tmp448 = tmp447 * tmp3
+    tmp449 = tmp448 * tmp3
+    tmp450 = tmp449 * tmp3
+    tmp451 = tmp450 * tmp3
+    tmp452 = tmp451 * tmp3
+    tmp453 = tmp452 * tmp3
+    tmp454 = tmp453 * tmp3
+    tmp455 = tmp454 * tmp3
+    tmp456 = tmp455 * tmp3
+    tmp457 = tmp456 * tmp3
+    tmp458 = tmp457 * tmp3
+    tmp459 = tmp458 * tmp3
+    tmp460 = tmp459 * tmp3
+    tmp461 = tmp460 * tmp3
+    tmp462 = tmp461 * tmp3
+    tmp463 = tmp462 * tmp3
+    tmp464 = tmp463 * tmp3
+    tmp465 = tmp464 * tmp3
+    tmp466 = tmp465 * tmp3
+    tmp467 = tmp466 * tmp3
+    tmp468 = tmp467 * tmp3
+    tmp469 = tmp468 * tmp3
+    tmp470 = tmp469 * tmp3
+    tmp471 = tmp470 * tmp3
+    tmp472 = tmp471 * tmp3
+    tmp4

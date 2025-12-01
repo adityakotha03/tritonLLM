@@ -2,63 +2,54 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def hinge_loss_kernel(
-    predictions_ptr,  # Pointer to predictions (shape (B,))
-    targets_ptr,     # Pointer to targets (shape (B,))
-    loss_ptr,        # Pointer to output loss (scalar)
-    n_elements,      # Total number of elements (B)
-    BLOCK_SIZE: tl.constexpr,
-):
-    # Each program processes a contiguous block of size BLOCK_SIZE
-    block_start = tl.program_id(0) * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    # Load predictions and targets
-    p = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
-    t = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
-    # Compute hinge term: max(0, 1 - p*t)
-    pt = p * t
-    term = 1.0 - pt
-    clamped = tl.maximum(term, 0.0)
-    # Sum the clamped values
-    sum_clamped = tl.sum(clamped, axis=0)
-    # Store the sum (used by the mean reduction)
-    tl.store(loss_ptr + 0, sum_clamped, mask=mask)
-    tl.store(loss_ptr + 1, n_elements, mask=mask)  # Store element count for mean
+def triton_per_fused_clamp_mean_mul_sub_0(in_ptr0, in_ptr1, out_ptr0,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 32768
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
+    tmp2 = tmp0 * tmp1
+    tmp3 = 1.0
+    tmp4 = tmp3 - tmp2
+    tmp5 = 0.0
+    tmp6 = triton_helpers.maximum(tmp4, tmp5)
+    tmp7 = tl.broadcast_to(tmp6, [XBLOCK:])
+    tmp9 = triton_helpers.promote_to_tensor(tl.sum(tmp7, 0))
+    tmp10 = 32768.0
+    tmp11 = tmp9 / tmp10
+    tl.store(out_ptr0 + tl.full([1], 0, tl.int32), tmp11, None)
 
 
-def triton_hinge_loss(predictions: torch.Tensor, targets: torch.Tensor):
-    """
-    Triton implementation of hinge loss = mean(max(0, 1 - predictions * targets)).
-
-    Args:
-        predictions: Tensor of shape (B,)
-        targets: Tensor of shape (B,) with values in {-1, 1}
-
-    Returns:
-        Scalar tensor containing the hinge loss
-    """
-    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
-    assert predictions.dim() == 1 and targets.dim() == 1, "Only 1D tensors supported."
-    assert predictions.size(0) == targets.size(0), "Batch sizes must match."
-
-    B = predictions.size(0)
-    # Allocate a temporary buffer for the sum and element count
-    temp = torch.empty(2, dtype=torch.float32, device=predictions.device)
-    # Launch the fused kernel
-    grid = lambda meta: ((B + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
-    hinge_loss_kernel[grid](predictions, targets, temp, B, BLOCK_SIZE=256)
-    # Compute the mean by dividing the sum by the element count
-    loss = temp[0] / temp[1]
-    return loss
+def call(args):
+    arg0_1, arg1_1 = args
+    args.clear()
+    assert_size_stride(arg0_1, (32768,), 1)
+    assert_size_stride(arg1_1, (32768,), 1)
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((), (), torch.float32)
+        get_raw_stream(0)
+        triton_per_fused_clamp_mean_mul_sub_0[grid(1)](arg0_1, arg1_1, buf0,
+            1, XBLOCK=1, num_warps=2, num_stages=1)
+        del arg0_1
+        del arg1_1
+    return buf0,
 
 
 class ModelNew(nn.Module):
     """
-    A model that computes Hinge Loss for binary classification tasks using a fused Triton kernel.
+    A model that computes Hinge Loss for binary classification tasks.
 
     Parameters:
         None
@@ -66,6 +57,8 @@ class ModelNew(nn.Module):
     def __init__(self):
         super(ModelNew, self).__init__()
 
-    def forward(self, predictions, targets):
-        # Triton implementation of hinge loss = mean(max(0, 1 - predictions * targets))
-        return triton_hinge_loss(predictions, targets)
+    def forward(self, input_0, input_1):
+        arg0_1 = input_0
+        arg1_1 = input_1
+        output = call([arg0_1, arg1_1])
+        return output[0]

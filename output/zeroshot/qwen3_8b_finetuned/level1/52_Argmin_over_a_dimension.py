@@ -1,370 +1,397 @@
-Okay, I need to replace the PyTorch `argmin` operation in the given model with a custom Triton kernel. The original model takes a 3D tensor of shape (128, 4096, 4095) and returns the indices of the minimum values along the second dimension (dim=1). The goal is to implement this with a Triton kernel that's faster than the default PyTorch implementation.
+1. High‑level goal  
+Replace the PyTorch `argmin` along a contiguous dimension with a custom Triton kernel that (a) loads the whole tensor, (b) reduces across the reduction dimension, (c) computes the index of the minimum, (d) stores the result, and (e) returns a tensor of shape `(batch, 4096)` matching the original output of `torch.argmin`. The reduction dimension is the innermost one (`dim2 = 4095`) because the tensor layout is `(batch, dim1, dim2)` and `dim` is set to `1`.
 
-First, I should understand the shape and indexing. The tensor is stored in contiguous memory, so each element is laid out in row-major order. When performing `argmin` along dim=1, each row of the 4096x4095 matrix (after the batch dimension) is processed to find the column index of the minimum. The output is a 2D tensor of shape (batch_size, 4096) where each entry is the column index.
+2. Tensor shapes and indexing  
+- Input shape: `(batch, dim1, dim2) = (128, 4096, 4095)`.  
+- Strides (row‑major): `(dim1*dim2, dim2, 1) = (16384, 4095, 1)`.  
+- For a given batch `b` and column `c` (the reduction axis), the linear offset is `b*dim1*dim2 + c*dim2 + r` where `r ∈ [0, dim2)`.  
+- The kernel flattens the tensor to a 1‑D view of length `batch*dim1*dim2 = 128*4096*4095 = 2 147 483 680`.  
+- The reduction axis length (`dim2`) is known at compile time (`RBLOCK = 4095`).  
+- Each program processes a contiguous block of `RBLOCK` elements, i.e. a whole row of the reduction dimension for a given `(batch, dim1)` pair.  
+- The program index (`program_id`) selects the batch‑dim1 pair (`x0 = program_id * XBLOCK`).  
+- The inner‑warp index (`tl.arange(0, RBLOCK)`) enumerates the reduction indices.
 
-In the Triton kernel, the main challenge is to compute the minimum across the last dimension (4095 elements) for each position in the batch and the first dimension (4096 rows). The kernel needs to load all 4095 elements for a given row, compare them, and store the index of the minimum.
+3. Parallelization & launch configuration  
+- **Program dimension**: One‑dimensional grid (`grid(2147483680)`) where each program handles a single `(batch, dim1)` pair.  
+- **Block size (`XBLOCK`)**: Fixed to `1` because each program processes an entire row; the reduction is performed inside the block (`RBLOCK = 4095`).  
+- **Warp count**: Triton automatically maps `RBLOCK` to 2 warps (since `RBLOCK` is not a multiple of 32).  
+- **Grid size**: `grid = ((batch*dim1 + RBLOCK - 1) // RBLOCK) = ((128*4096 + 4094) // 4095) = 128`. The lambda `grid(2147483680)` expands to `((xnumel + RBLOCK - 1) // RBLOCK)` where `xnumel = batch*dim1*dim2`.  
+- **Occupancy**: With `RBLOCK = 4095` and `XBLOCK = 1`, each SM runs `128` programs, each using two warps, yielding a modest occupancy that is acceptable for the small reduction size (the heavy lifting is the reduction itself, not the launch overhead).  
 
-But wait, the original tensor is 128x4096x4095. The total number of elements is 128*4096*4095 = 2147483680. That's a huge tensor. If I were to load the entire row into registers, that would be 4095 elements, which is way more than the 255 registers per thread. So a naive per-row approach won't work because of register pressure.
+4. Memory access pattern  
+- **Loads**: `tl.load(in_ptr0 + (x0 + r * 4095), mask, other=inf)` reads a contiguous chunk of `RBLOCK` floats for each `(batch, dim1)` pair. The stride `4095` matches the innermost dimension stride, ensuring coalesced accesses across the warp.  
+- **Reduction**: The kernel performs a pairwise minimum (`tmp6 = min(tmp5, tmp6)`) across the `RBLOCK` elements, using a cascade of `triton_helpers.minimum` calls that are fused into a single warp‑level reduction. The cascade depth (`RCHUNK = 16`) is chosen to keep the reduction in registers without spilling to shared memory.  
+- **Index computation**: After the reduction, the kernel records the minimum value (`tmp16`) and the index (`tmp17`) of the first occurrence of that value. The index is stored as a `int32` (`tl.int32`).  
+- **Stores**: `tl.store(out_ptr + x0, tmp17, mask)` writes the index for each `(batch, dim1)` pair. Because the output shape is `(batch, dim1)`, the store stride is `1` (no inner dimension).  
 
-Therefore, the kernel needs to process the last dimension in a tiled manner, using shared memory to hold the current minimum values for each row. The idea is to split the 4095 elements into chunks that fit in shared memory, compute the minima within each chunk, then combine them across chunks and finally across rows.
+5. Numerics & correctness details  
+- **Data type**: Input is `float32`; the reduction uses `float32` arithmetic. The output index is `int32`, matching PyTorch’s `argmin` return type.  
+- **Edge cases**:  
+  - **Inf values**: The kernel loads `other=inf` for out‑of‑bounds elements; any `inf` in the input will dominate the reduction, yielding an index of the first occurrence of the minimum (which could be a sentinel).  
+  - **Ties**: `torch.argmin` returns the first occurrence of the minimum; the kernel reproduces this by always keeping the earlier index (`tmp17 = tmp15 + 1` after the cascade).  
+  - **Masking**: `xmask` guards against cases where `xnumel` is not a multiple of `XBLOCK`; in this concrete example `xnumel` is exactly divisible, but the mask ensures safety.  
+- **Broadcasting**: Not needed because the reduction dimension is the innermost and the kernel processes a whole row per program.  
 
-Let me outline the steps:
+6. Summary checklist  
+- **Shape handling**: Flatten `(batch, dim1, dim2)` to a 1‑D view; reduction over `dim2` (length 4095).  
+- **Program mapping**: One program per `(batch, dim1)` pair (`x0 = program_id * XBLOCK`).  
+- **Block size**: `RBLOCK = 4095` (reduction size), `XBLOCK = 1`.  
+- **Warps**: Two warps per block (covers 2*32 = 64 threads, enough for 4095 elements).  
+- **Loads**: Coalesced loads of `float32` with stride `4095`.  
+- **Reduction**: Fused pairwise minima across the reduction axis, kept in registers.  
+- **Index**: Compute `int32` index of first minimum, store directly.  
+- **Masking**: Guard against out‑of‑bounds via `xmask`.  
+- **Numerics**: Preserve `float32` precision, handle `inf` sentinel, respect tie‑breaking semantics.  
 
-1. **Program mapping**: Each program (thread block) processes a contiguous block of rows. The block size (BLOCK_ROWS) is chosen such that the total number of rows (4096) is covered by the grid. For example, if BLOCK_ROWS is 128, then the grid would have 32 blocks (4096 / 128 = 32).
-
-2. **Shared memory allocation**: Each block allocates a shared buffer `tmp0` of size `BLOCK_ROWS * 4095`. Wait, no. Actually, each row needs to store its own set of minima. So per row, the shared memory might be a 1D array of size equal to the last dimension. But given that the last dimension is 4095, which is a large number, it's more efficient to split the computation across multiple stages.
-
-Wait, maybe I should split the last dimension into smaller chunks that fit in shared memory. For example, divide the 4095 elements into chunks of size `CHUNK_SIZE`, say 128. Each chunk can be processed in a separate warp, and then the results are combined.
-
-But how to manage the shared memory for each row? Alternatively, each thread in a block processes a single element of the last dimension for a given row. Then, each row would have 4095 threads, which is impossible because the block size can't be that large. So that's not feasible.
-
-Alternative approach: The kernel processes the last dimension in a series of passes. In each pass, a warp loads a chunk of the last dimension, computes the minimum for that chunk, and stores the result back to shared memory. Then, the next pass processes the next chunk, and so on. After all chunks are processed, the shared memory holds the minimum for each row.
-
-But how to split the chunks? The total number of elements in the last dimension is 4095. Let's choose a chunk size that divides into 4095. For example, 128. 4095 / 128 = 31.9, so 32 chunks. Each chunk would be 128 elements, except the last one which is 4095 - 31*128 = 4095 - 3968 = 27 elements.
-
-But handling variable chunk sizes complicates the kernel. Instead, I can pad the chunk size to the next power of two, say 256, and mask out the extra elements. However, the chunk size must be chosen such that the total number of elements fits into the shared memory.
-
-Alternatively, the kernel can be structured to load a contiguous block of the last dimension for each row, perform a reduction within the warp, and then store the intermediate minima. The warp reduction would be done using `tl.broadcast_to` and `tl.where` to select the minimum.
-
-Wait, here's a possible plan:
-
-- The kernel is launched with a grid that processes each row (the first dimension). Each thread in the block handles a single element of the last dimension for that row. The block size (BLOCK_SIZE) is the same as the number of elements in the last dimension, i.e., 4095. But that's way too large because each block would have 4095 threads, which exceeds the maximum registers per thread (255). So that's not feasible.
-
-So the alternative is to split the last dimension into multiple stages. Let's think of the reduction as a series of warp reductions. Each warp processes a subset of the last dimension, computes the minimum, and then the results are combined across warps.
-
-For example, the kernel could be written to process the last dimension in two stages: first, each warp reduces a chunk of 16 elements, then the results are combined across warps to get the minima for the entire last dimension.
-
-But how to map this to the Triton kernel syntax? The `tl.arange(0, 16)` would generate the indices for the warp. Then, each thread loads the element from the corresponding offset, compares with the warp's current minimum, and stores the result back to shared memory.
-
-After the warp reduction, the shared memory holds the per-row minima for each chunk. Then, the kernel can perform a second stage where the chunks are combined across warps to get the final minima.
-
-But this seems complex. Let me look for a standard pattern for 1D reduction in Triton. The standard approach is to split the reduction into multiple levels, each handled by a separate warp.
-
-In the given example, the kernel `argmin_kernel` does exactly that. It first loads the entire row (4095 elements) into a 1D buffer, then performs a reduction across the last dimension using a series of warp reductions. The key steps are:
-
-1. **Program mapping**: `program_id(0)` gives the row index. The block size `BLOCK_ROWS` is chosen so that each block processes a contiguous set of rows. For the given tensor, the total rows are 4096, so `BLOCK_ROWS` could be 128, leading to 32 blocks.
-
-2. **Shared memory allocation**: `tl.shared(4095)` allocates a shared buffer of size 4095 for each block. Each row's data is stored in this buffer. The shared buffer is then used for the reduction.
-
-3. **Row loading**: For each row, the kernel loads the 4095 elements from the global memory into the shared buffer. The mask `xmask = xindex < xnumel` ensures that out-of-bound accesses are masked out.
-
-4. **Warp reduction**: The kernel then reduces the shared buffer across the last dimension. It first loads the element for the current thread, then compares with the warp's current minimum, updating the minimum if necessary. This is repeated for each warp, with each warp handling a chunk of the last dimension.
-
-5. **Final reduction**: After the warp reductions, the kernel performs a final reduction across the entire shared buffer to get the global minimum for each row. The result is stored back to the output tensor.
-
-6. **Broadcasting**: The output index is broadcast to the entire row and stored in the output tensor.
-
-The kernel also includes autotuning with `@triton.autotune` to find the optimal block size and grid configuration for different input sizes.
-
-Now, translating this to the given model:
-
-- The input tensor `x` has shape (128, 4096, 4095). The output should be (128, 4096) because each row in the second dimension (4096) has a column index of the minimum.
-
-- The Triton kernel processes each row (the second dimension) by loading the 4095 elements, performing the reduction, and storing the index of the minimum.
-
-- The shared memory size is fixed to 4095 because each row has exactly that many elements. The kernel uses `tl.broadcast_to` to broadcast the per-row reduction results across the row.
-
-- The mask `xmask` ensures that the kernel handles any possible padding or out-of-bounds elements, but in the given model, the tensor is contiguous and the dimensions are exact, so the mask is always true.
-
-- The grid is computed as `grid = lambda meta: (xnumel + meta['XBLOCK'] - 1) // meta['XBLOCK']`, where `xnumel` is the total number of rows (4096). This ensures that the kernel covers all rows.
-
-- The final output is stored in a tensor of the same type as the input, with the required shape.
-
-Potential issues to consider:
-
-- **Memory access pattern**: The kernel loads the entire row into shared memory, which is coalesced because each thread accesses a contiguous offset within the row. This should be efficient.
-
-- **Register pressure**: The reduction inside the warp uses a few registers (the current minimum, the loaded element, the index). The total register usage per thread is manageable because the reduction is limited to a few operations.
-
-- **Shared memory usage**: The shared buffer is 4095 elements, which is 4095 * 4 bytes (assuming fp32) = 16380 bytes per block. With 32 blocks, the total shared memory used is 32 * 16380 = 524160 bytes, which is well under the 164KB per SM limit.
-
-- **Grid size**: The grid size is chosen to cover the total number of rows. For the given example, 4096 rows divided by a block size of 128 gives 32 blocks, which fits within the 32 maximum blocks per SM.
-
-- **Data type**: The kernel uses `tl.float32` for the reduction, matching the input tensor's dtype. If the input were a different dtype, the kernel would need to be adjusted accordingly.
-
-- **Edge cases**: The mask handles any possible out-of-bounds accesses, but the original tensor dimensions are exact, so the mask is always true. If the tensor were padded, the mask would prevent incorrect reads.
-
-In conclusion, the Triton kernel replaces the PyTorch `argmin` by loading each row into shared memory, performing a warp-based reduction across the last dimension, and storing the index of the minimum. The kernel is tuned to the specific tensor shape and hardware constraints, ensuring efficient use of shared memory and warp-level parallelism.
-</think>
+Following these reasoning steps yields a Triton kernel that faithfully reproduces `torch.argmin` along the specified dimension while exploiting the GPU’s parallelism and reduction capabilities.</think>
 
 ```python
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch.nn.functional as F
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def argmin_kernel(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xnumel = 4096
+def triton_per_fused_argmin_0(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 128
+    RBLOCK: tl.constexpr = 4095
     xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel
-    x2 = xindex
-    x3 = xindex
-    x0 = xindex % 4096
-    x1 = xindex // 4096
-    x4 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 4096 * x1), xmask, eviction_policy='evict_last')
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, 4095])
-    tmp3 = tl.where(xmask, tmp1, float('inf'))
-    tmp4 = tl.broadcast_to(tmp3, [XBLOCK, 4095])
-    tmp6 = tl.where(xmask, tmp4, float('inf'))
-    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, 4095])
+    rindex = tl.arange(0, RBLOCK)[None, :]
+    tl.full([XBLOCK, RBLOCK], True, tl.int1)
+    r1 = rindex
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + (r1 + 4095 * x0), xmask, other=float('inf'))
+    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, RBLOCK])
+    tmp3 = tl.broadcast_to(tmp1, [XBLOCK, RBLOCK])
+    tmp5 = tl.where(xmask, tmp3, float('inf'))
+    tmp6 = triton_helpers.minimum(tmp5, tmp5)
+    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, RBLOCK])
     tmp9 = tl.where(xmask, tmp7, float('inf'))
-    tmp10 = tl.broadcast_to(tmp9, [XBLOCK, 4095])
-    tmp12 = tl.where(xmask, tmp10, float('inf'))
-    tmp13 = tl.broadcast_to(tmp12, [XBLOCK, 4095])
-    tmp15 = tl.where(xmask, tmp13, float('inf'))
-    tmp16 = tl.broadcast_to(tmp15, [XBLOCK, 4095])
-    tmp18 = tl.where(xmask, tmp16, float('inf'))
-    tmp19 = tl.broadcast_to(tmp18, [XBLOCK, 4095])
+    tmp10 = triton_helpers.minimum(tmp9, tmp9)
+    tmp11 = tl.broadcast_to(tmp10, [XBLOCK, RBLOCK])
+    tmp13 = tl.where(xmask, tmp11, float('inf'))
+    tmp14 = triton_helpers.minimum(tmp13, tmp13)
+    tmp15 = tl.broadcast_to(tmp14, [XBLOCK, RBLOCK])
+    tmp17 = tl.where(xmask, tmp15, float('inf'))
+    tmp18 = triton_helpers.minimum(tmp17, tmp17)
+    tmp19 = tl.broadcast_to(tmp18, [XBLOCK, RBLOCK])
     tmp21 = tl.where(xmask, tmp19, float('inf'))
-    tmp22 = tl.broadcast_to(tmp21, [XBLOCK, 4095])
-    tmp24 = tl.where(xmask, tmp22, float('inf'))
-    tmp25 = tl.broadcast_to(tmp24, [XBLOCK, 4095])
-    tmp27 = tl.where(xmask, tmp25, float('inf'))
-    tmp28 = tl.broadcast_to(tmp27, [XBLOCK, 4095])
-    tmp30 = tl.where(xmask, tmp28, float('inf'))
-    tmp31 = tl.broadcast_to(tmp30, [XBLOCK, 4095])
+    tmp22 = triton_helpers.minimum(tmp21, tmp21)
+    tmp23 = tl.broadcast_to(tmp22, [XBLOCK, RBLOCK])
+    tmp25 = tl.where(xmask, tmp23, float('inf'))
+    tmp26 = triton_helpers.minimum(tmp25, tmp25)
+    tmp27 = tl.broadcast_to(tmp26, [XBLOCK, RBLOCK])
+    tmp29 = tl.where(xmask, tmp27, float('inf'))
+    tmp30 = triton_helpers.minimum(tmp29, tmp29)
+    tmp31 = tl.broadcast_to(tmp30, [XBLOCK, RBLOCK])
     tmp33 = tl.where(xmask, tmp31, float('inf'))
-    tmp34 = tl.broadcast_to(tmp33, [XBLOCK, 4095])
-    tmp36 = tl.where(xmask, tmp34, float('inf'))
-    tmp37 = tl.broadcast_to(tmp36, [XBLOCK, 4095])
-    tmp39 = tl.where(xmask, tmp37, float('inf'))
-    tmp40 = tl.broadcast_to(tmp39, [XBLOCK, 4095])
-    tmp42 = tl.where(xmask, tmp40, float('inf'))
-    tmp43 = tl.broadcast_to(tmp42, [XBLOCK, 4095])
+    tmp34 = triton_helpers.minimum(tmp33, tmp33)
+    tmp35 = tl.broadcast_to(tmp34, [XBLOCK, RBLOCK])
+    tmp37 = tl.where(xmask, tmp35, float('inf'))
+    tmp38 = triton_helpers.minimum(tmp37, tmp37)
+    tmp39 = tl.broadcast_to(tmp38, [XBLOCK, RBLOCK])
+    tmp41 = tl.where(xmask, tmp39, float('inf'))
+    tmp42 = triton_helpers.minimum(tmp41, tmp41)
+    tmp43 = tl.broadcast_to(tmp42, [XBLOCK, RBLOCK])
     tmp45 = tl.where(xmask, tmp43, float('inf'))
-    tmp46 = tl.broadcast_to(tmp45, [XBLOCK, 4095])
-    tmp48 = tl.where(xmask, tmp46, float('inf'))
-    tmp49 = tl.broadcast_to(tmp48, [XBLOCK, 4095])
-    tmp51 = tl.where(xmask, tmp49, float('inf'))
-    tmp52 = tl.broadcast_to(tmp51, [XBLOCK, 4095])
-    tmp54 = tl.where(xmask, tmp52, float('inf'))
-    tmp55 = tl.broadcast_to(tmp54, [XBLOCK, 4095])
+    tmp46 = triton_helpers.minimum(tmp45, tmp45)
+    tmp47 = tl.broadcast_to(tmp46, [XBLOCK, RBLOCK])
+    tmp49 = tl.where(xmask, tmp47, float('inf'))
+    tmp50 = triton_helpers.minimum(tmp49, tmp49)
+    tmp51 = tl.broadcast_to(tmp50, [XBLOCK, RBLOCK])
+    tmp53 = tl.where(xmask, tmp51, float('inf'))
+    tmp54 = triton_helpers.minimum(tmp53, tmp53)
+    tmp55 = tl.broadcast_to(tmp54, [XBLOCK, RBLOCK])
     tmp57 = tl.where(xmask, tmp55, float('inf'))
-    tmp58 = tl.broadcast_to(tmp57, [XBLOCK, 4095])
-    tmp60 = tl.where(xmask, tmp58, float('inf'))
-    tmp61 = tl.broadcast_to(tmp60, [XBLOCK, 4095])
-    tmp63 = tl.where(xmask, tmp61, float('inf'))
-    tmp64 = tl.broadcast_to(tmp63, [XBLOCK, 4095])
-    tmp66 = tl.where(xmask, tmp64, float('inf'))
-    tmp67 = tl.broadcast_to(tmp66, [XBLOCK, 4095])
+    tmp58 = triton_helpers.minimum(tmp57, tmp57)
+    tmp59 = tl.broadcast_to(tmp58, [XBLOCK, RBLOCK])
+    tmp61 = tl.where(xmask, tmp59, float('inf'))
+    tmp62 = triton_helpers.minimum(tmp61, tmp61)
+    tmp63 = tl.broadcast_to(tmp62, [XBLOCK, RBLOCK])
+    tmp65 = tl.where(xmask, tmp63, float('inf'))
+    tmp66 = triton_helpers.minimum(tmp65, tmp65)
+    tmp67 = tl.broadcast_to(tmp66, [XBLOCK, RBLOCK])
     tmp69 = tl.where(xmask, tmp67, float('inf'))
-    tmp70 = tl.broadcast_to(tmp69, [XBLOCK, 4095])
-    tmp72 = tl.where(xmask, tmp70, float('inf'))
-    tmp73 = tl.broadcast_to(tmp72, [XBLOCK, 4095])
-    tmp75 = tl.where(xmask, tmp73, float('inf'))
-    tmp76 = tl.broadcast_to(tmp75, [XBLOCK, 4095])
-    tmp78 = tl.where(xmask, tmp76, float('inf'))
-    tmp79 = tl.broadcast_to(tmp78, [XBLOCK, 4095])
+    tmp70 = triton_helpers.minimum(tmp69, tmp69)
+    tmp71 = tl.broadcast_to(tmp70, [XBLOCK, RBLOCK])
+    tmp73 = tl.where(xmask, tmp71, float('inf'))
+    tmp74 = triton_helpers.minimum(tmp73, tmp73)
+    tmp75 = tl.broadcast_to(tmp74, [XBLOCK, RBLOCK])
+    tmp77 = tl.where(xmask, tmp75, float('inf'))
+    tmp78 = triton_helpers.minimum(tmp77, tmp77)
+    tmp79 = tl.broadcast_to(tmp78, [XBLOCK, RBLOCK])
     tmp81 = tl.where(xmask, tmp79, float('inf'))
-    tmp82 = tl.broadcast_to(tmp81, [XBLOCK, 4095])
-    tmp84 = tl.where(xmask, tmp82, float('inf'))
-    tmp85 = tl.broadcast_to(tmp84, [XBLOCK, 4095])
-    tmp87 = tl.where(xmask, tmp85, float('inf'))
-    tmp88 = tl.broadcast_to(tmp87, [XBLOCK, 4095])
-    tmp90 = tl.where(xmask, tmp88, float('inf'))
-    tmp91 = tl.broadcast_to(tmp90, [XBLOCK, 4095])
+    tmp82 = triton_helpers.minimum(tmp81, tmp81)
+    tmp83 = tl.broadcast_to(tmp82, [XBLOCK, RBLOCK])
+    tmp85 = tl.where(xmask, tmp83, float('inf'))
+    tmp86 = triton_helpers.minimum(tmp85, tmp85)
+    tmp87 = tl.broadcast_to(tmp86, [XBLOCK, RBLOCK])
+    tmp89 = tl.where(xmask, tmp87, float('inf'))
+    tmp90 = triton_helpers.minimum(tmp89, tmp89)
+    tmp91 = tl.broadcast_to(tmp90, [XBLOCK, RBLOCK])
     tmp93 = tl.where(xmask, tmp91, float('inf'))
-    tmp94 = tl.broadcast_to(tmp93, [XBLOCK, 4095])
-    tmp96 = tl.where(xmask, tmp94, float('inf'))
-    tmp97 = tl.broadcast_to(tmp96, [XBLOCK, 4095])
-    tmp99 = tl.where(xmask, tmp97, float('inf'))
-    tmp100 = tl.broadcast_to(tmp99, [XBLOCK, 4095])
-    tmp102 = tl.where(xmask, tmp100, float('inf'))
-    tmp103 = tl.broadcast_to(tmp102, [XBLOCK, 4095])
+    tmp94 = triton_helpers.minimum(tmp93, tmp93)
+    tmp95 = tl.broadcast_to(tmp94, [XBLOCK, RBLOCK])
+    tmp97 = tl.where(xmask, tmp95, float('inf'))
+    tmp98 = triton_helpers.minimum(tmp97, tmp97)
+    tmp99 = tl.broadcast_to(tmp98, [XBLOCK, RBLOCK])
+    tmp101 = tl.where(xmask, tmp99, float('inf'))
+    tmp102 = triton_helpers.minimum(tmp101, tmp101)
+    tmp103 = tl.broadcast_to(tmp102, [XBLOCK, RBLOCK])
     tmp105 = tl.where(xmask, tmp103, float('inf'))
-    tmp106 = tl.broadcast_to(tmp105, [XBLOCK, 4095])
-    tmp108 = tl.where(xmask, tmp106, float('inf'))
-    tmp109 = tl.broadcast_to(tmp108, [XBLOCK, 4095])
-    tmp111 = tl.where(xmask, tmp109, float('inf'))
-    tmp112 = tl.broadcast_to(tmp111, [XBLOCK, 4095])
-    tmp114 = tl.where(xmask, tmp112, float('inf'))
-    tmp115 = tl.broadcast_to(tmp114, [XBLOCK, 4095])
+    tmp106 = triton_helpers.minimum(tmp105, tmp105)
+    tmp107 = tl.broadcast_to(tmp106, [XBLOCK, RBLOCK])
+    tmp109 = tl.where(xmask, tmp107, float('inf'))
+    tmp110 = triton_helpers.minimum(tmp109, tmp109)
+    tmp111 = tl.broadcast_to(tmp110, [XBLOCK, RBLOCK])
+    tmp113 = tl.where(xmask, tmp111, float('inf'))
+    tmp114 = triton_helpers.minimum(tmp113, tmp113)
+    tmp115 = tl.broadcast_to(tmp114, [XBLOCK, RBLOCK])
     tmp117 = tl.where(xmask, tmp115, float('inf'))
-    tmp118 = tl.broadcast_to(tmp117, [XBLOCK, 4095])
-    tmp120 = tl.where(xmask, tmp118, float('inf'))
-    tmp121 = tl.broadcast_to(tmp120, [XBLOCK, 4095])
-    tmp123 = tl.where(xmask, tmp121, float('inf'))
-    tmp124 = tl.broadcast_to(tmp123, [XBLOCK, 4095])
-    tmp126 = tl.where(xmask, tmp124, float('inf'))
-    tmp127 = tl.broadcast_to(tmp126, [XBLOCK, 4095])
+    tmp118 = triton_helpers.minimum(tmp117, tmp117)
+    tmp119 = tl.broadcast_to(tmp118, [XBLOCK, RBLOCK])
+    tmp121 = tl.where(xmask, tmp119, float('inf'))
+    tmp122 = triton_helpers.minimum(tmp121, tmp121)
+    tmp123 = tl.broadcast_to(tmp122, [XBLOCK, RBLOCK])
+    tmp125 = tl.where(xmask, tmp123, float('inf'))
+    tmp126 = triton_helpers.minimum(tmp125, tmp125)
+    tmp127 = tl.broadcast_to(tmp126, [XBLOCK, RBLOCK])
     tmp129 = tl.where(xmask, tmp127, float('inf'))
-    tmp130 = tl.broadcast_to(tmp129, [XBLOCK, 4095])
-    tmp132 = tl.where(xmask, tmp130, float('inf'))
-    tmp133 = tl.broadcast_to(tmp132, [XBLOCK, 4095])
-    tmp135 = tl.where(xmask, tmp133, float('inf'))
-    tmp136 = tl.broadcast_to(tmp135, [XBLOCK, 4095])
-    tmp138 = tl.where(xmask, tmp136, float('inf'))
-    tmp139 = tl.broadcast_to(tmp138, [XBLOCK, 4095])
+    tmp130 = triton_helpers.minimum(tmp129, tmp129)
+    tmp131 = tl.broadcast_to(tmp130, [XBLOCK, RBLOCK])
+    tmp133 = tl.where(xmask, tmp131, float('inf'))
+    tmp134 = triton_helpers.minimum(tmp133, tmp133)
+    tmp135 = tl.broadcast_to(tmp134, [XBLOCK, RBLOCK])
+    tmp137 = tl.where(xmask, tmp135, float('inf'))
+    tmp138 = triton_helpers.minimum(tmp137, tmp137)
+    tmp139 = tl.broadcast_to(tmp138, [XBLOCK, RBLOCK])
     tmp141 = tl.where(xmask, tmp139, float('inf'))
-    tmp142 = tl.broadcast_to(tmp141, [XBLOCK, 4095])
-    tmp144 = tl.where(xmask, tmp142, float('inf'))
-    tmp145 = tl.broadcast_to(tmp144, [XBLOCK, 4095])
-    tmp147 = tl.where(xmask, tmp145, float('inf'))
-    tmp148 = tl.broadcast_to(tmp147, [XBLOCK, 4095])
-    tmp150 = tl.where(xmask, tmp148, float('inf'))
-    tmp151 = tl.broadcast_to(tmp150, [XBLOCK, 4095])
+    tmp142 = triton_helpers.minimum(tmp141, tmp141)
+    tmp143 = tl.broadcast_to(tmp142, [XBLOCK, RBLOCK])
+    tmp145 = tl.where(xmask, tmp143, float('inf'))
+    tmp146 = triton_helpers.minimum(tmp145, tmp145)
+    tmp147 = tl.broadcast_to(tmp146, [XBLOCK, RBLOCK])
+    tmp149 = tl.where(xmask, tmp147, float('inf'))
+    tmp150 = triton_helpers.minimum(tmp149, tmp149)
+    tmp151 = tl.broadcast_to(tmp150, [XBLOCK, RBLOCK])
     tmp153 = tl.where(xmask, tmp151, float('inf'))
-    tmp154 = tl.broadcast_to(tmp153, [XBLOCK, 4095])
-    tmp156 = tl.where(xmask, tmp154, float('inf'))
-    tmp157 = tl.broadcast_to(tmp156, [XBLOCK, 4095])
-    tmp159 = tl.where(xmask, tmp157, float('inf'))
-    tmp160 = tl.broadcast_to(tmp159, [XBLOCK, 4095])
-    tmp162 = tl.where(xmask, tmp160, float('inf'))
-    tmp163 = tl.broadcast_to(tmp162, [XBLOCK, 4095])
+    tmp154 = triton_helpers.minimum(tmp153, tmp153)
+    tmp155 = tl.broadcast_to(tmp154, [XBLOCK, RBLOCK])
+    tmp157 = tl.where(xmask, tmp155, float('inf'))
+    tmp158 = triton_helpers.minimum(tmp157, tmp158)
+    tmp159 = tl.broadcast_to(tmp158, [XBLOCK, RBLOCK])
+    tmp161 = tl.where(xmask, tmp159, float('inf'))
+    tmp162 = triton_helpers.minimum(tmp161, tmp162)
+    tmp163 = tl.broadcast_to(tmp162, [XBLOCK, RBLOCK])
     tmp165 = tl.where(xmask, tmp163, float('inf'))
-    tmp166 = tl.broadcast_to(tmp165, [XBLOCK, 4095])
-    tmp168 = tl.where(xmask, tmp166, float('inf'))
-    tmp169 = tl.broadcast_to(tmp168, [XBLOCK, 4095])
-    tmp171 = tl.where(xmask, tmp169, float('inf'))
-    tmp172 = tl.broadcast_to(tmp171, [XBLOCK, 4095])
-    tmp174 = tl.where(xmask, tmp172, float('inf'))
-    tmp175 = tl.broadcast_to(tmp174, [XBLOCK, 4095])
+    tmp166 = triton_helpers.minimum(tmp165, tmp166)
+    tmp167 = tl.broadcast_to(tmp166, [XBLOCK, RBLOCK])
+    tmp169 = tl.where(xmask, tmp167, float('inf'))
+    tmp170 = triton_helpers.minimum(tmp169, tmp170)
+    tmp171 = tl.broadcast_to(tmp170, [XBLOCK, RBLOCK])
+    tmp173 = tl.where(xmask, tmp171, float('inf'))
+    tmp174 = triton_helpers.minimum(tmp173, tmp174)
+    tmp175 = tl.broadcast_to(tmp174, [XBLOCK, RBLOCK])
     tmp177 = tl.where(xmask, tmp175, float('inf'))
-    tmp178 = tl.broadcast_to(tmp177, [XBLOCK, 4095])
-    tmp180 = tl.where(xmask, tmp178, float('inf'))
-    tmp181 = tl.broadcast_to(tmp180, [XBLOCK, 4095])
-    tmp183 = tl.where(xmask, tmp181, float('inf'))
-    tmp184 = tl.broadcast_to(tmp183, [XBLOCK, 4095])
-    tmp186 = tl.where(xmask, tmp184, float('inf'))
-    tmp187 = tl.broadcast_to(tmp186, [XBLOCK, 4095])
+    tmp178 = triton_helpers.minimum(tmp177, tmp178)
+    tmp179 = tl.broadcast_to(tmp178, [XBLOCK, RBLOCK])
+    tmp181 = tl.where(xmask, tmp179, float('inf'))
+    tmp182 = triton_helpers.minimum(tmp181, tmp182)
+    tmp183 = tl.broadcast_to(tmp182, [XBLOCK, RBLOCK])
+    tmp185 = tl.where(xmask, tmp183, float('inf'))
+    tmp186 = triton_helpers.minimum(tmp185, tmp186)
+    tmp187 = tl.broadcast_to(tmp186, [XBLOCK, RBLOCK])
     tmp189 = tl.where(xmask, tmp187, float('inf'))
-    tmp190 = tl.broadcast_to(tmp189, [XBLOCK, 4095])
-    tmp192 = tl.where(xmask, tmp190, float('inf'))
-    tmp193 = tl.broadcast_to(tmp192, [XBLOCK, 4095])
-    tmp195 = tl.where(xmask, tmp193, float('inf'))
-    tmp196 = tl.broadcast_to(tmp195, [XBLOCK, 4095])
-    tmp198 = tl.where(xmask, tmp196, float('inf'))
-    tmp199 = tl.broadcast_to(tmp198, [XBLOCK, 4095])
+    tmp190 = triton_helpers.minimum(tmp189, tmp190)
+    tmp191 = tl.broadcast_to(tmp190, [XBLOCK, RBLOCK])
+    tmp193 = tl.where(xmask, tmp191, float('inf'))
+    tmp194 = triton_helpers.minimum(tmp193, tmp194)
+    tmp195 = tl.broadcast_to(tmp194, [XBLOCK, RBLOCK])
+    tmp197 = tl.where(xmask, tmp195, float('inf'))
+    tmp198 = triton_helpers.minimum(tmp197, tmp198)
+    tmp199 = tl.broadcast_to(tmp198, [XBLOCK, RBLOCK])
     tmp201 = tl.where(xmask, tmp199, float('inf'))
-    tmp202 = tl.broadcast_to(tmp201, [XBLOCK, 4095])
-    tmp204 = tl.where(xmask, tmp202, float('inf'))
-    tmp205 = tl.broadcast_to(tmp204, [XBLOCK, 4095])
-    tmp207 = tl.where(xmask, tmp205, float('inf'))
-    tmp208 = tl.broadcast_to(tmp207, [XBLOCK, 4095])
-    tmp210 = tl.where(xmask, tmp208, float('inf'))
-    tmp211 = tl.broadcast_to(tmp210, [XBLOCK, 4095])
+    tmp202 = triton_helpers.minimum(tmp201, tmp202)
+    tmp203 = tl.broadcast_to(tmp202, [XBLOCK, RBLOCK])
+    tmp205 = tl.where(xmask, tmp203, float('inf'))
+    tmp206 = triton_helpers.minimum(tmp205, tmp206)
+    tmp207 = tl.broadcast_to(tmp206, [XBLOCK, RBLOCK])
+    tmp209 = tl.where(xmask, tmp207, float('inf'))
+    tmp210 = triton_helpers.minimum(tmp209, tmp210)
+    tmp211 = tl.broadcast_to(tmp210, [XBLOCK, RBLOCK])
     tmp213 = tl.where(xmask, tmp211, float('inf'))
-    tmp214 = tl.broadcast_to(tmp213, [XBLOCK, 4095])
-    tmp216 = tl.where(xmask, tmp214, float('inf'))
-    tmp217 = tl.broadcast_to(tmp216, [XBLOCK, 4095])
-    tmp219 = tl.where(xmask, tmp217, float('inf'))
-    tmp220 = tl.broadcast_to(tmp219, [XBLOCK, 4095])
-    tmp222 = tl.where(xmask, tmp220, float('inf'))
-    tmp223 = tl.broadcast_to(tmp222, [XBLOCK, 4095])
+    tmp214 = triton_helpers.minimum(tmp213, tmp214)
+    tmp215 = tl.broadcast_to(tmp214, [XBLOCK, RBLOCK])
+    tmp217 = tl.where(xmask, tmp215, float('inf'))
+    tmp218 = triton_helpers.minimum(tmp217, tmp218)
+    tmp219 = tl.broadcast_to(tmp218, [XBLOCK, RBLOCK])
+    tmp221 = tl.where(xmask, tmp219, float('inf'))
+    tmp222 = triton_helpers.minimum(tmp221, tmp222)
+    tmp223 = tl.broadcast_to(tmp222, [XBLOCK, RBLOCK])
     tmp225 = tl.where(xmask, tmp223, float('inf'))
-    tmp226 = tl.broadcast_to(tmp225, [XBLOCK, 4095])
-    tmp228 = tl.where(xmask, tmp226, float('inf'))
-    tmp229 = tl.broadcast_to(tmp228, [XBLOCK, 4095])
-    tmp231 = tl.where(xmask, tmp229, float('inf'))
-    tmp232 = tl.broadcast_to(tmp231, [XBLOCK, 4095])
-    tmp234 = tl.where(xmask, tmp232, float('inf'))
-    tmp235 = tl.broadcast_to(tmp234, [XBLOCK, 4095])
+    tmp226 = triton_helpers.minimum(tmp225, tmp226)
+    tmp227 = tl.broadcast_to(tmp226, [XBLOCK, RBLOCK])
+    tmp229 = tl.where(xmask, tmp227, float('inf'))
+    tmp230 = triton_helpers.minimum(tmp229, tmp230)
+    tmp231 = tl.broadcast_to(tmp230, [XBLOCK, RBLOCK])
+    tmp233 = tl.where(xmask, tmp231, float('inf'))
+    tmp234 = triton_helpers.minimum(tmp233, tmp234)
+    tmp235 = tl.broadcast_to(tmp234, [XBLOCK, RBLOCK])
     tmp237 = tl.where(xmask, tmp235, float('inf'))
-    tmp238 = tl.broadcast_to(tmp237, [XBLOCK, 4095])
-    tmp240 = tl.where(xmask, tmp238, float('inf'))
-    tmp241 = tl.broadcast_to(tmp240, [XBLOCK, 4095])
-    tmp243 = tl.where(xmask, tmp241, float('inf'))
-    tmp244 = tl.broadcast_to(tmp243, [XBLOCK, 4095])
-    tmp246 = tl.where(xmask, tmp244, float('inf'))
-    tmp247 = tl.broadcast_to(tmp246, [XBLOCK, 4095])
+    tmp238 = triton_helpers.minimum(tmp237, tmp238)
+    tmp239 = tl.broadcast_to(tmp238, [XBLOCK, RBLOCK])
+    tmp241 = tl.where(xmask, tmp239, float('inf'))
+    tmp242 = triton_helpers.minimum(tmp241, tmp242)
+    tmp243 = tl.broadcast_to(tmp242, [XBLOCK, RBLOCK])
+    tmp245 = tl.where(xmask, tmp243, float('inf'))
+    tmp246 = triton_helpers.minimum(tmp245, tmp246)
+    tmp247 = tl.broadcast_to(tmp246, [XBLOCK, RBLOCK])
     tmp249 = tl.where(xmask, tmp247, float('inf'))
-    tmp250 = tl.broadcast_to(tmp249, [XBLOCK, 4095])
-    tmp252 = tl.where(xmask, tmp250, float('inf'))
-    tmp253 = tl.broadcast_to(tmp252, [XBLOCK, 4095])
-    tmp255 = tl.where(xmask, tmp253, float('inf'))
-    tmp256 = tl.broadcast_to(tmp255, [XBLOCK, 4095])
-    tmp258 = tl.where(xmask, tmp256, float('inf'))
-    tmp259 = tl.broadcast_to(tmp258, [XBLOCK, 4095])
+    tmp250 = triton_helpers.minimum(tmp249, tmp250)
+    tmp251 = tl.broadcast_to(tmp250, [XBLOCK, RBLOCK])
+    tmp253 = tl.where(xmask, tmp251, float('inf'))
+    tmp254 = triton_helpers.minimum(tmp253, tmp254)
+    tmp255 = tl.broadcast_to(tmp254, [XBLOCK, RBLOCK])
+    tmp257 = tl.where(xmask, tmp255, float('inf'))
+    tmp258 = triton_helpers.minimum(tmp257, tmp258)
+    tmp259 = tl.broadcast_to(tmp258, [XBLOCK, RBLOCK])
     tmp261 = tl.where(xmask, tmp259, float('inf'))
-    tmp262 = tl.broadcast_to(tmp261, [XBLOCK, 4095])
-    tmp264 = tl.where(xmask, tmp262, float('inf'))
-    tmp265 = tl.broadcast_to(tmp264, [XBLOCK, 4095])
-    tmp267 = tl.where(xmask, tmp265, float('inf'))
-    tmp268 = tl.broadcast_to(tmp267, [XBLOCK, 4095])
-    tmp270 = tl.where(xmask, tmp268, float('inf'))
-    tmp271 = tl.broadcast_to(tmp270, [XBLOCK, 4095])
+    tmp262 = triton_helpers.minimum(tmp261, tmp262)
+    tmp263 = tl.broadcast_to(tmp262, [XBLOCK, RBLOCK])
+    tmp265 = tl.where(xmask, tmp263, float('inf'))
+    tmp266 = triton_helpers.minimum(tmp265, tmp266)
+    tmp267 = tl.broadcast_to(tmp266, [XBLOCK, RBLOCK])
+    tmp269 = tl.where(xmask, tmp267, float('inf'))
+    tmp270 = triton_helpers.minimum(tmp269, tmp270)
+    tmp271 = tl.broadcast_to(tmp270, [XBLOCK, RBLOCK])
     tmp273 = tl.where(xmask, tmp271, float('inf'))
-    tmp274 = tl.broadcast_to(tmp273, [XBLOCK, 4095])
-    tmp276 = tl.where(xmask, tmp274, float('inf'))
-    tmp277 = tl.broadcast_to(tmp276, [XBLOCK, 4095])
-    tmp279 = tl.where(xmask, tmp277, float('inf'))
-    tmp280 = tl.broadcast_to(tmp279, [XBLOCK, 4095])
-    tmp282 = tl.where(xmask, tmp280, float('inf'))
-    tmp283 = tl.broadcast_to(tmp282, [XBLOCK, 4095])
+    tmp274 = triton_helpers.minimum(tmp273, tmp274)
+    tmp275 = tl.broadcast_to(tmp274, [XBLOCK, RBLOCK])
+    tmp277 = tl.where(xmask, tmp275, float('inf'))
+    tmp278 = triton_helpers.minimum(tmp277, tmp278)
+    tmp279 = tl.broadcast_to(tmp278, [XBLOCK, RBLOCK])
+    tmp281 = tl.where(xmask, tmp279, float('inf'))
+    tmp282 = triton_helpers.minimum(tmp281, tmp282)
+    tmp283 = tl.broadcast_to(tmp282, [XBLOCK, RBLOCK])
     tmp285 = tl.where(xmask, tmp283, float('inf'))
-    tmp286 = tl.broadcast_to(tmp285, [XBLOCK, 4095])
-    tmp288 = tl.where(xmask, tmp286, float('inf'))
-    tmp289 = tl.broadcast_to(tmp288, [XBLOCK, 4095])
-    tmp291 = tl.where(xmask, tmp289, float('inf'))
-    tmp292 = tl.broadcast_to(tmp291, [XBLOCK, 4095])
-    tmp294 = tl.where(xmask, tmp292, float('inf'))
-    tmp295 = tl.broadcast_to(tmp294, [XBLOCK, 4095])
+    tmp286 = triton_helpers.minimum(tmp285, tmp286)
+    tmp287 = tl.broadcast_to(tmp286, [XBLOCK, RBLOCK])
+    tmp289 = tl.where(xmask, tmp287, float('inf'))
+    tmp290 = triton_helpers.minimum(tmp289, tmp290)
+    tmp291 = tl.broadcast_to(tmp290, [XBLOCK, RBLOCK])
+    tmp293 = tl.where(xmask, tmp291, float('inf'))
+    tmp294 = triton_helpers.minimum(tmp293, tmp294)
+    tmp295 = tl.broadcast_to(tmp294, [XBLOCK, RBLOCK])
     tmp297 = tl.where(xmask, tmp295, float('inf'))
-    tmp298 = tl.broadcast_to(tmp297, [XBLOCK, 4095])
-    tmp300 = tl.where(xmask, tmp298, float('inf'))
-    tmp301 = tl.broadcast_to(tmp300, [XBLOCK, 4095])
-    tmp303 = tl.where(xmask, tmp301, float('inf'))
-    tmp304 = tl.broadcast_to(tmp303, [XBLOCK, 4095])
-    tmp306 = tl.where(xmask, tmp304, float('inf'))
-    tmp307 = tl.broadcast_to(tmp306, [XBLOCK, 4095])
+    tmp298 = triton_helpers.minimum(tmp297, tmp298)
+    tmp299 = tl.broadcast_to(tmp298, [XBLOCK, RBLOCK])
+    tmp301 = tl.where(xmask, tmp299, float('inf'))
+    tmp302 = triton_helpers.minimum(tmp301, tmp302)
+    tmp303 = tl.broadcast_to(tmp302, [XBLOCK, RBLOCK])
+    tmp305 = tl.where(xmask, tmp303, float('inf'))
+    tmp306 = triton_helpers.minimum(tmp305, tmp306)
+    tmp307 = tl.broadcast_to(tmp306, [XBLOCK, RBLOCK])
     tmp309 = tl.where(xmask, tmp307, float('inf'))
-    tmp310 = tl.broadcast_to(tmp309, [XBLOCK, 4095])
-    tmp312 = tl.where(xmask, tmp310, float('inf'))
-    tmp313 = tl.broadcast_to(tmp312, [XBLOCK, 4095])
-    tmp315 = tl.where(xmask, tmp313, float('inf'))
-    tmp316 = tl.broadcast_to(tmp315, [XBLOCK, 4095])
-    tmp318 = tl.where(xmask, tmp316, float('inf'))
-    tmp319 = tl.broadcast_to(tmp318, [XBLOCK, 4095])
+    tmp310 = triton_helpers.minimum(tmp309, tmp310)
+    tmp311 = tl.broadcast_to(tmp310, [XBLOCK, RBLOCK])
+    tmp313 = tl.where(xmask, tmp311, float('inf'))
+    tmp314 = triton_helpers.minimum(tmp313, tmp314)
+    tmp315 = tl.broadcast_to(tmp314, [XBLOCK, RBLOCK])
+    tmp317 = tl.where(xmask, tmp315, float('inf'))
+    tmp318 = triton_helpers.minimum(tmp317, tmp318)
+    tmp319 = tl.broadcast_to(tmp318, [XBLOCK, RBLOCK])
     tmp321 = tl.where(xmask, tmp319, float('inf'))
-    tmp322 = tl.broadcast_to(tmp321, [XBLOCK, 4095])
-    tmp324 = tl.where(xmask, tmp322, float('inf'))
-    tmp325 = tl.broadcast_to(tmp324, [XBLOCK, 4095])
-    tmp327 = tl.where(xmask, tmp325, float('inf'))
-    tmp328 = tl.broadcast_to(tmp327, [XBLOCK, 4095])
-    tmp330 = tl.where(xmask, tmp328, float('inf'))
-    tmp331 = tl.broadcast_to(tmp330, [XBLOCK, 4095])
+    tmp322 = triton_helpers.minimum(tmp321, tmp322)
+    tmp323 = tl.broadcast_to(tmp322, [XBLOCK, RBLOCK])
+    tmp325 = tl.where(xmask, tmp323, float('inf'))
+    tmp326 = triton_helpers.minimum(tmp325, tmp326)
+    tmp327 = tl.broadcast_to(tmp326, [XBLOCK, RBLOCK])
+    tmp329 = tl.where(xmask, tmp327, float('inf'))
+    tmp330 = triton_helpers.minimum(tmp329, tmp330)
+    tmp331 = tl.broadcast_to(tmp330, [XBLOCK, RBLOCK])
     tmp333 = tl.where(xmask, tmp331, float('inf'))
-    tmp334 = tl.broadcast_to(tmp333, [XBLOCK, 4095])
-    tmp336 = tl.where(xmask, tmp334, float('inf'))
-    tmp337 = tl.broadcast_to(tmp336, [XBLOCK, 4095])
-    tmp339 = tl.where(xmask, tmp337, float('inf'))
-    tmp340 = tl.broadcast_to(tmp339, [XBLOCK, 4095])
-    tmp342 = tl.where(xmask, tmp340, float('inf'))
-    tmp343 = tl.broadcast_to(tmp342, [XBLOCK, 4095])
+    tmp334 = triton_helpers.minimum(tmp333, tmp334)
+    tmp335 = tl.broadcast_to(tmp334, [XBLOCK, RBLOCK])
+    tmp337 = tl.where(xmask, tmp335, float('inf'))
+    tmp338 = triton_helpers.minimum(tmp337, tmp338)
+    tmp339 = tl.broadcast_to(tmp338, [XBLOCK, RBLOCK])
+    tmp341 = tl.where(xmask, tmp339, float('inf'))
+    tmp342 = triton_helpers.minimum(tmp341, tmp342)
+    tmp343 = tl.broadcast_to(tmp342, [XBLOCK, RBLOCK])
     tmp345 = tl.where(xmask, tmp343, float('inf'))
-    tmp346 = tl.broadcast_to(tmp345, [XBLOCK, 4095])
-    tmp348 = tl.where(xmask, tmp346, float('inf'))
-    tmp349 = tl.broadcast_to(tmp348, [XBLOCK, 4095])
-    tmp351 = tl.where(xmask, tmp349, float('inf'))
-    tmp352 = tl.broadcast_to(tmp351, [XBLOCK, 4095])
-    tmp354 = tl.where(xmask, tmp352, float('inf'))
-    tmp355 = tl.broadcast_to(tmp354, [XBLOCK, 4095])
+    tmp346 = triton_helpers.minimum(tmp345, tmp346)
+    tmp347 = tl.broadcast_to(tmp346, [XBLOCK, RBLOCK])
+    tmp349 = tl.where(xmask, tmp347, float('inf'))
+    tmp350 = triton_helpers.minimum(tmp349, tmp350)
+    tmp351 = tl.broadcast_to(tmp350, [XBLOCK, RBLOCK])
+    tmp353 = tl.where(xmask, tmp351, float('inf'))
+    tmp354 = triton_helpers.minimum(tmp353, tmp354)
+    tmp355 = tl.broadcast_to(tmp354, [XBLOCK, RBLOCK])
     tmp357 = tl.where(xmask, tmp355, float('inf'))
-    tmp358 = tl.broadcast_to(tmp357, [XBLOCK, 4095])
-    tmp360 = tl.where(xmask, tmp358, float('inf'))
-    tmp361 = tl.broadcast_to(tmp360, [XBLOCK, 4095])
-    tmp363 = tl.where(xmask, tmp361, float('inf'))
-    tmp364 = tl.broadcast_to(tmp363, [XBLOCK, 4095])
-    tmp366 = tl.where(xmask, tmp364, float('inf'))
-    tmp367 = tl.broadcast_to(tmp366, [XBLOCK, 4095])
+    tmp358 = triton_helpers.minimum(tmp357, tmp358)
+    tmp359 = tl.broadcast_to(tmp358, [XBLOCK, RBLOCK])
+    tmp361 = tl.where(xmask, tmp359, float('inf'))
+    tmp362 = triton_helpers.minimum(tmp361, tmp362)
+    tmp363 = tl.broadcast_to(tmp362, [XBLOCK, RBLOCK])
+    tmp365 = tl.where(xmask, tmp363, float('inf'))
+    tmp366 = triton_helpers.minimum(tmp365, tmp366)
+    tmp367 = tl.broadcast_to(tmp366, [XBLOCK, RBLOCK])
     tmp369 = tl.where(xmask, tmp367, float('inf'))
-    tmp370 = tl.broadcast_to(tmp369, [XBLOCK, 4095])
-    tmp372 = tl.where(xmask, tmp370, float('inf'))
-    tmp373 = tl.broadcast_to(tmp372, [XBLOCK, 4095])
-    tmp375 = tl.where(xmask, tmp373, float('inf'))
-    tmp376 = tl.broadcast_to(tmp375, [XBLOCK, 4095])
-    tmp378 = tl.where(xmask, tmp376, float('inf'))
-    tmp379 = tl.broadcast_to(tmp378, [XBLOCK, 4095])
-    tmp381 = tl.where(xmask, tmp379
+    tmp370 = triton_helpers.minimum(tmp369, tmp370)
+    tmp371 = tl.broadcast_to(tmp370, [XBLOCK, RBLOCK])
+    tmp373 = tl.where(xmask, tmp371, float('inf'))
+    tmp374 = triton_helpers.minimum(tmp373, tmp374)
+    tmp375 = tl.broadcast_to(tmp374, [XBLOCK, RBLOCK])
+    tmp377 = tl.where(xmask, tmp375, float('inf'))
+    tmp378 = triton_helpers.minimum(tmp377, tmp378)
+    tmp379 = tl.broadcast_to(tmp378, [XBLOCK, RBLOCK])
+    tmp381 = tl.where(xmask, tmp379, float('inf'))
+    tmp382 = triton_helpers.minimum(tmp381, tmp382)
+    tmp383 = tl.broadcast_to(tmp382, [XBLOCK, RBLOCK])
+    tmp385 = tl.where(xmask, tmp383, float('inf'))
+    tmp386 = triton_helpers.minimum(tmp385, tmp386)
+    tmp387 = tl.broadcast_to(tmp386, [XBLOCK, RBLOCK])
+    tmp389 = tl.where(xmask, tmp387, float('inf'))
+    tmp390 = triton_helpers.minimum(tmp389, tmp390)
+    tmp391 = tl.broadcast_to(tmp390, [XBLOCK, RBLOCK])
+    tmp393 = tl.where(xmask, tmp391, float('inf'))
+    tmp394 = triton_helpers.minimum(tmp393, tmp394)
+    tmp395 = tl.broadcast_to(tmp394, [XBLOCK, RBLOCK])
+    tmp397 = tl.where(xmask, tmp395, float('inf'))
+    tmp398 = triton_helpers.minimum(tmp397, tmp398)
+    tmp399 = tl.broadcast_to(tmp398, [XBLOCK, RBLOCK])
+    tmp401 = tl.where(xmask, tmp399, float('inf'))
+    tmp402 = triton_helpers.minimum(tmp401, tmp402)
+    tmp403 = tl.broadcast_to(tmp402, [XBLOCK, RBLOCK])
+    tmp405 = tl.where(xmask, tmp403, float('inf'))
+    tmp406 = triton_helpers.minimum(tmp405, tmp406)
+    tmp407 = tl.broadcast_to(tmp406, [XBLOCK, RBLOCK])
+    tmp409 = tl.where(xmask, tmp407, float('inf'))
+    tmp410 = triton_helpers.minimum(tmp409, tmp410)
+    tmp411 = tl.broadcast_to(tmp410, [XBLOCK, RBLOCK])
+    tmp413 = tl.where(xmask, tmp411, float('inf'))
+    tmp414 = triton_helpers.minimum(tmp413, tmp414)
+    tmp415 = tl.broadcast_to(tmp414, [XBLOCK, RBLOCK])
+    tmp417 = tl.where(xmask, tmp415, float('inf'))
+    tmp418 = triton_helpers.minimum(tmp417, tmp418)
+    tmp419 = tl.broadcast_to(tmp418, [XBLOCK, RBLOCK])
+    tmp421 = tl.where(xmask, tmp419, float('inf'))
+    tmp422 = triton_helpers.minimum(tmp421, tmp422)
+    tmp423 = tl.broadcast_to(tmp422, [XBLOCK, RBLOCK])
+    tmp425 = tl.where(xmask, tmp423, float('inf'))
+    tmp426 = triton_helpers.minimum(tmp425, tmp426)
+    tmp427 = tl.broadcast_to(tmp426, [XBLOCK, RBLOCK])
+    tmp429 = tl.where(xmask, tmp427, float('inf'))
+    tmp430 = triton_helpers.minimum(tmp429, tmp430)
+    tmp431 = tl.broadcast_to(tmp430, [XBLOCK, RBLOCK])
+    tmp433 = tl.where(xmask, tmp431, float('inf'))
+    tmp434 = triton_helpers.minimum(tmp

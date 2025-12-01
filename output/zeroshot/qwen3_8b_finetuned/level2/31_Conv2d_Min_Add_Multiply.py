@@ -5,61 +5,56 @@ import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 from torch._inductor.runtime import triton_helpers
-import torch.nn.functional as F
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def triton_poi_fused_min_add_mul_0(in_ptr0, in_ptr1, in_ptr2, in_ptr3, out_ptr0,
-    xnumel, rnumel, XBLOCK: tl.constexpr):
-    xnumel = 268435456
-    RBLOCK: tl.constexpr = 1
+def triton_poi_fused_add_min_mul_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 2621440
     xoffset = tl.program_id(0) * XBLOCK
-    xoffset + tl.arange(0, XBLOCK)[:, None]
-    tl.full([XBLOCK, RBLOCK], True, tl.int1)
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    x0 = xindex
-    x1 = xindex % 128
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = tl.load(in_ptr1 + 0, xmask, eviction_policy='evict_last')
-    tmp2 = tl.load(in_ptr2 + x1, xmask, eviction_policy='evict_last')
-    tmp3 = tl.load(in_ptr3 + 0, xmask, eviction_policy='evict_last')
-    tmp4 = triton_helpers.maximum(tmp1, tmp2)
-    tmp5 = triton_helpers.minimum(tmp0, tmp4)
-    tmp6 = tmp5 + tmp2
-    tmp7 = tmp6 * tmp3
-    tl.store(out_ptr0 + x0, tmp7, xmask)
+    x3 = xindex
+    x1 = xindex // 16384 % 128
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = 0.5
+    tmp3 = triton_helpers.minimum(tmp0, tmp2)
+    tmp4 = tmp3 + tmp1
+    tmp5 = 2.0
+    tmp6 = tmp4 * tmp5
+    tl.store(in_out_ptr0 + x3, tmp6, xmask)
 
 
-def triton_min_add_mul(args):
-    arg0_1, arg1_1, arg2_1, arg3_1 = args
+def call(args):
+    primals_1, primals_2, primals_3 = args
     args.clear()
-    assert_size_stride(arg0_1, (128, 128, 128, 128), (2097152, 262144, 32768, 256))
-    assert_size_stride(arg1_1, (1,), (1,))
-    assert_size_stride(arg2_1, (128, 1, 1), (128, 1, 1))
-    assert_size_stride(arg3_1, (1,), (1,))
+    assert_size_stride(primals_1, (128, 128, 3, 3), (1152, 9, 3, 1))
+    assert_size_stride(primals_2, (128, 64, 3, 3), (576, 9, 3, 1))
+    assert_size_stride(primals_3, (128,), (1,))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((128, 128, 128, 128), (2097152, 262144, 32768,
-            256), torch.float32)
+        buf0 = torch.ops.aten.convolution.convolution(primals_2, primals_1,
+            stride=(1, 1), padding=(1, 1), dilation=(1, 1), transposed=False
+            , output_padding=(0, 0), groups=1, bias=None)
+        assert_size_stride(buf0, (128, 128, 128, 128), (2097152, 16384, 128,
+            1))
+        buf1 = buf0
+        del buf0
         get_raw_stream(0)
-        triton_poi_fused_min_add_mul_0[grid(268435456)](arg0_1, arg1_1,
-            arg2_1, arg3_1, buf0, 268435456, 1, XBLOCK=256, num_warps=4,
-            num_stages=1)
-        del arg1_1
-        del arg2_1
-        del arg3_1
-    return buf0,
+        triton_poi_fused_add_min_mul_0[grid(2621440)](buf1, primals_3, 
+            2621440, XBLOCK=512, num_warps=8, num_stages=1)
+        del primals_3
+    return buf1, primals_1, primals_2
 
 
 class ModelNew(nn.Module):
     """
-    Optimized model that performs a convolution, elementwise min with a constant,
-    adds a bias, and multiplies by a scaling factor, with the elementwise
-    operations replaced by a fused Triton kernel.
+    Simple model that performs a convolution, takes the minimum with a constant, adds a bias term, and multiplies by a scaling factor.
     """
-    def __init__(self, in_channels, out_channels, kernel_size, constant_value,
-        bias_shape, scaling_factor):
+    def __init__(self, in_channels, out_channels, kernel_size, constant_value, bias_shape, scaling_factor):
         super(ModelNew, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
         self.constant_value = constant_value
@@ -67,9 +62,8 @@ class ModelNew(nn.Module):
         self.scaling_factor = scaling_factor
 
     def forward(self, input_0):
-        arg0_1 = input_0
-        arg1_1 = torch.tensor([self.constant_value], device='cuda')
-        arg2_1 = self.bias
-        arg3_1 = torch.tensor([self.scaling_factor], device='cuda')
-        output = triton_min_add_mul([arg0_1, arg1_1, arg2_1, arg3_1])
+        primals_1 = self.conv.weight
+        primals_2 = input_0
+        primals_3 = self.bias
+        output = call([primals_1, primals_2, primals_3])
         return output[0]

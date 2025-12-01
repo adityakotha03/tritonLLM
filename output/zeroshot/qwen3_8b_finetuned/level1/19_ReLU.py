@@ -2,49 +2,39 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 
 
 @triton.jit
-def relu_kernel(
-    in_out_ptr0,  # Pointer to input/output tensor
-    xnumel,  # Total number of elements
-    XBLOCK: tl.constexpr,
-):
+def triton_poi_fused_relu_0(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 1610612864
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    tl.full([1], xnumel, tl.int64)
     xmask = xindex < xnumel
     x0 = xindex
-    tmp0 = tl.load(in_out_ptr0 + x0, xmask, eviction_policy='evict_last')
-    tmp1 = tmp0 <= 0
-    tmp2 = tl.full([1], 0, tl.int32)
-    tmp3 = tl.where(tmp1, tmp2, tmp0)
-    tl.store(in_out_ptr0 + x0, tmp3, xmask)
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 > tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = tl.where(tmp2, tmp3, tmp0)
+    tl.store(out_ptr0 + x0, tmp4, xmask)
 
 
-def triton_relu(input_0):
-    """
-    This function wraps the Triton kernel call. It:
-      1. Ensures the input tensor is contiguous on GPU.
-      2. Calculates the grid (blocks) needed.
-      3. Launches the Triton kernel.
-    """
-    assert input_0.is_cuda, "Tensor must be on CUDA."
-    input_0 = input_0.contiguous()
-
-    # Prepare output tensor
-    output = torch.empty_like(input_0)
-
-    # Number of elements in the tensor
-    xnumel = input_0.numel()
-    XBLOCK = 128  # Tunable parameter for block size
-
-    # Determine the number of blocks needed
-    grid = lambda meta: ((xnumel + meta["XBLOCK"] - 1) // meta["XBLOCK"],)
-
-    # Launch the Triton kernel
-    relu_kernel[grid](output, xnumel, XBLOCK=XBLOCK)
-    return output
+def call(args):
+    arg0_1, = args
+    args.clear()
+    assert_size_stride(arg0_1, (4096, 393216), (393216, 1))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided_cuda((4096, 393216), (393216, 1), torch.float32)
+        get_raw_stream(0)
+        triton_poi_fused_relu_0[grid(1610612864)](arg0_1, buf0, 1610612864,
+            XBLOCK=1024, num_warps=4, num_stages=1)
+        del arg0_1
+    return buf0,
 
 
 class ModelNew(nn.Module):
@@ -54,14 +44,7 @@ class ModelNew(nn.Module):
     def __init__(self):
         super(ModelNew, self).__init__()
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Applies ReLU activation to the input tensor.
-
-        Args:
-            x (torch.Tensor): Input tensor of any shape.
-
-        Returns:
-            torch.Tensor: Output tensor with ReLU applied, same shape as input.
-        """
-        return triton_relu(x)
+    def forward(self, input_0):
+        arg0_1 = input_0
+        output = call([arg0_1])
+        return output[0]

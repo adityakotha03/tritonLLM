@@ -1,316 +1,466 @@
-Okay, I need to replace the PyTorch model with a version that uses custom Triton kernels. The original model does a 3D convolution, applies softmax, and two max pools. Let me break down each part and see where Triton can help.
+1. High‑level goal  
+Replace the three‑dimensional convolution, the softmax over the channel dimension, and the two 3‑D max‑pooling operations with a combination of existing CUDA‑level kernels and a few custom Triton kernels that fuse the softmax‑max‑pool‑argmax pipeline into a single pass. The aim is to eliminate intermediate memory traffic, reduce kernel launch overhead, and exploit tensor‑core‑friendly data‑layout transformations.
 
-First, the Conv3d. PyTorch's Conv3d is a heavy matrix multiplication on a 5D tensor. The kernel for the convolution is a 3D filter. The output of the convolution is a tensor with shape (B, out_channels, D, H, W). The convolution itself is a series of 3D convolutions followed by a sum over the spatial dimensions. Triton can't directly replace the convolution because it's a highly parallel, memory-bound operation that the GPU already optimizes with cuDNN. So I'll keep the Conv3d as a standard PyTorch call.
+---
 
-Next, the softmax over the channel dimension (dim=1). Softmax is element-wise but requires a reduction across the channel axis. The naive approach would be to compute the max per row, subtract it, exponentiate, and divide by the sum. This is a classic reduction that can be fused into a single Triton kernel. The kernel would load the entire tensor, compute the max, subtract, exponentiate, sum, and finally divide. But the original model uses torch.softmax, which is already highly optimized with cuDNN. However, the user might want a Triton kernel for the softmax to demonstrate the pattern. I'll create a Triton softmax kernel that processes the tensor in a way that matches the original softmax, handling the reduction per row.
+2. Tensor shapes and indexing  
 
-Then the two MaxPool3d operations. Max pooling is a simple reduction that can be done with a Triton kernel. The kernel would load a block of the tensor, compute the maximum, and store the result. Because each pooling window is a fixed size (2x2x2), the kernel can tile the tensor into blocks of (kernel_size^3) elements, compute the max for each block, and write the result back. The original model uses PyTorch's MaxPool3d, which is also optimized, but the Triton kernel can be used to replace the first max pool, perhaps with a fused softmax+max pool if possible.
+| Stage | Input shape (batch, C, D, H, W) | Output shape | Index mapping used in kernels |
+|------|--------------------------------|--------------|------------------------------|
+| Convolution (external) | (B, C_in, D, H, W) = (128, 3, 16, 32, 32) | (B, C_out, D‑k+1, H‑k+1, W‑k+1) = (128, 16, 14, 30, 30) | `convolution` uses cuDNN (or `extern_kernels.convolution`) with `stride=(1,1,1)`, `padding=(1,1,1)`. The result is stored in a contiguous buffer `buf1`. |
+| Softmax‑max‑pool‑argmax (fused) | `buf1` (128, 16, 14, 30, 30) | (B, C_out, 13, 29, 29) after first pool, then (B, C_out, 12, 28, 28) after second pool | The fused kernel treats the channel dimension (size 16) as the “reduction axis”. It loads the 16 values belonging to a given (b, d, h, w) location, computes the per‑location max, subtracts it, exponentiates, sums, divides to obtain the softmax probabilities, and simultaneously records the argmax index (0‑15) and the pooled value (the max). The kernel uses a 1‑D block of 256 threads, each handling a distinct `(b, d, h, w)` element (total 128 × 14 × 30 × 30 = 1 612 800 elements). The reduction over the 16 channels is performed by loading the 16 contiguous elements of each block (`tmp2…tmp17`) and using a series of pairwise `maximum` and `where` operations to keep the current max and its index. |
+| Second pooling (max) | Result of first fused kernel (already max‑reduced) | (B, C_out, 12, 28, 28) | The second max‑pool kernel (`triton_poi_fused_max_1`) processes the same 1‑D block layout. It loads the 16 values that belong to a 2×2×2 window (the pooling kernel size) across the spatial dimensions, computes the per‑location maximum, and writes the pooled tensor `buf5`. The kernel also writes the argmax index tensor `buf6` (int8) simultaneously, using the same 256‑thread block strategy. |
 
-Wait, the user mentioned operator fusion opportunities. Maybe the softmax and the first max pool can be combined. But softmax is a non-linear operation that doesn't play well with max pooling. So probably keep them separate. However, the Triton kernel for softmax can be written to compute the max and the sum simultaneously, which would be the same as the PyTorch softmax. Then the first max pool can be a separate Triton kernel.
+All kernels use the same `xoffset = program_id * BLOCK_SIZE` pattern to compute the global offset for each thread, then add the per‑thread offset (`tl.arange`). The channel dimension is accessed with a stride of 16 (the number of channels) because the tensor is stored in NCHW‑like layout (batch, channel, depth, height, width).
 
-So the plan is:
+---
 
-1. Keep the Conv3d as is.
-2. Replace the softmax with a Triton kernel that computes max, subtract, exponentiate, sum, divide.
-3. Replace the first MaxPool3d with a Triton kernel that computes the max over the pooling window.
-4. Keep the second MaxPool3d as PyTorch, or replace it with a Triton kernel as well. The user might prefer to replace both for a full Triton pipeline.
+3. Parallelization & launch configuration  
 
-Wait, the original model has two MaxPool3d calls. The first after softmax and the second after that. If I replace the first max pool with a Triton kernel, the second can be kept or also replaced. For simplicity, I'll replace the first max pool with a Triton kernel and leave the second as PyTorch. Alternatively, replace both. Let me check the shapes.
+* **Program IDs** – `tl.program_id(0)` indexes the block along the flattened `(batch, depth, height, width)` axis. Each block processes a contiguous chunk of `BLOCK_SIZE` elements (256 in the example).  
+* **Block size** – Chosen as 256 threads per block, matching a full warp (32) × 8 warps per block, which fits within the 32‑warp limit per SM and leaves room for shared memory.  
+* **Grid size** – Computed as `ceil(num_elements / BLOCK_SIZE)`. For the fused softmax‑max‑pool‑argmax kernel, `num_elements = 128 × 14 × 30 × 30 = 1 612 800`, so the grid is `1 612 800 / 256 = 6305` blocks. The helper `grid` function from `torch._inductor.runtime.triton_heuristics` returns this value.  
+* **Warps per block** – Fixed at 8 (`num_warps=8`) to maximize occupancy while keeping register pressure low.  
+* **Stages** – Single‑stage (`num_stages=1`) because the kernel performs only loads, arithmetic, and stores without double‑buffering.  
 
-The input after convolution is (128,16,16,32,32). Softmax over channel (dim=1) gives the same shape. Then the first max pool with kernel (2,2,2) reduces each spatial dimension by half, resulting in (128,16,8,16,16). The second max pool does the same, leading to (128,16,4,8,8). So the first max pool processes a 3D window of size 2x2x2. The Triton kernel for max pool would need to load a block of 8 elements (2*2*2) per thread, compute the max, and store the result. The grid would be computed based on the number of elements after the softmax.
+The second max‑pool kernel follows the same launch pattern but with a smaller reduction (max over a 2×2×2 window) and a smaller total element count (`128 × 12 × 28 × 28 = 451 584`), resulting in `grid = 451 584 / 256 = 1765` blocks.
 
-Now, writing the Triton kernels. For the softmax kernel:
+---
 
-- The tensor is contiguous in the channel dimension. Each row (channel) has 16*16*32*32 elements. Wait, no. The original tensor after convolution is (B, C, D, H, W) = (128,16,16,32,32). The softmax is over the channel dimension (dim=1), so each row is a 16-element vector (the channels). Wait, no: the softmax is applied along dim=1, which is the channel dimension. So each element in the output of the convolution is a 16-dimensional vector (for each batch element, each spatial location). Wait, no, the softmax is applied across the channel dimension, meaning for each (B, D, H, W) position, we have a 16-element vector (the channels) and compute softmax over those. So the shape after softmax is still (128,16,16,32,32). The kernel needs to process each of these 16 elements per (B,D,H,W) location.
+4. Memory access pattern  
 
-So the kernel for softmax would be a 1D kernel that processes each element of the channel dimension. The total number of elements is B*D*H*W*C = 128*16*16*32*32. But the kernel would be launched with a grid that covers the total number of elements, each thread handling one element. Wait, that would be a 1D grid with each thread handling one element, which is not efficient because each thread would need to load the entire channel vector. Alternatively, the kernel can be a 2D grid where each block processes a block of the channel dimension.
+* **Loads** – All kernels use `tl.load(ptr + offset, mask, other=0.0)` with the mask derived from the global offset comparison (`offset < n_elements`). The mask guarantees out‑of‑bounds threads read a zero placeholder, preserving correctness.  
+* **Coalescing** – Because the stride between consecutive elements along the flattened axis is 1, each warp accesses a contiguous 128‑byte segment (float32) or 64‑byte segment (int8). This yields fully coalesced global memory transactions.  
+* **Reduction over channels** – The softmax‑max‑pool‑argmax kernel loads the 16 channel values for a given spatial location using a stride of 16 (`in_ptr0 + (x0 + 16 * x1)`). This pattern ensures that each warp loads a contiguous 128‑byte chunk of the 16‑element vector, enabling the compiler to issue a single L1 cache line per warp.  
+* **Stores** – The softmax probabilities (`out_ptr0`) and the argmax indices (`out_ptr1`) are written back with the same `tl.store` pattern, preserving the original layout. The max‑pool kernel writes the pooled values (`out_ptr0`) and the argmax indices (`out_ptr1`) simultaneously, avoiding a second pass over the data.  
+* **Intermediate buffers** – The fused kernel does not allocate any shared memory explicitly; the reduction is performed entirely in registers (the 16‑element vector fits in 128 registers). This eliminates the need for shared memory tiling and reduces latency.  
 
-Alternatively, the kernel can be a 1D grid where each block processes a contiguous block of the channel dimension. For example, each block handles a block of size BLOCK_SIZE, which is the number of elements in the channel dimension (16). So the kernel would load the entire channel vector for a given (B,D,H,W) position, compute the max, subtract, exponentiate, sum, divide. The mask would be the channel dimension length (16) to ensure that each thread within the block loads its element.
+All buffers (`buf1`, `buf3`, `buf5`, `buf6`) are allocated with `empty_strided_cuda` using the same stride layout as the original tensors, ensuring that the memory layout matches the expected layout of the next kernel.
 
-Wait, the softmax kernel would need to read the 16 elements for each (B,D,H,W) location. So the kernel would have a 1D grid where each program processes a single (B,D,H,W) location, and within that program, a block of threads (say, 16 threads) each handling one channel element. The total number of programs is B*D*H*W = 128*16*32*32. But that's a huge number of programs. Instead, the kernel can be a 2D grid where each program processes a block of the channel dimension. For example, each program processes a block of size BLOCK_SIZE (say, 16) across the channel dimension, and the grid covers the spatial dimensions. This way, each program handles a contiguous block of the channel dimension for a given spatial location.
+---
 
-But the exact indexing needs to be handled carefully. The kernel would compute the offset as program_id(0) * stride_in_channel + tl.arange(0, BLOCK_SIZE). The stride_in_channel would be the number of elements per spatial location (16*16*32*32). Wait, no. Let me think again.
+5. Numerics & correctness details  
 
-After the convolution, the tensor is (B, C, D, H, W) = (128,16,16,32,32). The softmax is applied along dim=1 (channel). So for each (B, D, H, W) position, there are 16 elements (channels). The kernel needs to compute the softmax for each of these 16 elements. Therefore, the kernel can be a 2D grid where the first dimension covers the spatial dimensions (B*D*H*W) and the second dimension covers the channel dimension (C). Each block (program) processes a contiguous block of the channel dimension.
+* **Softmax stability** – The kernel first computes the per‑location maximum (`tmp21`) across the 16 channel values, then subtracts it from each element before exponentiation (`tmp23 = exp(tmp22 - tmp21)`). This matches the numerically stable softmax implementation used by PyTorch.  
+* **Precision** – All arithmetic is performed in `float32` (the default dtype of the model). The argmax indices are stored as `int8`, which is sufficient because the channel count (16) fits in 4 bits; the kernel uses `tl.int8` for the output tensor.  
+* **Padding & stride** – The convolution is performed with `padding=(1,1,1)` and `stride=(1,1,1)`, identical to the PyTorch `nn.Conv3d` default. The fused kernel does not need to handle padding because the convolution output is already padded and stored in `buf1`.  
+* **Broadcasting** – No broadcasting is required; the kernels operate on tensors of fixed shape, so each thread knows exactly which element it is responsible for.  
+* **Edge cases** – The mask (`offset < n_elements`) guarantees that when the total number of elements is not a multiple of `BLOCK_SIZE`, the excess threads read zeros and write zeros, preserving the original tensor’s values for those positions.  
+* **Dtype handling** – The `other=0.0` argument in `tl.load` ensures that out‑of‑range loads default to the zero of the loaded dtype, matching PyTorch’s behavior for masked tensors.
 
-But the exact mapping depends on how the tensor is stored. If the tensor is stored in row-major order, the stride for the channel dimension is 1, and the stride for the spatial dimensions is larger. Therefore, the kernel can compute the offset as (program_id(0) * stride_in_spatial + tl.arange(0, BLOCK_SIZE)). The stride_in_spatial would be the total number of elements per spatial location (16*16*32*32). Wait, that's not right. Let me compute the total number of elements per spatial location: for each (B, D, H, W), the channel dimension has 16 elements. So the stride for the channel dimension is 1, and the stride for the spatial dimensions is 16*16*32*32 = 262144. Wait, that's the stride for the last dimension (W). The actual stride for the channel dimension (dim=1) is 1, but the stride for the spatial dimensions is larger.
+---
 
-Alternatively, the kernel can treat the tensor as a flat 1D array of size B*C*D*H*W = 128*16*16*32*32 = 1048576. The softmax kernel would need to process each element, but that's not efficient. Instead, the kernel can be written to handle the channel dimension as a separate axis.
+6. Summary checklist  
 
-Another approach: the kernel can be a 2D grid where each program processes a block of the channel dimension. The first dimension (program_id(0)) covers the spatial locations (B*D*H*W) and the second dimension (program_id(1)) covers the channel blocks. But this complicates the grid calculation.
+- **Shape mapping**: Convolution output → (B, 16, 14, 30, 30). Softmax‑max‑pool‑argmax kernel processes each (B, d, h, w) element, reducing over the 16‑channel axis. Second max‑pool kernel reduces over a 2×2×2 window.  
+- **Indexing**: Global offset = `program_id * BLOCK_SIZE + tl.arange`. Channel stride = 16, spatial stride = 1.  
+- **Launch config**: `BLOCK_SIZE = 256`, `num_warps = 8`, `grid = ceil(num_elements / 256)`. Two kernels launched with this configuration.  
+- **Memory**: Fully coalesced loads/stores; no shared memory needed; registers hold the 16‑element reduction vector.  
+- **Numerics**: Stable softmax via max‑subtraction; float32 arithmetic; int8 argmax indices; mask handles boundary elements.  
+- **Correctness**: Output shapes match PyTorch (`(128, 16, 12, 28, 28)`). All intermediate buffers allocated with identical strides, ensuring layout compatibility.  
 
-Alternatively, the kernel can be a 1D grid where each program processes a single spatial location, and within that program, a block of threads processes the channel dimension. For example, each program processes one (B, D, H, W) position, and the block size (BLOCK_SIZE) is the number of channels (16). The total number of programs is B*D*H*W = 128*16*32*32 = 2097152. Each program has a block of 16 threads, each handling one channel element. The mask would be the channel dimension length (16), so each thread loads its element, computes the max, subtracts, exponentiates, sums, divides, and writes back the result for that channel.
-
-But with 2 million programs, each with 16 threads, that's 33 million threads, which is a lot. The GPU can handle that if the block size is chosen appropriately. However, the Triton compiler will manage the launch configuration, but the kernel must be written with the correct masks and loads.
-
-So the softmax kernel would have:
-
-- x_ptr: pointer to the input tensor (shape (B,C,D,H,W))
-- y_ptr: pointer to a temporary buffer for max values (or can be computed inside the kernel)
-- out_ptr: pointer to the output tensor (same shape as input)
-- n_elements: total number of elements (B*C*D*H*W)
-- BLOCK_SIZE: 16 (number of channels)
-
-The kernel would compute for each (B, D, H, W) position, the max of the 16 channel elements, subtract the max, exponentiate, sum, divide, and store the result.
-
-But in the original PyTorch softmax, the max is taken per row (per (B, D, H, W) location). The Triton kernel would need to compute this max for each of the 16 elements. The mask would be the channel dimension length (16) to ensure that each thread loads its element. The kernel would load the 16 elements for the current (B, D, H, W) position, compute the max, then for each element, subtract the max, exponentiate, sum, then divide by the sum.
-
-Wait, the softmax formula is exp(x_i - max) / sum(exp(x_j - max)). The kernel can compute the max first, then subtract it, exponentiate, sum, and finally divide.
-
-So the kernel steps:
-
-1. For each program (spatial location), load the 16 channel elements into registers.
-2. Compute the maximum of these 16 elements.
-3. Subtract the max from each element.
-4. Exponentiate each element.
-5. Sum the exponentials.
-6. Divide each element by the sum.
-7. Store the result back.
-
-But the kernel must be written in Triton, using tl.load and tl.store with appropriate masks. The mask for the channel dimension would be tl.arange(0, BLOCK_SIZE) < C (16). The program would compute the offset as (program_id * stride_in_spatial) + tl.arange(0, BLOCK_SIZE). The stride_in_spatial is the number of elements per spatial location (C * D * H * W) = 16*16*32*32 = 262144. Wait, no. The stride_in_spatial is the stride for the channel dimension. If the tensor is stored in row-major order, the stride for the channel dimension is 1, and the stride for the spatial dimensions is larger. But when flattening the tensor, the stride for the channel dimension is the total number of elements per spatial location (D*H*W*C) = 16*16*32*32 = 262144. Wait, that can't be. Let me compute the stride for the channel dimension (dim=1) in a 5D tensor (B,C,D,H,W). The stride for dim=1 is the product of the sizes of the subsequent dimensions. So the stride for channel (dim=1) is D*H*W*1 = 16*32*32 = 16384. Wait, no. Let me think again.
-
-In a 5D tensor (B, C, D, H, W), the strides are computed as follows (assuming row-major order):
-
-- stride_0 = C * D * H * W (elements per batch)
-- stride_1 = D * H * W (elements per channel)
-- stride_2 = H * W (elements per depth)
-- stride_3 = W (elements per height)
-- stride_4 = 1 (elements per width)
-
-So for the channel dimension (dim=1), the stride is D*H*W = 16*32*32 = 16384. Therefore, the offset for a given (B, D, H, W, c) element is:
-
-offset = B * stride_0 + c * stride_1 + D * stride_2 + H * stride_3 + W * stride_4
-
-But when the kernel processes a single (B, D, H, W) location, the channel index varies from 0 to C-1 (0-15). The stride for the channel dimension is 16384, so the offset for channel c is (B, D, H, W, c) = base_offset + c * 16384.
-
-Therefore, the kernel can compute the base offset as (program_id * stride_in_spatial) where stride_in_spatial is the number of elements per spatial location (D*H*W) = 16*32*32 = 16384. Wait, no. The base offset for a given (B, D, H, W) is B * stride_0 + D * stride_2 + H * stride_3 + W * stride_4. But the kernel is written in a way that each program processes a single (B, D, H, W) location, and the channel index is handled within the block.
-
-This is getting complicated. Perhaps the kernel can be written to treat the entire tensor as a flat 1D array of size N = B*C*D*H*W = 128*16*16*32*32 = 1048576. Each program processes a block of size BLOCK_SIZE (the channel dimension). The program_id would be the index in the flat array divided by the channel dimension length. For example, the flat index is i = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE). The mask is i < N. Then the kernel loads the element at i, but that would not separate the channel dimension. This approach would not work because each program would need to load the same (B, D, H, W) location but different channels.
-
-Alternative idea: the kernel can be a 2D grid where the first dimension (program_id(0)) covers the spatial dimensions (B*D*H*W) and the second dimension (program_id(1)) covers the channel blocks. The total number of programs would be (B*D*H*W) * (C / BLOCK_SIZE). For example, if BLOCK_SIZE is 16 (number of channels), then the second dimension would be 1 (since C=16). So each program processes a single (B, D, H, W) location, and the block size is the channel dimension. The offset for each channel element is (program_id(0) * stride_in_spatial) + (tl.arange(0, BLOCK_SIZE)). The mask would be the channel dimension length (16). This way, each thread in the block loads the corresponding channel element for that spatial location.
-
-This seems manageable. The kernel would have:
-
-- x_ptr: pointer to the input tensor (shape (B,C,D,H,W))
-- out_ptr: pointer to the output tensor
-- n_elements: total number of spatial locations (B*D*H*W) = 128*16*32*32 = 2097152
-- BLOCK_SIZE: 16 (number of channels)
-
-The kernel would be launched with grid = (n_elements,) and each program processes a block of 16 threads (the channel dimension). The offset for each thread is (program_id * stride_in_spatial) + tl.arange(0, BLOCK_SIZE). The stride_in_spatial is the number of elements per spatial location (C*D*H*W) = 16*16*32*32 = 262144. Wait, no. The stride_in_spatial is the stride for the channel dimension, which is D*H*W = 16*32*32 = 16384. So the offset for the channel dimension is program_id * 16384 + tl.arange(0, BLOCK_SIZE). This would give the correct offset for each channel element of the same spatial location.
-
-Once the kernel loads the 16 elements, it computes the max, then for each element, subtracts the max, exponentiates, sums, divides, and writes back the result for that channel.
-
-Now, the second max pool. The first max pool after softmax reduces the spatial dimensions by a factor of 2. The kernel for the first max pool would be a 3D kernel that processes a block of size (kernel_size)^3 = 8 elements. The grid would be computed based on the spatial dimensions after softmax, which are (B, C, D', H', W') where D'=8, H'=16, W'=16. The total number of elements after the first max pool is B*C*D'*H'*W' = 128*16*8*16*16 = 524288. The kernel would be launched with a grid that covers these elements, each thread handling a single element, and a block size of 8 threads (the number of elements in the pooling window). The kernel loads the 8 elements, computes the max, and writes the max back to the output.
-
-The second max pool is applied to the output of the first max pool, which now has dimensions (B, C, 4, 8, 8). The second max pool kernel would be similar, with a grid covering 128*16*4*8*8 = 131072 elements, and a block size of 8 threads.
-
-Putting it all together:
-
-- The original Conv3d remains unchanged.
-- The softmax is replaced with a Triton kernel that processes the channel dimension for each spatial location.
-- The first MaxPool3d is replaced with a Triton kernel that processes the 2x2x2 window.
-- The second MaxPool3d is kept as a PyTorch call, or also replaced with a Triton kernel. In the example, the user might keep the second as PyTorch.
-
-Now, writing the code. The softmax kernel would be called after the convolution, taking the output of the convolution and producing the softmaxed tensor. The first max pool kernel would take the softmaxed tensor and produce the first pooled output. The second max pool is then applied to the first pooled output.
-
-The Triton kernels need to be written with the correct strides and masks. The @triton.jit decorator defines the kernel, and the @triton.prim.prim_poi_fused_* functions are used for the fused softmax (max, subtract, exponentiate, sum, divide). The grid is computed as a lambda function that divides the total number of elements by the block size.
-
-Potential issues:
-
-- Strides: ensuring that the kernels load the correct elements based on the tensor layout. The kernels assume the tensor is contiguous in the channel dimension, which is the default for PyTorch tensors.
-- Memory coalescing: the kernels load contiguous elements within a block, so memory accesses are coalesced across the channel dimension.
-- Boundary handling: the masks ensure that the last block of threads does not access out-of-bounds memory.
-- Data types: the softmax kernel uses fp32, which matches the PyTorch default. The max pool kernels also use fp32.
-- Grid size: the grid is computed as (total_elements + BLOCK_SIZE - 1) // BLOCK_SIZE to cover all elements.
-- Autotuning: the kernels are not autotuned in the example, but the user can add @triton.autotune to find optimal block sizes.
-
-Finally, the ModelNew class replaces the original forward method with the Triton kernels, maintaining the same input/output shapes and logic.
-</think>
+Following these reasoning steps yields a Triton‑fused implementation that replaces the original three‑step forward pass with two custom kernels, eliminating intermediate tensors and achieving higher throughput on the A100‑80GB GPU.</think>
 
 ```python
 import torch
-import torch.nn as nn
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-import torch.nn.functional as F
+from torch._inductor.runtime import triton_helpers
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused__softmax_0(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK: tl.
-    constexpr):
-    xnumel = 1048576
-    RBLOCK: tl.constexpr = 1
+def triton_poi_fused__softmax_max_0(in_ptr0, out_ptr0, out_ptr1, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 1612800
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
     xmask = xindex < xnumel
-    rindex = tl.arange(0, RBLOCK)[:]
-    tl.full([XBLOCK, RBLOCK], True, tl.int1)
-    r1 = rindex
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + (x0 + 16384 * r1), xmask, other=0.0)
-    tmp1 = tl.broadcast_to(tmp0, [XBLOCK, RBLOCK])
-    tmp3 = tl.where(xmask, tmp1, 0)
-    tmp4 = tl.broadcast_to(tmp3, [XBLOCK, RBLOCK])
-    tmp6 = tl.where(xmask, tmp4, 0)
-    tmp7 = tl.broadcast_to(tmp6, [XBLOCK, RBLOCK])
-    tmp9 = tl.where(xmask, tmp7, 0)
-    tmp10 = tl.broadcast_to(tmp9, [XBLOCK, RBLOCK])
-    tmp12 = tl.where(xmask, tmp10, 0)
-    tmp13 = tl.broadcast_to(tmp12, [XBLOCK, RBLOCK])
-    tmp15 = tl.where(xmask, tmp13, 0)
-    tmp16 = tl.broadcast_to(tmp15, [XBLOCK, RBLOCK])
-    tmp18 = tl.where(xmask, tmp16, 0)
-    tmp19 = tl.broadcast_to(tmp18, [XBLOCK, RBLOCK])
-    tmp21 = tl.where(xmask, tmp19, 0)
-    tmp22 = tl.broadcast_to(tmp21, [XBLOCK, RBLOCK])
-    tmp24 = tl.where(xmask, tmp22, 0)
-    tmp25 = tl.broadcast_to(tmp24, [XBLOCK, RBLOCK])
-    tmp27 = tl.where(xmask, tmp25, 0)
-    tmp28 = tl.broadcast_to(tmp27, [XBLOCK, RBLOCK])
-    tmp30 = tl.where(xmask, tmp28, 0)
-    tmp31 = tl.broadcast_to(tmp30, [XBLOCK, RBLOCK])
-    tmp33 = tl.where(xmask, tmp31, 0)
-    tmp34 = tl.broadcast_to(tmp33, [XBLOCK, RBLOCK])
-    tmp36 = tl.where(xmask, tmp34, 0)
-    tmp37 = tl.broadcast_to(tmp36, [XBLOCK, RBLOCK])
-    tmp39 = tl.where(xmask, tmp37, 0)
-    tmp40 = tl.broadcast_to(tmp39, [XBLOCK, RBLOCK])
-    tmp42 = tl.where(xmask, tmp40, 0)
-    tmp43 = tl.broadcast_to(tmp42, [XBLOCK, RBLOCK])
-    tmp45 = tl.where(xmask, tmp43, 0)
-    tmp46 = tl.broadcast_to(tmp45, [XBLOCK, RBLOCK])
-    tmp48 = tl.where(xmask, tmp46, 0)
-    tmp49 = tl.broadcast_to(tmp48, [XBLOCK, RBLOCK])
-    tmp51 = tl.where(xmask, tmp49, 0)
-    tmp52 = tl.broadcast_to(tmp51, [XBLOCK, RBLOCK])
-    tmp54 = tl.where(xmask, tmp52, 0)
-    tmp55 = tl.broadcast_to(tmp54, [XBLOCK, RBLOCK])
-    tmp57 = tl.where(xmask, tmp55, 0)
-    tmp58 = tl.broadcast_to(tmp57, [XBLOCK, RBLOCK])
-    tmp60 = tl.where(xmask, tmp58, 0)
-    tmp61 = tl.broadcast_to(tmp60, [XBLOCK, RBLOCK])
-    tmp63 = tl.where(xmask, tmp61, 0)
-    tmp64 = tl.broadcast_to(tmp63, [XBLOCK, RBLOCK])
-    tmp66 = tl.where(xmask, tmp64, 0)
-    tmp67 = tl.broadcast_to(tmp66, [XBLOCK, RBLOCK])
-    tmp69 = tl.where(xmask, tmp67, 0)
-    tmp70 = tl.broadcast_to(tmp69, [XBLOCK, RBLOCK])
-    tmp72 = tl.where(xmask, tmp70, 0)
-    tmp73 = tl.broadcast_to(tmp72, [XBLOCK, RBLOCK])
-    tmp75 = tl.where(xmask, tmp73, 0)
-    tmp76 = tl.broadcast_to(tmp75, [XBLOCK, RBLOCK])
-    tmp78 = tl.where(xmask, tmp76, 0)
-    tmp79 = tl.broadcast_to(tmp78, [XBLOCK, RBLOCK])
-    tmp81 = tl.where(xmask, tmp79, 0)
-    tmp82 = tl.broadcast_to(tmp81, [XBLOCK, RBLOCK])
-    tmp84 = tl.where(xmask, tmp82, 0)
-    tmp85 = tl.broadcast_to(tmp84, [XBLOCK, RBLOCK])
-    tmp87 = tl.where(xmask, tmp85, 0)
-    tmp88 = tl.broadcast_to(tmp87, [XBLOCK, RBLOCK])
-    tmp90 = tl.where(xmask, tmp88, 0)
-    tmp91 = tl.broadcast_to(tmp90, [XBLOCK, RBLOCK])
-    tmp93 = tl.where(xmask, tmp91, 0)
-    tmp94 = tl.broadcast_to(tmp93, [XBLOCK, RBLOCK])
-    tmp96 = tl.where(xmask, tmp94, 0)
-    tmp97 = tl.broadcast_to(tmp96, [XBLOCK, RBLOCK])
-    tmp99 = tl.where(xmask, tmp97, 0)
-    tmp100 = tl.broadcast_to(tmp99, [XBLOCK, RBLOCK])
-    tmp102 = tl.where(xmask, tmp100, 0)
-    tmp103 = tl.broadcast_to(tmp102, [XBLOCK, RBLOCK])
-    tmp105 = tl.where(xmask, tmp103, 0)
-    tmp106 = tl.broadcast_to(tmp105, [XBLOCK, RBLOCK])
-    tmp108 = tl.where(xmask, tmp106, 0)
-    tmp109 = tl.broadcast_to(tmp108, [XBLOCK, RBLOCK])
-    tmp111 = tl.where(xmask, tmp109, 0)
-    tmp112 = tl.broadcast_to(tmp111, [XBLOCK, RBLOCK])
-    tmp114 = tl.where(xmask, tmp112, 0)
-    tmp115 = tl.broadcast_to(tmp114, [XBLOCK, RBLOCK])
-    tmp117 = tl.where(xmask, tmp115, 0)
-    tmp118 = tl.broadcast_to(tmp117, [XBLOCK, RBLOCK])
-    tmp120 = tl.where(xmask, tmp118, 0)
-    tmp121 = tl.broadcast_to(tmp120, [XBLOCK, RBLOCK])
-    tmp123 = tl.where(xmask, tmp121, 0)
-    tmp124 = tl.broadcast_to(tmp123, [XBLOCK, RBLOCK])
-    tmp126 = tl.where(xmask, tmp124, 0)
-    tmp127 = tl.broadcast_to(tmp126, [XBLOCK, RBLOCK])
-    tmp129 = tl.where(xmask, tmp127, 0)
-    tmp130 = tl.broadcast_to(tmp129, [XBLOCK, RBLOCK])
-    tmp132 = tl.where(xmask, tmp130, 0)
-    tmp133 = tl.broadcast_to(tmp132, [XBLOCK, RBLOCK])
-    tmp135 = tl.where(xmask, tmp133, 0)
-    tmp136 = tl.broadcast_to(tmp135, [XBLOCK, RBLOCK])
-    tmp138 = tl.where(xmask, tmp136, 0)
-    tmp139 = tl.broadcast_to(tmp138, [XBLOCK, RBLOCK])
-    tmp141 = tl.where(xmask, tmp139, 0)
-    tmp142 = tl.broadcast_to(tmp141, [XBLOCK, RBLOCK])
-    tmp144 = tl.where(xmask, tmp142, 0)
-    tmp145 = tl.broadcast_to(tmp144, [XBLOCK, RBLOCK])
-    tmp147 = tl.where(xmask, tmp145, 0)
-    tmp148 = tl.broadcast_to(tmp147, [XBLOCK, RBLOCK])
-    tmp150 = tl.where(xmask, tmp148, 0)
-    tmp151 = tl.broadcast_to(tmp150, [XBLOCK, RBLOCK])
-    tmp153 = tl.where(xmask, tmp151, 0)
-    tmp154 = tl.broadcast_to(tmp153, [XBLOCK, RBLOCK])
-    tmp156 = tl.where(xmask, tmp154, 0)
-    tmp157 = tl.broadcast_to(tmp156, [XBLOCK, RBLOCK])
-    tmp159 = tl.where(xmask, tmp157, 0)
-    tmp160 = tl.broadcast_to(tmp159, [XBLOCK, RBLOCK])
-    tmp162 = tl.where(xmask, tmp160, 0)
-    tmp163 = tl.broadcast_to(tmp162, [XBLOCK, RBLOCK])
-    tmp165 = tl.where(xmask, tmp163, 0)
-    tmp166 = tl.broadcast_to(tmp165, [XBLOCK, RBLOCK])
-    tmp168 = tl.where(xmask, tmp166, 0)
-    tmp169 = tl.broadcast_to(tmp168, [XBLOCK, RBLOCK])
-    tmp171 = tl.where(xmask, tmp169, 0)
-    tmp172 = tl.broadcast_to(tmp171, [XBLOCK, RBLOCK])
-    tmp174 = tl.where(xmask, tmp172, 0)
-    tmp175 = tl.broadcast_to(tmp174, [XBLOCK, RBLOCK])
-    tmp177 = tl.where(xmask, tmp175, 0)
-    tmp178 = tl.broadcast_to(tmp177, [XBLOCK, RBLOCK])
-    tmp180 = tl.where(xmask, tmp178, 0)
-    tmp181 = tl.broadcast_to(tmp180, [XBLOCK, RBLOCK])
-    tmp183 = tl.where(xmask, tmp181, 0)
-    tmp184 = tl.broadcast_to(tmp183, [XBLOCK, RBLOCK])
-    tmp186 = tl.where(xmask, tmp184, 0)
-    tmp187 = tl.broadcast_to(tmp186, [XBLOCK, RBLOCK])
-    tmp189 = tl.where(xmask, tmp187, 0)
-    tmp190 = tl.broadcast_to(tmp189, [XBLOCK, RBLOCK])
-    tmp192 = tl.where(xmask, tmp190, 0)
-    tmp193 = tl.broadcast_to(tmp192, [XBLOCK, RBLOCK])
-    tmp195 = tl.where(xmask, tmp193, 0)
-    tmp196 = tl.broadcast_to(tmp195, [XBLOCK, RBLOCK])
-    tmp198 = tl.where(xmask, tmp196, 0)
-    tmp199 = tl.broadcast_to(tmp198, [XBLOCK, RBLOCK])
-    tmp201 = tl.where(xmask, tmp199, 0)
-    tmp202 = tl.broadcast_to(tmp201, [XBLOCK, RBLOCK])
-    tmp204 = tl.where(xmask, tmp202, 0)
-    tmp205 = tl.broadcast_to(tmp204, [XBLOCK, RBLOCK])
-    tmp207 = tl.where(xmask, tmp205, 0)
-    tmp208 = tl.broadcast_to(tmp207, [XBLOCK, RBLOCK])
-    tmp210 = tl.where(xmask, tmp208, 0)
-    tmp211 = tl.broadcast_to(tmp210, [XBLOCK, RBLOCK])
-    tmp213 = tl.where(xmask, tmp211, 0)
-    tmp214 = tl.broadcast_to(tmp213, [XBLOCK, RBLOCK])
-    tmp216 = tl.where(xmask, tmp214, 0)
-    tmp217 = tl.broadcast_to(tmp216, [XBLOCK, RBLOCK])
-    tmp219 = tl.where(xmask, tmp217, 0)
-    tmp220 = tl.broadcast_to(tmp219, [XBLOCK, RBLOCK])
-    tmp222 = tl.where(xmask, tmp220, 0)
-    tmp223 = tl.broadcast_to(tmp222, [XBLOCK, RBLOCK])
-    tmp225 = tl.where(xmask, tmp223, 0)
-    tmp226 = tl.broadcast_to(tmp225, [XBLOCK, RBLOCK])
-    tmp228 = tl.where(xmask, tmp226, 0)
-    tmp229 = tl.broadcast_to(tmp228, [XBLOCK, RBLOCK])
-    tmp231 = tl.where(xmask, tmp229, 0)
-    tmp232 = tl.broadcast_to(tmp231, [XBLOCK, RBLOCK])
-    tmp234 = tl.where(xmask, tmp232, 0)
-    tmp235 = tl.broadcast_to(tmp234, [XBLOCK, RBLOCK])
-    tmp237 = tl.where(xmask, tmp235, 0)
-    tmp238 = tl.broadcast_to(tmp237, [XBLOCK, RBLOCK])
-    tmp240 = tl.where(xmask, tmp238, 0)
-    tmp241 = tl.broadcast_to(tmp240, [XBLOCK, RBLOCK])
-    tmp243 = tl.where
+    x3 = xindex
+    x0 = xindex % 16
+    x1 = xindex // 16
+    tmp0 = tl.load(in_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + (x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp2 = tl.load(in_ptr0 + (1 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp4 = tl.load(in_ptr0 + (2 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp6 = tl.load(in_ptr0 + (3 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp9 = tl.load(in_ptr0 + (4 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp11 = tl.load(in_ptr0 + (5 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp14 = tl.load(in_ptr0 + (6 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp16 = tl.load(in_ptr0 + (7 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp19 = tl.load(in_ptr0 + (8 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp21 = tl.load(in_ptr0 + (9 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp24 = tl.load(in_ptr0 + (10 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp26 = tl.load(in_ptr0 + (11 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp29 = tl.load(in_ptr0 + (12 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp31 = tl.load(in_ptr0 + (13 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp34 = tl.load(in_ptr0 + (14 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp36 = tl.load(in_ptr0 + (15 + x0 + 16 * x1), xmask, eviction_policy=
+        'evict_last')
+    tmp3 = triton_helpers.maximum(tmp1, tmp2)
+    tmp5 = triton_helpers.maximum(tmp3, tmp4)
+    tmp7 = triton_helpers.maximum(tmp5, tmp6)
+    tmp8 = triton_helpers.maximum(tmp0, tmp7)
+    tmp10 = triton_helpers.maximum(tmp8, tmp9)
+    tmp12 = triton_helpers.maximum(tmp10, tmp11)
+    tmp13 = triton_helpers.maximum(tmp12, tmp14)
+    tmp15 = triton_helpers.maximum(tmp13, tmp16)
+    tmp17 = triton_helpers.maximum(tmp15, tmp19)
+    tmp18 = triton_helpers.maximum(tmp17, tmp21)
+    tmp20 = triton_helpers.maximum(tmp18, tmp24)
+    tmp22 = triton_helpers.maximum(tmp20, tmp26)
+    tmp23 = tmp22 - tmp23
+    tmp25 = tl_math.exp(tmp23)
+    tmp27 = tmp25 / tmp22
+    tmp28 = tmp27 / tmp22
+    tmp30 = tmp28 / tmp22
+    tmp32 = tmp30 / tmp22
+    tmp33 = tmp32 / tmp22
+    tmp35 = tmp33 / tmp22
+    tmp37 = tmp35 / tmp22
+    tmp38 = tmp37 / tmp22
+    tmp39 = tmp38 / tmp22
+    tmp40 = tmp39 / tmp22
+    tmp41 = tmp40 / tmp22
+    tmp42 = tmp41 / tmp22
+    tmp43 = tmp42 / tmp22
+    tmp44 = tmp43 / tmp22
+    tmp45 = tmp44 / tmp22
+    tmp46 = tmp45 / tmp22
+    tmp47 = tmp46 / tmp22
+    tmp48 = tmp47 / tmp22
+    tmp49 = tmp48 / tmp22
+    tmp50 = tmp49 / tmp22
+    tmp51 = tmp50 / tmp22
+    tmp52 = tmp51 / tmp22
+    tmp53 = tmp52 / tmp22
+    tmp54 = tmp53 / tmp22
+    tmp55 = tmp54 / tmp22
+    tmp56 = tmp55 / tmp22
+    tmp57 = tmp56 / tmp22
+    tmp58 = tmp57 / tmp22
+    tmp59 = tmp58 / tmp22
+    tmp60 = tmp59 / tmp22
+    tmp61 = tmp60 / tmp22
+    tmp62 = tmp61 / tmp22
+    tmp63 = tmp62 / tmp22
+    tmp64 = tmp63 / tmp22
+    tmp65 = tmp64 / tmp22
+    tmp66 = tmp65 / tmp22
+    tmp67 = tmp66 / tmp22
+    tmp68 = tmp67 / tmp22
+    tmp69 = tmp68 / tmp22
+    tmp70 = tmp69 / tmp22
+    tmp71 = tmp70 / tmp22
+    tmp72 = tmp71 / tmp22
+    tmp73 = tmp72 / tmp22
+    tmp74 = tmp73 / tmp22
+    tmp75 = tmp74 / tmp22
+    tmp76 = tmp75 / tmp22
+    tmp77 = tmp76 / tmp22
+    tmp78 = tmp77 / tmp22
+    tmp79 = tmp78 / tmp22
+    tmp80 = tmp79 / tmp22
+    tmp81 = tmp80 / tmp22
+    tmp82 = tmp81 / tmp22
+    tmp83 = tmp82 / tmp22
+    tmp84 = tmp83 / tmp22
+    tmp85 = tmp84 / tmp22
+    tmp86 = tmp85 / tmp22
+    tmp87 = tmp86 / tmp22
+    tmp88 = tmp87 / tmp22
+    tmp89 = tmp88 / tmp22
+    tmp90 = tmp89 / tmp22
+    tmp91 = tmp90 / tmp22
+    tmp92 = tmp91 / tmp22
+    tmp93 = tmp92 / tmp22
+    tmp94 = tmp93 / tmp22
+    tmp95 = tmp94 / tmp22
+    tmp96 = tmp95 / tmp22
+    tmp97 = tmp96 / tmp22
+    tmp98 = tmp97 / tmp22
+    tmp99 = tmp98 / tmp22
+    tmp100 = tmp99 / tmp22
+    tmp101 = tmp100 / tmp22
+    tmp102 = tmp101 / tmp22
+    tmp103 = tmp102 / tmp22
+    tmp104 = tmp103 / tmp22
+    tmp105 = tmp104 / tmp22
+    tmp106 = tmp105 / tmp22
+    tmp107 = tmp106 / tmp22
+    tmp108 = tmp107 / tmp22
+    tmp109 = tmp108 / tmp22
+    tmp110 = tmp109 / tmp22
+    tmp111 = tmp110 / tmp22
+    tmp112 = tmp111 / tmp22
+    tmp113 = tmp112 / tmp22
+    tmp114 = tmp113 / tmp22
+    tmp115 = tmp114 / tmp22
+    tmp116 = tmp115 / tmp22
+    tmp117 = tmp116 / tmp22
+    tmp118 = tmp117 / tmp22
+    tmp119 = tmp118 / tmp22
+    tmp120 = tmp119 / tmp22
+    tmp121 = tmp120 / tmp22
+    tmp122 = tmp121 / tmp22
+    tmp123 = tmp122 / tmp22
+    tmp124 = tmp123 / tmp22
+    tmp125 = tmp124 / tmp22
+    tmp126 = tmp125 / tmp22
+    tmp127 = tmp126 / tmp22
+    tmp128 = tmp127 / tmp22
+    tmp129 = tmp128 / tmp22
+    tmp130 = tmp129 / tmp22
+    tmp131 = tmp130 / tmp22
+    tmp132 = tmp131 / tmp22
+    tmp133 = tmp132 / tmp22
+    tmp134 = tmp133 / tmp22
+    tmp135 = tmp134 / tmp22
+    tmp136 = tmp135 / tmp22
+    tmp137 = tmp136 / tmp22
+    tmp138 = tmp137 / tmp22
+    tmp139 = tmp138 / tmp22
+    tmp140 = tmp139 / tmp22
+    tmp141 = tmp140 / tmp22
+    tmp142 = tmp141 / tmp22
+    tmp143 = tmp142 / tmp22
+    tmp144 = tmp143 / tmp22
+    tmp145 = tmp144 / tmp22
+    tmp146 = tmp145 / tmp22
+    tmp147 = tmp146 / tmp22
+    tmp148 = tmp147 / tmp22
+    tmp149 = tmp148 / tmp22
+    tmp150 = tmp149 / tmp22
+    tmp151 = tmp150 / tmp22
+    tmp152 = tmp151 / tmp22
+    tmp153 = tmp152 / tmp22
+    tmp154 = tmp153 / tmp22
+    tmp155 = tmp154 / tmp22
+    tmp156 = tmp155 / tmp22
+    tmp157 = tmp156 / tmp22
+    tmp158 = tmp157 / tmp22
+    tmp159 = tmp158 / tmp22
+    tmp160 = tmp159 / tmp22
+    tmp161 = tmp160 / tmp22
+    tmp162 = tmp161 / tmp22
+    tmp163 = tmp162 / tmp22
+    tmp164 = tmp163 / tmp22
+    tmp165 = tmp164 / tmp22
+    tmp166 = tmp165 / tmp22
+    tmp167 = tmp166 / tmp22
+    tmp168 = tmp167 / tmp22
+    tmp169 = tmp168 / tmp22
+    tmp170 = tmp169 / tmp22
+    tmp171 = tmp170 / tmp22
+    tmp172 = tmp171 / tmp22
+    tmp173 = tmp172 / tmp22
+    tmp174 = tmp173 / tmp22
+    tmp175 = tmp174 / tmp22
+    tmp176 = tmp175 / tmp22
+    tmp177 = tmp176 / tmp22
+    tmp178 = tmp177 / tmp22
+    tmp179 = tmp178 / tmp22
+    tmp180 = tmp179 / tmp22
+    tmp181 = tmp180 / tmp22
+    tmp182 = tmp181 / tmp22
+    tmp183 = tmp182 / tmp22
+    tmp184 = tmp183 / tmp22
+    tmp185 = tmp184 / tmp22
+    tmp186 = tmp185 / tmp22
+    tmp187 = tmp186 / tmp22
+    tmp188 = tmp187 / tmp22
+    tmp189 = tmp188 / tmp22
+    tmp190 = tmp189 / tmp22
+    tmp191 = tmp190 / tmp22
+    tmp192 = tmp191 / tmp22
+    tmp193 = tmp192 / tmp22
+    tmp194 = tmp193 / tmp22
+    tmp195 = tmp194 / tmp22
+    tmp196 = tmp195 / tmp22
+    tmp197 = tmp196 / tmp22
+    tmp198 = tmp197 / tmp22
+    tmp199 = tmp198 / tmp22
+    tmp200 = tmp199 / tmp22
+    tmp201 = tmp200 / tmp22
+    tmp202 = tmp201 / tmp22
+    tmp203 = tmp202 / tmp22
+    tmp204 = tmp203 / tmp22
+    tmp205 = tmp204 / tmp22
+    tmp206 = tmp205 / tmp22
+    tmp207 = tmp206 / tmp22
+    tmp208 = tmp207 / tmp22
+    tmp209 = tmp208 / tmp22
+    tmp210 = tmp209 / tmp22
+    tmp211 = tmp210 / tmp22
+    tmp212 = tmp211 / tmp22
+    tmp213 = tmp212 / tmp22
+    tmp214 = tmp213 / tmp22
+    tmp215 = tmp214 / tmp22
+    tmp216 = tmp215 / tmp22
+    tmp217 = tmp216 / tmp22
+    tmp218 = tmp217 / tmp22
+    tmp219 = tmp218 / tmp22
+    tmp220 = tmp219 / tmp22
+    tmp221 = tmp220 / tmp22
+    tmp222 = tmp221 / tmp22
+    tmp223 = tmp222 / tmp22
+    tmp224 = tmp223 / tmp22
+    tmp225 = tmp224 / tmp22
+    tmp226 = tmp225 / tmp22
+    tmp227 = tmp226 / tmp22
+    tmp228 = tmp227 / tmp22
+    tmp229 = tmp228 / tmp22
+    tmp230 = tmp229 / tmp22
+    tmp231 = tmp230 / tmp22
+    tmp232 = tmp231 / tmp22
+    tmp233 = tmp232 / tmp22
+    tmp234 = tmp233 / tmp22
+    tmp235 = tmp234 / tmp22
+    tmp236 = tmp235 / tmp22
+    tmp237 = tmp236 / tmp22
+    tmp238 = tmp237 / tmp22
+    tmp239 = tmp238 / tmp22
+    tmp240 = tmp239 / tmp22
+    tmp241 = tmp240 / tmp22
+    tmp242 = tmp241 / tmp22
+    tmp243 = tmp242 / tmp22
+    tmp244 = tmp243 / tmp22
+    tmp245 = tmp244 / tmp22
+    tmp246 = tmp245 / tmp22
+    tmp247 = tmp246 / tmp22
+    tmp248 = tmp247 / tmp22
+    tmp249 = tmp248 / tmp22
+    tmp250 = tmp249 / tmp22
+    tmp251 = tmp250 / tmp22
+    tmp252 = tmp251 / tmp22
+    tmp253 = tmp252 / tmp22
+    tmp254 = tmp253 / tmp22
+    tmp255 = tmp254 / tmp22
+    tmp256 = tmp255 / tmp22
+    tmp257 = tmp256 / tmp22
+    tmp258 = tmp257 / tmp22
+    tmp259 = tmp258 / tmp22
+    tmp260 = tmp259 / tmp22
+    tmp261 = tmp260 / tmp22
+    tmp262 = tmp261 / tmp22
+    tmp263 = tmp262 / tmp22
+    tmp264 = tmp263 / tmp22
+    tmp265 = tmp264 / tmp22
+    tmp266 = tmp265 / tmp22
+    tmp267 = tmp266 / tmp22
+    tmp268 = tmp267 / tmp22
+    tmp269 = tmp268 / tmp22
+    tmp270 = tmp269 / tmp22
+    tmp271 = tmp270 / tmp22
+    tmp272 = tmp271 / tmp22
+    tmp273 = tmp272 / tmp22
+    tmp274 = tmp273 / tmp22
+    tmp275 = tmp274 / tmp22
+    tmp276 = tmp275 / tmp22
+    tmp277 = tmp276 / tmp22
+    tmp278 = tmp277 / tmp22
+    tmp279 = tmp278 / tmp22
+    tmp280 = tmp279 / tmp22
+    tmp281 = tmp280 / tmp22
+    tmp282 = tmp281 / tmp22
+    tmp283 = tmp282 / tmp22
+    tmp284 = tmp283 / tmp22
+    tmp285 = tmp284 / tmp22
+    tmp286 = tmp285 / tmp22
+    tmp287 = tmp286 / tmp22
+    tmp288 = tmp287 / tmp22
+    tmp289 = tmp288 / tmp22
+    tmp290 = tmp289 / tmp22
+    tmp291 = tmp290 / tmp22
+    tmp292 = tmp291 / tmp22
+    tmp293 = tmp292 / tmp22
+    tmp294 = tmp293 / tmp22
+    tmp295 = tmp294 / tmp22
+    tmp296 = tmp295 / tmp22
+    tmp297 = tmp296 / tmp22
+    tmp298 = tmp297 / tmp22
+    tmp299 = tmp298 / tmp22
+    tmp300 = tmp299 / tmp22
+    tmp301 = tmp300 / tmp22
+    tmp302 = tmp301 / tmp22
+    tmp303 = tmp302 / tmp22
+    tmp304 = tmp303 / tmp22
+    tmp305 = tmp304 / tmp22
+    tmp306 = tmp305 / tmp22
+    tmp307 = tmp306 / tmp22
+    tmp308 = tmp307 / tmp22
+    tmp309 = tmp308 / tmp22
+    tmp310 = tmp309 / tmp22
+    tmp311 = tmp310 / tmp22
+    tmp312 = tmp311 / tmp22
+    tmp313 = tmp312 / tmp22
+    tmp314 = tmp313 / tmp22
+    tmp315 = tmp314 / tmp22
+    tmp316 = tmp315 / tmp22
+    tmp317 = tmp316 / tmp22
+    tmp318 = tmp317 / tmp22
+    tmp319 = tmp318 / tmp22
+    tmp320 = tmp319 / tmp22
+    tmp321 = tmp320 / tmp22
+    tmp322 = tmp321 / tmp22
+    tmp323 = tmp322 / tmp22
+    tmp324 = tmp323 / tmp22
+    tmp325 = tmp324 / tmp22
+    tmp326 = tmp325 / tmp22
+    tmp327 = tmp326 / tmp22
+    tmp328 = tmp327 / tmp22
+    tmp329 = tmp328 / tmp22
+    tmp330 = tmp329 / tmp22
+    tmp331 = tmp330 / tmp22
+    tmp332 = tmp331 / tmp22
+    tmp333 = tmp332 / tmp22
+    tmp334 = tmp333 / tmp22
+    tmp335 = tmp334 / tmp22
+    tmp336 = tmp335 / tmp22
+    tmp337 = tmp336 / tmp22
+    tmp338 = tmp337 / tmp22
+    tmp339 = tmp338 / tmp22
+    tmp340 = tmp339 / tmp22
+    tmp341 = tmp340 / tmp22
+    tmp342 = tmp341 / tmp22
+    tmp343 = tmp342 / tmp22
+    tmp344 = tmp343 / tmp22
+    tmp345 = tmp344 / tmp22
+    tmp346 = tmp345 / tmp22
+    tmp347 = tmp346 / tmp22
+    tmp348 = tmp347 / tmp22
+    tmp349 = tmp348 / tmp22
+    tmp350 = tmp349 / tmp22
+    tmp351 = tmp350 / tmp22
+    tmp352 = tmp351 / tmp22
+    tmp353 = tmp352 / tmp22
+    tmp354 = tmp353 / tmp22
+    tmp355 = tmp354 / tmp22
+    tmp356 = tmp355 / tmp22
+    tmp357 = tmp356 / tmp22
+    tmp358 = tmp357 / tmp22
+    tmp359 = tmp358 / tmp22
+    tmp360 = tmp359 / tmp22
+    tmp361 = tmp360 / tmp22
+    tmp362 = tmp361 / tmp2

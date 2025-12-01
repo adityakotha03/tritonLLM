@@ -2,60 +2,82 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime.triton_helpers import math as tl_math
+import torch
+import torch.nn as nn
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_convolution_add_0(in_ptr0, in_ptr1, out_ptr0, xnumel, 
-    xoffset, xindex, xmask):
-    x0 = xindex
+def triton_poi_fused_convolution_0(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl
+    .constexpr):
+    xnumel = 1344064
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
     x2 = xindex
-    x3 = xindex
-    tmp0 = tl.load(in_ptr0 + x2, xmask)
-    tmp1 = tl.load(in_ptr1 + x3, xmask, eviction_policy='evict_last')
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_out_ptr0 + x2, xmask)
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + x0, tmp2, xmask)
+    tl.store(in_out_ptr0 + x2, tmp2, xmask)
 
 
 def call(args):
-    arg0_1, arg1_1 = args
+    primals_1, primals_2, primals_3 = args
     args.clear()
-    assert_size_stride(arg0_1, (8, 64, 512, 512), (16777216, 262144, 512, 1))
-    assert_size_stride(arg1_1, (64, 64, 3, 7), (1344, 21, 7, 1))
+    assert_size_stride(primals_1, (8, 64, 512, 512), (33554432, 524288, 1024,
+        2))
+    assert_size_stride(primals_2, (64, 64, 7, 3), (14336, 224, 32, 1))
+    assert_size_stride(primals_3, (64,), (1,))
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((8, 64, 512, 512), (16777216, 262144, 512, 1),
+        buf0 = empty_strided_cuda((8, 64, 515, 519), (2179680, 34320, 67, 1),
             torch.float32)
+        extern_kernels.convolution(primals_1, reinterpret_tensor(primals_2,
+            (64, 64, 7, 3), (14336, 224, 32, 1), 0), stride=(1, 1),
+            padding=(0, 0), dilation=(1, 1), transposed=True,
+            output_padding=(0, 0), groups=1, bias=None, out=buf0)
+        del primals_2
         buf1 = buf0
         del buf0
-        get_raw_buf = torch._C._dynamo.guards._get_raw_buf
-        buf2 = get_raw_buf(buf1, 0, 8, 64, 512, 512, 262144, 512, 1, 16777216,
-            16777216, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
-        buf3 = buf1
-        del buf1
-        buf4 = buf2
-        del buf2
-        triton_poi_fused_convolution_add_0[grid(16777216)](buf4, buf3, buf0,
-            16777216, 0, xnumel=16777216, xoffset=0, xmask=tl.full([1], True,
-            tl.int1))
-        del buf4
-        del buf3
-        del buf0
-        buf5 = buf3
-        del buf3
-        del buf1
-        del buf0
-        return buf5, arg1_1, arg0_1,
+        get_raw_stream(0)
+        triton_poi_fused_convolution_0[grid(1344064)](buf1, primals_3, 
+            1344064, XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_3
+    return buf1, primals_1
 
 
 class ModelNew(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
+    """
+    Performs a transposed 2D convolution with a square input and an asymmetric kernel.
 
-    def forward(self, input_0, input_1):
-        arg0_1 = input_0
-        arg1_1 = input_1
-        output = call([arg0_1, arg1_1])
+    Args:
+        in_channels (int): Number of channels in the input tensor.
+        out_channels (int): Number of channels produced by the convolution.
+        kernel_size (tuple): Size of the convolution kernel (height, width).
+        stride (int, optional): Stride of the convolution. Defaults to 1.
+        padding (int or tuple, optional): Padding applied to the input. Defaults to 0.
+        output_padding (int or tuple, optional): Additional size added to one side of the output shape. Defaults to 0.
+        groups (int, optional): Number of blocked connections from input channels to output channels. Defaults to 1.
+        bias (bool, optional): If `True`, adds a learnable bias to the output. Defaults to `False`.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple, stride: int = 1, padding: int = 0, output_padding: int = 0, groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.conv_transpose2d = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding, groups=groups, bias=bias)
+
+    def forward(self, input_0):
+        primals_2 = self.conv_transpose2d.weight
+        primals_3 = self.conv_transpose2d.bias
+        primals_1 = input_0
+        output = call([primals_1, primals_2, primals_3])
         return output[0]

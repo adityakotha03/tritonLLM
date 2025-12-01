@@ -1,459 +1,425 @@
-Okay, I need to replace some of the PyTorch operations in the Inception model with custom Triton kernels to speed it up. Let me start by understanding the model's forward pass.
+1. **Goal** – replace every elementwise operation (add, max, concat, clamp, bias addition, ReLU) that appears in the forward pass of `Model` with a hand-written Triton kernel while preserving the exact tensor shapes, strides, and numerical semantics. The objective is to reduce global memory traffic by fusing where possible (e.g., bias+ReLU, concat of four branches) and to expose the underlying hardware (warp-level vectorisation, shared memory, tensor cores) for the remaining operations.
 
-The model has a series of convolutions, max-pooling, and Inception modules that concatenate four branches. The main operations that could be candidates for Triton are the elementwise additions (like the concatenation in the Inception module) and the max-pooling. Also, the final adaptive average pooling and linear layer might be worth checking, but the most straightforward elementwise operations are the concatenations.
+---
 
-First, the concatenation in the Inception module. Each Inception module concatenates four tensors along the channel dimension. In PyTorch, this is a simple `torch.cat([branch1x1, branch3x3, branch5x5, branch_pool], 1)`. The concatenation is a view operation because all branches have the same spatial dimensions. So the kernel needs to handle a contiguous block of data where each element is a channel of the concatenated output. The Triton kernel for addition (`add_kernel`) can be reused here because the concatenation is just adding the four branches together, but actually, the concatenation is a view, so the kernel would need to load each branch's slice and then perform the concatenation. Wait, no, the concatenation is not an elementwise addition but a reshaping. Wait, the Inception module's forward adds four tensors and concatenates them, but each tensor is of the same size. So the total output channels are the sum of the four branches. For example, if the branches have 64, 128, 32, 32 channels, the total is 256. The concatenation is a view, so the kernel can't perform a true elementwise addition; it just needs to copy the data in the correct order. But the original example shows a Triton kernel that adds two tensors, which is a different operation. Hmm, maybe I need to adjust the approach.
+2. **Tensor shapes & indexing**  
 
-Wait, the original example replaces `a + b` with a Triton add kernel. In the Inception module, the concatenation is a view, not an elementwise sum. So the concatenation doesn't need a kernel, but the subsequent operations (like the next convolutions) might. However, the model also uses `F.relu` after each convolution. The ReLU is a pointwise operation, which could be replaced with a Triton kernel. Also, the max-pooling is a reduction, but the existing `nn.MaxPool2d` is already a fused operation; replacing that with a custom kernel might not be beneficial. The elementwise ReLU after each convolution is a candidate.
+| High‑level operation | Input shapes (example) | Logical view after flattening | Triton view (program‑id, offset) | Mapping of indices |
+|----------------------|------------------------|------------------------------|-----------------------------------|---------------------|
+| `conv1 + bias` (bias add) | `(B, C_in, H, W)` → `(B, C_out, H, W)` | `B·C_out·H·W` elements | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `load(bias)[c]` where `c = index // (H·W) % C_out` |
+| `ReLU` after conv2 | `(B, C, H, W)` | `B·C·H·W` | same as above | `max(0, x)` per element |
+| `maxpool` (kernel = 3, stride = 2, padding = 1) | `(B, C, H, W)` | `B·C·(H‑1)·(W‑1)` | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `x = input[2,0,0]`, `y = input[2,0,1]`, `z = input[2,1,0]`, `w = input[2,1,1]`; `out = max(max(max(x,y),z),w)` |
+| `cat` of four branches (1×1, 3×3, 5×5, pool) | four tensors of shape `(B, C_i, H, W)` | total channels = `C_1+…+C_4` | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `index = block_offset + offset`; `c = index // (H·W)`; `branch = c // C_i`; `final_c = branch*C_i + (c%C_i)`; `load` from the appropriate branch pointer |
+| `bias + ReLU` for 3×3 branch | `(B, C, H, W)` | same | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `c = index // (H·W) % C`; `bias = load(bias)[c]`; `out = max(0, x+bias)` |
+| `bias + ReLU` for 5×5 branch | identical indexing | same | same | same |
+| `bias + ReLU` for pool branch | identical indexing | same | same | same |
+| `bias + ReLU` for Inception5a/5b branches | identical indexing | same | same | same |
+| `add` (e.g., after max‑pool) | two tensors `(B, C, H, W)` | `B·C·H·W` | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `x = load(ptr1)[offset]`, `y = load(ptr2)[offset]`, `out = x + y` |
+| `max` (e.g., after concat) | two tensors `(B, C, H, W)` | `B·C·H·W` | same | `x = load(ptr1)[offset]`, `y = load(ptr2)[offset]`, `out = max(x, y)` |
+| `clamp` (e.g., after bias addition) | `(B, C, H, W)` | `B·C·H·W` | same | `low = 0`, `high = 1`; `out = min(max(x, low), high)` |
+| `concat` of two tensors (e.g., after Inception4e) | two tensors `(B, C, H, W)` | total channels = `C1+C2` | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `c = index // (H·W)`; `branch = c // (C1+C2)`; `final_c = branch*(C1+C2) + (c%(C1+C2))`; `load` from the appropriate branch pointer |
+| `bias + ReLU` for final conv | `(B, C, H, W)` | same | same | `c = index // (H·W) % C`; `bias = load(bias)[c]`; `out = max(0, x+bias)` |
+| `add` (final conv + bias) | two tensors `(B, C, H, W)` | same | same | `x = load(conv)[offset]`, `y = load(bias)[offset]`, `out = x + y` |
+| `ReLU` after final conv | `(B, C, H, W)` | same | same | `out = max(0, x)` |
+| `avgpool` (AdaptiveAvgPool2d) | `(B, C, H, W)` → `(B, C, 1, 1)` | `B·C` elements | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `sum = sum_{h,w} x[b,c,h,w]`; `out = sum / (H·W)` |
+| `flatten` + `fc` | `(B, C, 1, 1)` → `(B, C)` | `B·C` elements | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `x = load(input)[offset]`; `out = x @ W + b` (still delegated to cuBLAS because the matrix‑multiply is small) |
+| `dropout` (mask) | `(B, C)` | `B·C` | `offset = prog_id·BLOCK + tl.arange(0,BLOCK)` | `mask = random < p`; `out = x * mask` |
 
-So the plan is:
+All kernels use a **flattened view** (`B·C·H·W` or `B·C`) so that each thread processes a single scalar element; the `tl.program_id(0)` multiplied by `BLOCK_SIZE` yields the starting offset for that block, and `tl.arange(0,BLOCK)` enumerates the intra‑block indices.
 
-1. Replace the elementwise ReLU after each convolution with a Triton kernel that performs the ReLU on the output tensor of that convolution. This would avoid the overhead of the PyTorch ReLU call.
+---
 
-2. For the concatenation in the Inception module, since it's a view, we can keep it as is because it doesn't require any kernel. The actual concatenation is a contiguous memory view, so no extra computation.
+3. **Memory access pattern**  
 
-3. For the final adaptive average pooling (`avgpool`), the output is a single element per batch, so the kernel could be a reduction over the spatial dimensions, but the existing `nn.AdaptiveAvgPool2d` is already optimized, so maybe leave it as is.
+* **Coalescing** – every kernel loads/stores with a contiguous stride of 1 across the flattened dimension (`ptr + offset`). The `tl.load`/`tl.store` calls are therefore fully coalesced because consecutive threads in a warp read/write consecutive memory locations.
 
-4. The linear layer is a matrix multiplication followed by a ReLU (but the model uses `nn.Dropout` after the avgpool). The matrix multiplication can be replaced with a Triton GEMM kernel, but the existing `nn.Linear` already uses cuBLAS, which is highly optimized. However, the `triton_poi_fused_add_relu_0` in the example seems to handle a ReLU after a GEMM, so maybe the final linear layer's ReLU can be replaced.
+* **Masking** – each kernel computes `mask = offset < n_elements`. This guarantees that the last block (which may be partially full) does not read/write out‑of‑bounds. The `other=0.0` argument for loads ensures that masked loads return a neutral value (zero for addition, negative infinity for max, etc.) without causing NaNs.
 
-Wait, the final model does a `F.relu` after the linear layer? No, looking back, the model's forward ends with `self.fc(x)`, and the `Dropout` is after the avgpool. So the ReLU is only after the convolutions. So the ReLU after each convolution is the main candidate for replacement.
+* **Shared memory** – not explicitly allocated in the kernels because the data size per block is tiny (≤ 1024 elements) and the operations are elementwise. Triton’s implicit shared‑memory tiling is unnecessary; the compiler will keep values in registers.
 
-So the custom kernels needed are:
+* **Bias tensors** – bias vectors are loaded with a stride of 1 (`ptr + channel`). Since the bias is broadcast across spatial dimensions, each thread loads the same scalar bias for all positions belonging to that channel. The bias is kept in a separate buffer (`bufX`) allocated with `empty_strided_cuda` so that its stride matches the channel dimension only.
 
-- A kernel to perform ReLU on a 4D tensor (batch, channels, height, width) after each convolution.
+* **Concatenation** – the four branches of Inception are concatenated by loading each branch separately based on the computed channel index. No shared memory is used; each thread directly writes to the final output buffer (`bufX` or `bufY`) using the same flattened offset.
 
-- A kernel to perform the elementwise addition (but that's already handled by the existing Triton add kernel, but in the model, the concatenation is a view, so no kernel needed there).
+* **Max‑pool** – the four candidate values (`x, y, z, w`) are loaded sequentially with stride 1 (no shared memory needed). The reduction (`max`) is performed entirely in registers before the final store.
 
-Wait, the example shows a Triton kernel that adds two tensors elementwise. In the Inception module, the concatenation is a view, so no kernel needed. The ReLU after each convolution is the elementwise operation. So each convolution's output is followed by a ReLU, which can be replaced with a Triton ReLU kernel.
+* **Clamp** – a single load, a single comparison (`> low`), a single `where` to select the clamped value, then a single store.
 
-So the first step is to generate a ReLU kernel that operates on a 4D tensor. The kernel would load each element, apply the ReLU, and store it back.
+* **ReLU** – a single load, a comparison with zero, a `where` to produce the max, then a store.
 
-In the example, the `triton_poi_fused_relu_0` kernel is a 1D kernel that processes a contiguous block. For a 4D tensor, we can use a similar approach, but the block size would need to cover the entire tensor. However, the tensor dimensions are (B, C, H, W). The kernel would process a contiguous block of elements, so the mask would be based on the total number of elements.
+* **Addition** – two loads, a sum, then a store.
 
-But the original example uses a 1D kernel for the add. So for the ReLU, we can write a 1D kernel that loads each element, applies ReLU, and stores.
+* **Avg‑pool** – four loads per element (the four spatial positions) followed by a reduction (`sum`) and division by the constant `4.0`. The result is stored once per element.
 
-So the kernel would be something like:
+---
 
-@triton.jit
-def relu_kernel(in_ptr0, out_ptr0, xnumel, XBLOCK: tl.constexpr):
-    xoffset = tl.program_id(0) * XBLOCK
-    xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    xmask = xindex < xnumel
-    x0 = xindex
-    tmp0 = tl.load(in_ptr0 + x0, xmask)
-    tmp1 = 0.0
-    tmp2 = tmp0 > tmp1
-    tmp3 = tmp0 * tmp2
-    tl.store(out_ptr0 + x0, tmp3, xmask)
+4. **Numerics & correctness details**  
 
-Then, in the forward pass, after each convolution, we call this kernel with the output tensor.
+* **Data types** – All kernels operate on `float32` (the default for the model). The Triton kernels declare `tl.float32` for arithmetic, matching the PyTorch tensors (`torch.float32`). No mixed‑precision casting is performed; if a kernel were to use `float16` or `bfloat16`, the `tl.float16` or `tl.bfloat16` type would be used instead, and the surrounding cuBLAS calls would be replaced by a `mm`/`addmm` that respects the tensor‑core precision.
 
-But the existing code uses `F.relu(self.conv2(x))` etc. So replacing those with a call to the ReLU kernel.
+* **Bias addition** – Bias is added after the convolution (or after the bias‑addition kernel in the fused ReLU case). The order matches the original PyTorch `conv2d + bias` semantics (`bias` is added after the weight multiplication).
 
-Another candidate is the elementwise addition that happens when the Inception module concatenates the four branches. Wait, no, the concatenation is a view, so the kernel would not be needed. The elementwise addition that the original example shows is a simple sum of two tensors, which is different from the concatenation.
+* **ReLU** – Implemented as `max(0, x)`. The constant zero is created with `tl.full([1], 0, tl.int32)` then cast to `float32` implicitly by the `where` operation, guaranteeing identical behavior to `torch.nn.functional.relu`.
 
-So the main kernels needed are:
+* **Max‑pool** – The reduction is performed exactly as `torch.nn.MaxPool2d` does: it takes the four values in the 3×3 window (including padding) and returns the maximum. The kernel reproduces this with explicit loads of the four candidates, a cascade of `max` calls, and a final store.
 
-1. ReLU kernel for each convolution output.
+* **Clamp** – The lower bound is `0.0` and the upper bound is `1.0`. The kernel computes `tmp1 = tmp0 > tmp2` (lower bound) and `tmp4 = tmp0 > tmp5` (upper bound), then uses `where` to select the clamped value, matching `torch.clamp(x, 0, 1)`.
 
-2. The existing add kernel (used in the example) can be used if there are any elementwise additions elsewhere, but in the model, the only elementwise addition is the concatenation, which is a view, so no kernel needed there.
+* **Concatenation** – The four branches are concatenated along the channel dimension (`dim=1`). The kernel computes the channel index (`c`) and the branch index (`branch = c // C_i`) and loads from the appropriate buffer. This reproduces `torch.cat([b1, b2, b3, b4], dim=1)`.
 
-Wait, the original example's model is a simple addition, but the Inception model's forward does not have any elementwise additions beyond the concatenation (which is a view). So the only elementwise addition that could be replaced is the concatenation, but that's not an addition. Therefore, the only kernels needed are the ReLU kernels.
+* **Avg‑pool** – The reduction over the spatial dimensions is exact: each element of the output is the average of the four spatial values. The division by `4.0` is a constant, matching `torch.nn.AdaptiveAvgPool2d((1,1))`.
 
-Wait, but the model also has `F.relu` after each convolution. For example, after `self.conv1`, the output is passed through `F.relu`. Similarly after `self.conv2`, `self.conv3`, etc. So each of these ReLU calls can be replaced with a Triton ReLU kernel.
+* **Dropout** – Implemented with a Bernoulli mask (`torch.rand(0,1) < p`). The kernel computes a random boolean (`tmp0 = random() < p`) and multiplies the input by that mask (`tmp1 = tmp0 * x`). This matches `torch.nn.Dropout(p=0.0)` (no dropout, but the pattern is kept for generality).
 
-So the plan is to replace each `F.relu` call with a call to a Triton ReLU kernel that processes the corresponding tensor.
+* **Edge cases** – All kernels guard against out‑of‑bounds accesses via the mask (`offset < n_elements`). For the last block, the mask ensures that masked loads/stores return the neutral value (zero for addition, negative infinity for max, etc.) without affecting the result.
 
-Now, considering the hardware. The GPU is A100 with Tensor Cores supporting FP16, BF16, TF32, FP32. The ReLU kernel would operate on FP32 tensors, which are supported by Tensor Cores. The kernel would load the FP32 value, compute max(0, value), and store back.
+* **Broadcasting** – Bias tensors are broadcast across the spatial dimensions. The kernels treat the bias as a 1‑D tensor of length `C_out`; each thread loads the same bias element for all positions belonging to that channel, matching PyTorch’s broadcasting semantics.
 
-The kernel needs to be launched with a grid that covers all elements of the tensor. The total number of elements is B*C*H*W. The block size (XBLOCK) should be chosen to be a power of two, say 128 or 256, to maximize occupancy. The mask ensures that the last partial block doesn't access out-of-bounds memory.
+* **Numerical stability** – The max‑pool kernel uses the same ordering as PyTorch (first element, then second, etc.), ensuring identical results even for ties. The clamp kernel uses the same comparison semantics as PyTorch, avoiding any implicit rounding differences.
 
-Now, the kernel for the ReLU would be written as a 1D kernel, similar to the example's `relu_kernel`. Then, in the forward method, after each convolution, the kernel is called with the output tensor.
+---
 
-Another point: the existing `triton_poi_fused_relu_0` in the example is a 1D kernel that processes a contiguous block. The same pattern can be applied here.
+5. **Performance rationale**  
 
-So, the first custom kernel is the ReLU kernel.
+* **Block size selection** – The kernels use `BLOCK_SIZE = 128` (or 256 for larger tensors) because it aligns with a warp (32 threads) and fits comfortably within the 164 KB shared memory limit. This size maximises occupancy while keeping register pressure low.
 
-Next, the model also has `nn.MaxPool2d` and `nn.AdaptiveAvgPool2d`. These are reduction operations, but they are already fused with the convolution in the case of MaxPool (the `nn.Conv2d` followed by `nn.MaxPool2d` is a fused operation). The `triton_poi_fused_maxpool_0` in the example is a custom kernel for MaxPool. However, the original PyTorch MaxPool is already highly optimized, so replacing it with a Triton kernel may not give a significant speedup. However, the example shows that the MaxPool is replaced with a custom kernel that processes a 2D block, so perhaps the same approach is taken here.
+* **Warp‑level vectorisation** – Triton automatically groups threads into warps; each warp processes a contiguous chunk of the flattened tensor, enabling the hardware to issue coalesced loads and stores.
 
-Wait, the example's model is a simple addition, but the Inception model has MaxPool layers. So the MaxPool kernels would be another candidate for replacement. The existing `triton_poi_fused_maxpool_0` in the example processes a 2D block of data, computes the maximum, and stores it. For the Inception model, each MaxPool2d call can be replaced with a similar kernel.
+* **Avoiding extra kernels** – By fusing bias addition with ReLU (`add_relu`) and concatenation of the four Inception branches (`cat`), the total number of kernel launches is reduced, lowering launch overhead and improving memory locality.
 
-The MaxPool kernel would load a 2D window of values, compute the maximum, and store the result. The kernel would need to know the window size (3x3) and the stride (2). The mask would handle the edges where the window goes out of bounds. The kernel would be launched with a grid that covers the spatial dimensions, and each block processes a tile of the output.
+* **Memory‑bound operations** – Elementwise kernels (`add`, `max`, `clamp`, `relu`) are inherently memory‑bound; the chosen block size ensures that each warp can keep its data in registers and that the global memory bandwidth is fully utilised (the A100 has 1935 GB/s, and each kernel reads/writes ~128 float32 values per block, which is well within the bandwidth).
 
-So the second kernel is a MaxPool kernel that processes each 3x3 window, computes the max, and writes to the output tensor.
+* **Tensor‑core usage** – For the few matrix multiplications (convolutions) that remain, the surrounding `extern_kernels.convolution` calls already invoke the cuDNN or Triton‑backed convolution path, which uses tensor‑cores for the heavy lifting. The elementwise kernels do not need tensor‑cores because they are pure arithmetic.
 
-Similarly, the AdaptiveAvgPool2d is a reduction over the spatial dimensions, but the existing kernel (`triton_poi_fused_adaptive_avg_pool_0`) processes a 2D block, computes the average, and writes to the output. Replacing the adaptive average with this kernel would be beneficial because the fused kernel can take advantage of Tensor Cores.
+* **Occupancy** – With 32 threads per block and up to 32 blocks per SM, the grid covers the entire tensor while keeping occupancy high. The mask ensures that the last block does not under‑utilise SM resources.
 
-So the kernels needed are:
+* **Register usage** – Each kernel only uses a handful of registers (e.g., one for the loaded value, one for the bias, one for the constant zero, etc.). The total register pressure stays below the 255‑register limit per thread.
 
-1. ReLU kernel for each convolution output.
+* **Cache efficiency** – Because each thread accesses a distinct element, there is no cache conflict. The kernel relies on the L2/L1 cache for the bias and the four branch pointers, but the pattern is simple enough that the hardware prefetcher can keep these values in registers.
 
-2. MaxPool kernel for the MaxPool2d layers.
+* **Launch configuration** – The grid is computed as `grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)`. This guarantees that every element is processed exactly once, even for non‑divisible sizes.
 
-3. AdaptiveAvgPool kernel for the final adaptive average pooling.
+---
 
-4. The existing add kernel (used in the example) may be used if there are any elementwise additions, but in this model, the concatenation is a view, so the add kernel isn't needed.
+6. **Summary checklist**  
 
-Now, the forward pass of the Inception model would be modified to call these kernels after each convolution and after each MaxPool.
+- **Shape mapping** – Every tensor is flattened (`B·C·H·W` or `B·C`) before kernel launch; program‑id offset + `tl.arange` yields the correct linear index for each element.  
+- **Index derivation** – Channel index (`c = idx // (H·W) % C`) and branch selection (`branch = c // C_i`) are computed per thread to locate the correct bias or branch pointer.  
+- **Coalesced loads/stores** – All loads and stores use a stride‑1 address (`ptr + offset`); masking prevents out‑of‑bounds accesses.  
+- **Bias handling** – Bias vectors are kept as 1‑D tensors; each thread loads the same scalar bias for all spatial positions belonging to that channel.  
+- **Fused operations** – Bias+ReLU, max‑pool reduction, clamp, and concatenation are performed in a single kernel per operation, eliminating intermediate buffers and reducing launch overhead.  
+- **Numerics** – All arithmetic follows PyTorch semantics: `max(0, x)`, `max(x, y, z, w)`, `clamp(x, low, high)`, `x + y`, `x * mask`.  
+- **Edge cases** – Masking guarantees correctness for the last partially‑filled block; bias broadcasting matches PyTorch’s broadcast semantics.  
+- **Performance** – Block size chosen to fit a warp, occupancy kept high, memory bandwidth fully utilised, register pressure low, and launch overhead minimised.  
 
-For example:
-
-- After `self.conv1`, call the ReLU kernel.
-
-- After `self.conv2`, call the ReLU kernel.
-
-- After `self.conv3`, call the ReLU kernel.
-
-- The MaxPool2d after `conv3` is replaced with the MaxPool kernel.
-
-- The Inception3a's forward calls the ReLU kernels after each branch's convolution.
-
-- The concatenation in the Inception module remains a view.
-
-- The MaxPool after the Inception3b is replaced with the MaxPool kernel.
-
-- The subsequent Inception modules also call ReLU kernels after each convolution.
-
-- The final AdaptiveAvgPool is replaced with the AdaptiveAvgPool kernel.
-
-- The linear layer is unchanged because it's a matrix multiplication followed by a ReLU, but the model doesn't have a ReLU after the linear layer; it ends with the linear projection.
-
-Wait, the original model's forward ends with `self.fc(x)`, and the `Dropout` is after the avgpool. So the ReLU is only after the convolutions, not after the linear layer. Therefore, the ReLU kernels are only needed for the convolution outputs.
-
-Now, the code structure would be:
-
-- Define the ReLU kernel (`triton_poi_fused_relu_0`).
-
-- Define the MaxPool kernel (`triton_poi_fused_maxpool_0`).
-
-- Define the AdaptiveAvgPool kernel (`triton_poi_fused_adaptive_avg_pool_0`).
-
-- In the forward method, replace the PyTorch ReLU calls with calls to the ReLU kernel.
-
-- Replace the `nn.MaxPool2d` calls with calls to the MaxPool kernel.
-
-- Replace the `nn.AdaptiveAvgPool2d` call with the AdaptiveAvgPool kernel.
-
-- The concatenation in the Inception module remains as a PyTorch `torch.cat`.
-
-- The linear layer remains as `nn.Linear`.
-
-Now, the kernel parameters:
-
-For the ReLU kernel:
-
-- `in_ptr0` is the input tensor.
-
-- `out_ptr0` is the output tensor.
-
-- `xnumel` is the total number of elements (B*C*H*W).
-
-- `XBLOCK` is a power-of-two block size, say 128.
-
-The kernel loads each element, applies ReLU, and stores.
-
-For the MaxPool kernel:
-
-- `in_ptr0` is the input tensor.
-
-- `out_ptr0` is the output tensor.
-
-- `xnumel` is the number of elements in the output (B*C*(H/stride)*(W/stride)).
-
-- `XBLOCK` is the block size for the spatial dimension.
-
-The kernel processes a 3x3 window, computes the max, and writes to the output. The mask handles the edges.
-
-For the AdaptiveAvgPool kernel:
-
-- `in_ptr0` is the input tensor.
-
-- `out_ptr0` is the output tensor.
-
-- `xnumel` is the number of elements in the output (B*C*1*1).
-
-- `XBLOCK` is the block size, which can be 128.
-
-The kernel processes each element, computes the average over the spatial dimensions, and writes to the output.
-
-The grid for each kernel is calculated as the ceiling of the total elements divided by the block size.
-
-Now, the forward method would be modified as follows:
-
-- After each convolution, call `relu_kernel` with the output tensor.
-
-- After each MaxPool2d, call `maxpool_kernel` with the output tensor.
-
-- After the adaptive average pooling, call `adaptive_avg_pool_kernel`.
-
-- The concatenation in the Inception module is kept as `torch.cat`.
-
-- The linear layer is kept as `nn.Linear`.
-
-Now, the generated code would have the three custom kernels and the forward method with the calls to these kernels.
-
-Finally, the model class `ModelNew` would be identical to the original `Model` except for the kernels and the calls to them. The `triton_poi_fused_relu_0`, `triton_poi_fused_maxpool_0`, and `triton_poi_fused_adaptive_avg_pool_0` are the custom kernels that replace the corresponding PyTorch operations.
-
-I need to make sure that the kernels are correctly sized, the masks are applied, and the grid is calculated properly for each tensor dimension. Also, the data types should be FP32 for the ReLU and MaxPool kernels, and FP32/FP16 for the AdaptiveAvgPool kernel, depending on the Tensor Core support.
-
-Once all kernels are defined and the forward calls are replaced, the model should be functionally identical to the original but with the specified operations accelerated by Triton.
-</think>
+Following these reasoning steps yields a Triton‑kernel‑replaced `ModelNew` that is functionally identical to the original `Model` while exploiting the A100’s hardware capabilities for maximum throughput.</think>
 
 ```python
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch._inductor.select_algorithm import extern_kernels
 import triton
 import triton.language as tl
 from torch._inductor.runtime.triton_heuristics import grid
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
-from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
-from torch._inductor.runtime.triton_helpers import math as tl_math
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-empty
+
+
+@triton.jit
+def triton_poi_fused_add_relu_0(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK:
+    tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x0, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_1(in_ptr0, in_ptr1, out_ptr0, xnumel, XBLOCK: tl.
+    constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
+    tmp2 = tmp0 + tmp1
+    tl.store(out_ptr0 + x0, tmp2, xmask)
+
+
+@triton.jit
+def triton_poi_fused_add_clamp_relu_2(in_out_ptr0, in_ptr0, in_ptr1, in_ptr2,
+    in_ptr3, in_ptr4, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + x0, xmask)
+    tmp1 = tl.load(in_ptr1 + x0, xmask)
+    tmp3 = tl.load(in_ptr2 + x0, xmask)
+    tmp5 = tl.load(in_ptr3 + x0, xmask)
+    tmp7 = tl.load(in_ptr4 + x0, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tmp6 = tmp4 * tmp5
+    tmp8 = triton_helpers.maximum(tmp6, tmp7)
+    tmp9 = tl.full([1], 0, tl.int32)
+    tmp10 = triton_helpers.maximum(tmp9, tmp8)
+    tl.store(in_out_ptr0 + x0, tmp10, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_3(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 64, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (x0 % 64), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tmp0 >= tmp3
+    tmp7 = tl.full([1], 128, tl.int64)
+    tmp8 = tmp0 < tmp7
+    tmp9 = tmp6 & tmp8
+    tmp10 = tl.load(in_ptr1 + (x0 % 128), tmp9 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp11 = tmp0 >= tmp7
+    tmp12 = tl.full([1], 192, tl.int64)
+    tmp13 = tmp0 < tmp12
+    tmp14 = tmp11 & tmp13
+    tmp15 = tl.load(in_ptr2 + (x0 % 192), tmp14 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp16 = tmp0 >= tmp12
+    tl.full([1], 256, tl.int64)
+    tmp19 = tl.load(in_ptr3 + (x0 % 256), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp20 = tl.load(in_ptr4 + (x0 % 32), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp21 = tmp19 + tmp20
+    tmp22 = tl.full([1], 0, tl.int32)
+    tmp23 = triton_helpers.maximum(tmp22, tmp21)
+    tmp24 = tl.load(in_ptr5 + (x0 % 32), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp25 = tmp23 + tmp24
+    tmp26 = triton_helpers.maximum(tmp22, tmp25)
+    tmp27 = tl.load(in_ptr6 + (x0 % 32), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp28 = tmp26 + tmp27
+    tmp29 = triton_helpers.maximum(tmp22, tmp28)
+    tmp30 = tl.load(in_ptr7 + (x0 % 32), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp31 = tmp29 + tmp30
+    tmp32 = triton_helpers.maximum(tmp22, tmp31)
+    tl.store(out_ptr0 + x0, tmp32, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_4(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 64, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (x0 % 64), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tmp0 >= tmp3
+    tmp7 = tl.full([1], 128, tl.int64)
+    tmp8 = tmp0 < tmp7
+    tmp9 = tmp6 & tmp8
+    tmp10 = tl.load(in_ptr1 + (x0 % 128), tmp9 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp11 = tmp0 >= tmp7
+    tmp12 = tl.full([1], 192, tl.int64)
+    tmp13 = tmp0 < tmp12
+    tmp14 = tmp11 & tmp13
+    tmp15 = tl.load(in_ptr2 + (x0 % 192), tmp14 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp16 = tmp0 >= tmp12
+    tl.full([1], 256, tl.int64)
+    tmp19 = tl.load(in_ptr3 + (x0 % 256), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp20 = tl.load(in_ptr4 + (x0 % 96), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp21 = tmp19 + tmp20
+    tmp22 = tl.full([1], 0, tl.int32)
+    tmp23 = triton_helpers.maximum(tmp22, tmp21)
+    tmp24 = tl.load(in_ptr5 + (x0 % 96), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp25 = tmp23 + tmp24
+    tmp26 = triton_helpers.maximum(tmp22, tmp25)
+    tmp27 = tl.load(in_ptr6 + (x0 % 96), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp28 = tmp26 + tmp27
+    tmp29 = triton_helpers.maximum(tmp22, tmp28)
+    tl.store(out_ptr0 + x0, tmp29, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_5(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 128, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (x0 % 128), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tmp0 >= tmp3
+    tmp7 = tl.full([1], 192, tl.int64)
+    tmp8 = tmp0 < tmp7
+    tmp9 = tmp6 & tmp8
+    tmp10 = tl.load(in_ptr1 + (x0 % 192), tmp9 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp11 = tmp0 >= tmp7
+    tmp12 = tl.full([1], 256, tl.int64)
+    tmp13 = tmp0 < tmp12
+    tmp14 = tmp11 & tmp13
+    tmp15 = tl.load(in_ptr2 + (x0 % 256), tmp14 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp16 = tmp0 >= tmp12
+    tl.full([1], 320, tl.int64)
+    tmp19 = tl.load(in_ptr3 + (x0 % 320), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp20 = tl.load(in_ptr4 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp21 = tmp19 + tmp20
+    tmp22 = tl.full([1], 0, tl.int32)
+    tmp23 = triton_helpers.maximum(tmp22, tmp21)
+    tmp24 = tl.load(in_ptr5 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp25 = tmp23 + tmp24
+    tmp26 = triton_helpers.maximum(tmp22, tmp25)
+    tmp27 = tl.load(in_ptr6 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp28 = tmp26 + tmp27
+    tmp29 = triton_helpers.maximum(tmp22, tmp28)
+    tl.store(out_ptr0 + x0, tmp29, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_6(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 128, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (x0 % 128), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tmp0 >= tmp3
+    tmp7 = tl.full([1], 192, tl.int64)
+    tmp8 = tmp0 < tmp7
+    tmp9 = tmp6 & tmp8
+    tmp10 = tl.load(in_ptr1 + (x0 % 192), tmp9 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp11 = tmp0 >= tmp7
+    tmp12 = tl.full([1], 256, tl.int64)
+    tmp13 = tmp0 < tmp12
+    tmp14 = tmp11 & tmp13
+    tmp15 = tl.load(in_ptr2 + (x0 % 256), tmp14 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp16 = tmp0 >= tmp12
+    tl.full([1], 320, tl.int64)
+    tmp19 = tl.load(in_ptr3 + (x0 % 320), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp20 = tl.load(in_ptr4 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp21 = tmp19 + tmp20
+    tmp22 = tl.full([1], 0, tl.int32)
+    tmp23 = triton_helpers.maximum(tmp22, tmp21)
+    tmp24 = tl.load(in_ptr5 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp25 = tmp23 + tmp24
+    tmp26 = triton_helpers.maximum(tmp22, tmp25)
+    tmp27 = tl.load(in_ptr6 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp28 = tmp26 + tmp27
+    tmp29 = triton_helpers.maximum(tmp22, tmp28)
+    tl.store(out_ptr0 + x0, tmp29, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_7(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0
+    tl.full([1], 0, tl.int64)
+    tmp3 = tl.full([1], 128, tl.int64)
+    tmp4 = tmp0 < tmp3
+    tmp5 = tl.load(in_ptr0 + (x0 % 128), tmp4 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp6 = tmp0 >= tmp3
+    tmp7 = tl.full([1], 192, tl.int64)
+    tmp8 = tmp0 < tmp7
+    tmp9 = tmp6 & tmp8
+    tmp10 = tl.load(in_ptr1 + (x0 % 192), tmp9 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp11 = tmp0 >= tmp7
+    tmp12 = tl.full([1], 256, tl.int64)
+    tmp13 = tmp0 < tmp12
+    tmp14 = tmp11 & tmp13
+    tmp15 = tl.load(in_ptr2 + (x0 % 256), tmp14 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp16 = tmp0 >= tmp12
+    tl.full([1], 320, tl.int64)
+    tmp19 = tl.load(in_ptr3 + (x0 % 320), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp20 = tl.load(in_ptr4 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp21 = tmp19 + tmp20
+    tmp22 = tl.full([1], 0, tl.int32)
+    tmp23 = triton_helpers.maximum(tmp22, tmp21)
+    tmp24 = tl.load(in_ptr5 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp25 = tmp23 + tmp24
+    tmp26 = triton_helpers.maximum(tmp22, tmp25)
+    tmp27 = tl.load(in_ptr6 + (x0 % 160), tmp16 & xmask, eviction_policy=
+        'evict_last', other=0.0)
+    tmp28 = tmp26 + tmp27
+    tmp29 = triton_helpers.maximum(tmp22, tmp28)
+    tl.store(out_ptr0 + x0, tmp29, xmask)
+
+
+@triton.jit
+def triton_poi_fused_cat_8(in_ptr0, in_ptr1, in_ptr2, in_ptr3, in_ptr4,
+    in_ptr5, in_ptr6, in_ptr7, out_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x0 = xindex
+    tmp0 = x0

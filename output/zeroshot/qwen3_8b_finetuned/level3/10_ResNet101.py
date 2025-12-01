@@ -1,25 +1,41 @@
-Okay, I need to optimize the given ResNet-like model using Triton kernels. The original model has several layers including Conv2d, BatchNorm2d, ReLU, and a final linear layer. The goal is to replace some of the elementwise operations with Triton kernels to improve performance on an A100 GPU.
+1. High‑level goal: replace every elementwise operation that appears inside a `Bottleneck` block (bias‑add → ReLU, bias‑add → ReLU, bias‑add → ReLU, shortcut bias‑add → ReLU, bias‑add → ReLU, bias‑add → ReLU) with a custom Triton kernel that fuses the addition of a scalar bias (or a per‑channel bias) with the ReLU activation. The objective is to eliminate an intermediate “bias‑add” tensor, keep the existing convolution and batch‑norm layers unchanged, and let Triton handle the fused add‑relu on‑the‑fly.
 
-First, I'll look at the forward pass. The first step is a Conv2d followed by BatchNorm2d and ReLU. Then there's a MaxPool. Each Bottleneck block has three Conv2d layers with BatchNorm and ReLU, plus a residual connection. The final layers are AdaptiveAvgPool and a Linear layer.
+2. Tensor shapes and indexing:
+   - After the first 1×1 convolution the feature map has shape `(B, C, H, W)` where `C = 64`. The bias is a 1‑D tensor of length `C`. The Triton kernel receives a pointer to the bias (`in_ptr0`) and a pointer to the feature map (`in_ptr1`). The kernel computes a linear index `x3 = program_id * BLOCK_SIZE + arange(0,BLOCK_SIZE)`. Because the bias is broadcast across the spatial dimensions, the kernel simply loads `bias[x0]` where `x0 = xindex % C` (the modulo extracts the channel index from the flat index). The feature map load uses the same flat index `x3` (no modulo needed because the spatial dimensions are contiguous in memory). This pattern repeats for the three 3×3 convolutions, each producing a tensor of the same shape `(B, C, H, W)` and each fused with its own bias vector.
 
-The key operations that can be replaced with Triton are the elementwise additions (like the residual connection) and the ReLU. Conv2d and BatchNorm are already highly optimized in cuDNN, so they probably don't need Triton kernels. However, the residual addition (conv1 + downsample) and the final ReLU after the last Conv2d can be candidates.
+   - The shortcut connection (when `downsample` is not present) is a simple elementwise addition of two tensors of shape `(B, C, H, W)`. The Triton kernel for the shortcut loads both tensors with the same flat index and adds them, then applies ReLU. No bias is involved here, so the kernel only needs to compute `out = max(0, a + b)`.
 
-Let me start by handling the residual addition. In the Bottleneck block, after the second Conv2d, the output is added to the identity (the downsampled input). This addition is a simple elementwise sum. I can write a Triton kernel that adds two tensors of the same shape. The kernel needs to load both tensors, sum them, and store the result. The mask ensures that out-of-bound elements are handled correctly. The grid size is computed based on the total number of elements, divided by the block size.
+3. Parallelization & launch configuration:
+   - `grid` is computed as `ceil(num_elements / BLOCK_SIZE)`. The kernel uses a 1‑D grid because the operation is elementwise across the flattened tensor. `BLOCK_SIZE` is chosen as 128 (a power‑of‑two that fits well in a warp) and tuned by the autotuner for the given tensor sizes.
+   - `program_id(0)` selects the block; `tl.arange` generates the intra‑block offsets. The mask `xmask = xindex < xnumel` guarantees safety for the final (potentially partial) block.
+   - Each thread processes exactly one element, so the kernel is embarrassingly parallel and scales linearly with the number of elements.
 
-Next, the final ReLU after the last Conv2d. The original model uses nn.ReLU(inplace=True). This is a per-element max(0, x). A Triton kernel can perform this by loading each element, applying the max, and storing. The same block size and grid calculation apply here.
+4. Memory access pattern:
+   - Loads: `tl.load(in_ptr0 + x0, mask)` for the bias vector (broadcasted) and `tl.load(in_ptr1 + x3, mask)` for the feature map (contiguous). The bias load is coalesced because `x0` varies by channel only; the feature map load is fully coalesced because consecutive threads read consecutive memory addresses.
+   - Store: `tl.store(out_ptr + x3, out, mask)` writes the fused result back to a contiguous buffer, preserving the original layout.
+   - No shared memory is required because the operation is pure elementwise; the kernel relies on the hardware cache for the bias vector (which is tiny) and the feature map (cached by the GPU).
 
-I also need to consider data movement. All tensors are contiguous after the Conv2d and BatchNorm because those layers return contiguous outputs. The Triton kernels operate on contiguous memory, so no extra transposes or reshapes are needed.
+5. Numerics & correctness details:
+   - Bias addition is performed in FP32 (the default dtype of the model). The ReLU uses `maximum(0, x)`, matching PyTorch’s `nn.ReLU(inplace=True)`.
+   - The shortcut kernel uses the same FP32 arithmetic; the addition is performed before the ReLU, exactly as `out += identity` followed by `out = ReLU(out)`.
+   - No dtype conversion is needed; the Triton kernel respects the input dtype (the generated code uses `tl.float32` implicitly because the inputs are FP32 tensors).
+   - The kernel does not perform any in‑place modification of the original tensors; it writes to a fresh buffer (`buf0`, `buf1`, …). This mirrors PyTorch’s `inplace=True` semantics because the fused kernel returns the same shape and dtype, allowing downstream layers to read the result without extra copies.
+   - Padding and stride handling are left to the preceding convolution kernels; the fused kernels assume the tensors are already padded and aligned as expected by the convolution output.
 
-Now, the Linear layer (fc) is a matrix multiplication followed by a ReLU. The matrix multiply is already handled by cuBLAS, but the ReLU after the flatten can be a Triton kernel. However, the flatten operation reduces the tensor to a 1D vector. The ReLU kernel can be applied to this vector. The kernel receives the vector, applies max(0, x), and writes back. The grid is calculated based on the length of the vector.
-
-I need to make sure that all Triton kernels are called with the correct pointers and shapes. The helper function triton_add is used for the residual addition, and triton_relu for the final ReLU. The Linear layer uses the standard torch.mm for the matrix multiply, then the ReLU kernel.
-
-Shared memory is not explicitly used in these kernels because the data fits in registers or the block size is small enough that a single load/store per element is sufficient. For larger tensors, shared memory would be beneficial, but the current block size (128) and the fact that each element is loaded once per thread makes it unnecessary here.
-
-Testing the kernels would involve verifying that the output matches the original PyTorch forward pass. The masks in the kernels ensure that edge cases (e.g., when the tensor size is not a multiple of the block size) are handled without out-of-bounds accesses.
-
-In summary, the optimized model replaces the residual addition and the final ReLU with Triton kernels, while keeping the Conv2d, BatchNorm, MaxPool, and Linear layers unchanged. The kernels are simple elementwise operations that benefit from the parallelism and memory coalescing provided by Triton on the A100 GPU.
-</think>
+6. Summary checklist:
+   - Identify all elementwise add‑relu patterns inside `Bottleneck.forward`.
+   - For each pattern, create a Triton kernel that:
+     * Takes pointers to the bias vector and the current feature map.
+     * Computes a flat index `x3`.
+     * Derives the channel index via `x0 = x3 % C`.
+     * Loads bias element `bias[x0]` and feature element `feature[x3]`.
+     * Adds them, applies ReLU, stores the result.
+   - Write a separate Triton kernel for the shortcut addition‑ReLU (no bias).
+   - Keep the original convolution, batch‑norm, and `nn.MaxPool2d` layers unchanged.
+   - Ensure the kernels are launched with `grid = ceil(num_elements / BLOCK_SIZE)` and `BLOCK_SIZE = 128` (or tuned by autotune).
+   - Verify that the generated buffers (`buf0`, `buf1`, …) have the correct shape and stride to match the subsequent layers.
+   - Replace the original `nn.ReLU(inplace=True)` calls with the fused kernels.
+   - The final `ModelNew` will have identical forward semantics to the original `Model` but with reduced memory traffic and fused compute.</think>
 
 ```python
 import torch
@@ -27,261 +43,567 @@ import torch.nn as nn
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+import torch.nn as nn
+import torch.nn.functional as F
 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
 empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
 reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
 
 
 @triton.jit
-def triton_poi_fused_convolution_add_0(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_convolution_relu_0(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 8192
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    tl.full([XBLOCK], True, tl.int1)
-    xoffset + tl.arange(0, XBLOCK)[:, None]
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    rindex = tl.arange(0, rnumel)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    rindex = rindex
-    tmp0 = tl.load(in_ptr0 + (rindex + xindex * rnumel), None)
-    tmp1 = 0.0
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
     tmp2 = tmp0 + tmp1
-    tl.store(out_ptr0 + (rindex + xindex * rnumel), tmp2, None)
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
 
 
 @triton.jit
-def triton_poi_fused_relu_1(in_ptr0, out_ptr0, xnumel, rnumel, XBLOCK: tl.constexpr):
+def triton_poi_fused_convolution_relu_1(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 8192
     xoffset = tl.program_id(0) * XBLOCK
     xindex = xoffset + tl.arange(0, XBLOCK)[:]
-    tl.full([XBLOCK], True, tl.int1)
-    xoffset + tl.arange(0, XBLOCK)[:, None]
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    rindex = tl.arange(0, rnumel)
-    tl.full([XBLOCK, rnumel], True, tl.int1)
-    rindex = rindex
-    tmp0 = tl.load(in_ptr0 + (rindex + xindex * rnumel), None)
-    tmp1 = 0.0
-    tmp2 = tmp0 > tmp1
-    tmp3 = tl.where(tmp2, tmp0, tmp1)
-    tl.store(out_ptr0 + (rindex + xindex * rnumel), tmp3, None)
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
 
 
-def call(args):
-    primals_1, primals_2, primals_3, primals_4, primals_5, primals_6, primals_7, primals_8, primals_9, primals_10, primals_11, primals_12, primals_13, primals_14, primals_15, primals_16, primals_17, primals_18, primals_19 = args
-    args.clear()
-    assert_size_stride(primals_1, (64, 3, 7, 7), (147, 49, 7, 1))
-    assert_size_stride(primals_2, (64,), (1,))
-    assert_size_stride(primals_3, (64, 64, 1, 1), (64, 1, 64, 1))
-    assert_size_stride(primals_4, (64,), (1,))
-    assert_size_stride(primals_5, (64, 64, 1, 1), (64, 1, 64, 1))
-    assert_size_stride(primals_6, (64,), (1,))
-    assert_size_stride(primals_7, (128, 64, 3, 3), (576, 9, 3, 1))
-    assert_size_stride(primals_8, (128,), (1,))
-    assert_size_stride(primals_9, (128, 128, 1, 1), (128, 1, 128, 1))
-    assert_size_stride(primals_10, (128,), (1,))
-    assert_size_stride(primals_11, (128, 128, 1, 1), (128, 1, 128, 1))
-    assert_size_stride(primals_12, (128,), (1,))
-    assert_size_stride(primals_13, (256, 128, 3, 3), (1152, 36, 3, 1))
-    assert_size_stride(primals_14, (256,), (1,))
-    assert_size_stride(primals_15, (256, 256, 1, 1), (256, 1, 256, 1))
-    assert_size_stride(primals_16, (256,), (1,))
-    assert_size_stride(primals_17, (256, 256, 1, 1), (256, 1, 256, 1))
-    assert_size_stride(primals_18, (256,), (1,))
-    assert_size_stride(primals_19, (512, 256, 3, 3), (2304, 72, 3, 1))
-    with torch.cuda._DeviceGuard(0):
-        torch.cuda.set_device(0)
-        buf0 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf5 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf6 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf7 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf10 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf11 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf12 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf13 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        del primals_1
-        del primals_2
-        del primals_3
-        del primals_4
-        del primals_5
-        del primals_6
-        del primals_7
-        del primals_8
-        del primals_9
-        del primals_10
-        del primals_11
-        del primals_12
-        del primals_13
-        del primals_14
-        del primals_15
-        del primals_16
-        del primals_17
-        del primals_18
-        del primals_19
-        buf0 = reinterpret_tensor(buf0, (64, 56, 56), (3136, 49, 1), 0)
-        del buf0
-        buf0 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf5 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf6 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf7 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf10 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf11 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf12 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf13 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        get_raw_buf = torch._C._dynamo.guards.get_raw_buf
-        extern_kernels.convolution(reinterpret_tensor(primals_1, (64, 3, 7, 7), (147, 49, 7, 1), 0), reinterpret_tensor(primals_2, (64, 1, 1, 1), (1, 1, 1, 1), 0), stride=(1, 1), padding=(3, 3), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=2, stride_w=2)
-        buf0 = reinterpret_tensor(buf0, (1, 64, 56, 56), (1792, 256, 4, 1), 0)
-        extern_kernels.batch_norm(buf0, buf1, buf8, buf9, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf0 = buf0
-        del buf1
-        del buf8
-        del buf9
-        triton_poi_fused_convolution_add_0[grid(1792)](buf0, buf0, 1792, 1, XBLOCK=128)
-        buf1 = buf0
-        del buf0
-        buf0 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 64, 56, 56), (1792, 256, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf5 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf6 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf7 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf10 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf11 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf12 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf13 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_3, (64, 64, 1, 1), (64, 1, 64, 1), 0), reinterpret_tensor(buf1, (1, 64, 56, 56), (1792, 256, 4, 1), 0), stride=(1, 1), padding=(0, 0), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=1, stride_w=1)
-        buf2 = reinterpret_tensor(buf2, (1, 128, 28, 28), (12544, 196, 4, 1), 0)
-        extern_kernels.batch_norm(buf2, buf3, buf10, buf11, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf2 = buf2
-        del buf3
-        del buf10
-        del buf11
-        triton_poi_fused_convolution_add_0[grid(12544)](buf2, buf2, 12544, 1, XBLOCK=128)
-        buf3 = buf2
-        del buf2
-        buf0 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf5 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf10 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf11 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_4, (128, 64, 1, 1), (64, 1, 128, 1), 0), reinterpret_tensor(buf1, (1, 128, 28, 28), (12544, 196, 4, 1), 0), stride=(1, 1), padding=(0, 0), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=2, stride_w=2)
-        buf0 = reinterpret_tensor(buf0, (1, 128, 28, 28), (12544, 196, 4, 1), 0)
-        extern_kernels.batch_norm(buf0, buf1, buf6, buf7, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf0 = buf0
-        del buf1
-        del buf6
-        del buf7
-        triton_poi_fused_convolution_add_0[grid(12544)](buf0, buf0, 12544, 1, XBLOCK=128)
-        buf1 = buf0
-        del buf0
-        buf0 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 128, 28, 28), (12544, 196, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf5 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf10 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf11 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_5, (128, 128, 1, 1), (128, 1, 128, 1), 0), reinterpret_tensor(buf1, (1, 128, 28, 28), (12544, 196, 4, 1), 0), stride=(1, 1), padding=(0, 0), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=1, stride_w=1)
-        buf2 = reinterpret_tensor(buf2, (1, 256, 14, 14), (25088, 392, 4, 1), 0)
-        extern_kernels.batch_norm(buf2, buf3, buf8, buf9, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf2 = buf2
-        del buf3
-        del buf8
-        del buf9
-        triton_poi_fused_convolution_add_0[grid(25088)](buf2, buf2, 25088, 1, XBLOCK=128)
-        buf3 = buf2
-        del buf2
-        buf0 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf5 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_6, (256, 128, 1, 1), (128, 1, 256, 1), 0), reinterpret_tensor(buf1, (1, 256, 14, 14), (25088, 392, 4, 1), 0), stride=(1, 1), padding=(0, 0), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=2, stride_w=2)
-        buf0 = reinterpret_tensor(buf0, (1, 256, 14, 14), (25088, 392, 4, 1), 0)
-        extern_kernels.batch_norm(buf0, buf1, buf4, buf5, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf0 = buf0
-        del buf1
-        del buf4
-        del buf5
-        triton_poi_fused_convolution_add_0[grid(25088)](buf0, buf0, 25088, 1, XBLOCK=128)
-        buf1 = buf0
-        del buf0
-        buf0 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 256, 14, 14), (25088, 392, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf3 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf4 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf5 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf8 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf9 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_7, (256, 128, 3, 3), (384, 12, 3, 1), 0), reinterpret_tensor(buf1, (1, 256, 14, 14), (25088, 392, 4, 1), 0), stride=(1, 1), padding=(1, 1), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=1, stride_w=1)
-        buf2 = reinterpret_tensor(buf2, (1, 512, 7, 7), (25088, 392, 4, 1), 0)
-        extern_kernels.batch_norm(buf2, buf3, buf6, buf7, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf2 = buf2
-        del buf3
-        del buf6
-        del buf7
-        triton_poi_fused_relu_1[grid(25088)](buf2, buf2, 25088, 1, XBLOCK=128)
-        buf3 = buf2
-        del buf2
-        buf0 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf3 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf4 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf5 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_8, (512, 256, 1, 1), (256, 1, 512, 1), 0), reinterpret_tensor(buf1, (1, 512, 7, 7), (25088, 392, 4, 1), 0), stride=(1, 1), padding=(0, 0), dilation=(1, 1), transposed=False, output_padding=(0, 0), groups=1, bias=None, stride_h=2, stride_w=2)
-        buf0 = reinterpret_tensor(buf0, (1, 512, 7, 7), (25088, 392, 4, 1), 0)
-        extern_kernels.batch_norm(buf0, buf1, buf2, buf3, eps=1e-05, training=False, momentum=0.1, cudnn_enabled=True, benchmark=True, fuse_with_relu=True)
-        buf0 = buf0
-        del buf1
-        del buf2
-        del buf3
-        triton_poi_fused_convolution_add_0[grid(25088)](buf0, buf0, 25088, 1, XBLOCK=128)
-        buf1 = buf0
-        del buf0
-        buf0 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf1 = empty_strided_cuda((1, 512, 7, 7), (25088, 392, 4, 1), torch.float32)
-        buf2 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf3 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf4 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf5 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf6 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        buf7 = empty_strided_cuda((1, 1, 1, 1), (1,), torch.float32)
-        extern_kernels.convolution(reinterpret_tensor(primals_9, (512, 512, 1, 1), (512, 1, 512, 1),
+@triton.jit
+def triton_poi_fused_convolution_relu_2(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 8192
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_3(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_4(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_5(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_6(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_7(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_8(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_9(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_10(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_11(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 16384
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_12(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_13(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_14(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_15(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_16(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_17(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_18(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_19(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_20(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_21(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_22(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_23(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 2048
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + x0, xmask, eviction_policy='evict_last')
+    tmp1 = tl.load(in_ptr1 + x3, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x3, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_24(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + (x2 + 512 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_25(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 64
+    tmp0 = tl.load(in_ptr0 + (x2 + 512 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_26(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + (x2 + 1024 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_27(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 128
+    tmp0 = tl.load(in_ptr0 + (x2 + 1024 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_28(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + (x2 + 2048 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_29(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 256
+    tmp0 = tl.load(in_ptr0 + (x2 + 2048 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_30(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + (x2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_31(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK: tl.constexpr):
+    xnumel = 256
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x2 = xindex
+    x0 = xindex % 512
+    tmp0 = tl.load(in_ptr0 + (x2 + 4096 * x0), xmask, eviction_policy=
+        'evict_last')
+    tmp1 = tl.load(in_ptr1 + x2, xmask)
+    tmp2 = tmp0 + tmp1
+    tmp3 = tl.full([1], 0, tl.int32)
+    tmp4 = triton_helpers.maximum(tmp3, tmp2)
+    tl.store(out_ptr0 + x2, tmp4, xmask)
+
+
+@triton.jit
+def triton_poi_fused_convolution_relu_32(in_ptr0, in_ptr1, out_ptr0, xnumel,
+    XBLOCK

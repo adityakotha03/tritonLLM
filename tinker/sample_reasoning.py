@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 BASE_MODEL = "Qwen/Qwen3-8B"
-MODEL_PATH = "tinker://8020e885-8536-5303-abea-5d723fb112a7:train:0/sampler_weights/final"
+MODEL_PATH = "tinker://72fb9baa-da81-50c7-94ba-9f16b7218cff:train:0/sampler_weights/final"
 
 
 def main():
