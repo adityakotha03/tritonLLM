@@ -1,0 +1,10 @@
+{
+    "base_model": "openai/gpt-oss-120b",
+    "qc_model": "openai/gpt-oss-20b",
+    "num_samples": 5000,
+    "renderer_name": "gpt_oss_medium_reasoning",
+    "max_tokens": 4096,
+    "base_model_temperature": 0.2,
+    "qc_model_temperature": 0.1,
+    "num_workers": 8
+}

@@ -1,0 +1,28 @@
+{
+  "api_key": null,
+  "model_name": "gemini-2.5-flash",
+  "dataset": {
+    "name": "GPUMODE/KernelBook",
+    "config": "default",
+    "split": "train",
+    "limit": null,
+    "shuffle": false,
+    "seed": 42
+  },
+  "generation": {
+    "max_new_tokens": 4096,
+    "temperature": 0.25,
+    "top_p": 0.95,
+    "stop_sequences": [
+      "\n```"
+    ]
+  },
+  "runtime": {
+    "num_threads": 8,
+    "prompt_template": "You are analyzing paired implementations of the same tensor kernel. Given the PyTorch reference, explain the design of a Triton kernel that matches it. Focus on input shapes, memory access, tiling, and synchronization. Produce a concise reasoning trace in markdown with bullet points and short paragraphs. Avoid restating code verbatim.\n\nPyTorch reference:\n```python\n{python_code}\n```\n\nExisting Triton implementation:\n```python\n{triton_code}\n```\n\nWrite the reasoning trace:",
+    "output_csv": "dataset_gemini/kernel_traces.csv",
+    "overwrite": false,
+    "save_interval": 200
+  }
+}
+
